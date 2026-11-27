@@ -1,16 +1,18 @@
 """`omlx-reactive-restart-day`: the verify check that the first whole day after the reactive restart deploy held.
 
 `python3 -m agent_tools.hosts.omlx_reactive_restart_day [--state-dir DIR]` reads the restart state
-`DIR/omlx-restart.json` (default `~/.omlx/memory`) for its `since_at`, each line of
+`DIR/omlx-restart.json` (default `~/.omlx/memory`) for its `hold_since_at`, each line of
 `DIR/memory-peaks.jsonl`, the sample lines of `DIR/samples/<day>.jsonl` and the records of
 `DIR/omlx-restarts.jsonl`. It prints one JSON line and exits 0 met, 1 not met, 75 not yet, 2 (stderr
 `omlx-reactive-restart-day: <error>`, nothing on stdout) when the state, a day line, a sample line, a record or
-an event is not a JSON object, or a `since_at`, a sample `at`, a record `at` or a floor kill's `at` is not an
+an event is not a JSON object, or a `hold_since_at`, a sample `at`, a record `at` or a floor kill's `at` is not an
 ISO time.
 
-The target day T is the date of `since_at` plus one day. The first decision that applies wins:
+The target day T is the date of `hold_since_at` plus one day. That is the first sample the hold rule saw, not
+the state's older `since_at`, so a day an older watcher began is never judged by this rule. The first decision
+that applies wins:
 
-1. No state file, or a null `since_at`: `{"verdict": "not_yet", "day": null}`.
+1. No state file, or no `hold_since_at` (a state an older watcher wrote, before the new one has sampled): `{"verdict": "not_yet", "day": null}`.
 2. No day line has `day >= T` (no peaks file counts as none): `not_yet` with `day` T.
 3. No day line has `day == T` but a later one exists: `not_met`, `missing_day`.
 4. `samples/T.jsonl` is missing: `no_samples`.
@@ -27,8 +29,9 @@ The target day T is the date of `since_at` plus one day. The first decision that
 10. The lines of `samples/<T-1>.jsonl` (when present) and of T's file are replayed with the criterion's fixed 25 GiB trigger and
     three samples (`TRIGGER_BYTES`, `SAMPLES`), never the saved limits, merged in time
     order with the records dated T-1 or T (a record sorts after the sample line with the same `at`). A line's
-    figure is `unowned_bytes + compressor_bytes`, None when either is not an integer. None resets the streak
-    and keeps the episode; a figure at or under `trigger_bytes` resets the streak and reopens the episode; a
+    figure is `unowned_bytes + compressor_bytes`, None when either is not an integer. None holds the streak
+    and keeps the episode; a streak whose last figure over the trigger is more than 15 minutes older than the
+    sample (`STALE_AFTER`) is zeroed first; a figure at or under `trigger_bytes` resets the streak and reopens the episode; a
     figure over it adds one to the streak. A sample is due when the streak is at least `samples` and the episode
     is not done. Every due sample on T needs exactly one record with exactly its `at`: none adds to `missing`,
     more than one to `duplicated`. A `restarted` or `interrupted` record marks the episode done; `deferred`
@@ -64,6 +67,7 @@ MIN_SAMPLES = 1296
 # The criterion's own numbers, not the watcher's saved ones: a limit raised after the day cannot excuse it.
 TRIGGER_BYTES = 25 * 1024**3
 SAMPLES = 3
+STALE_AFTER = timedelta(minutes=15)
 OUTCOMES = ("restarted", "deferred", "failed", "interrupted")
 FIGURES = ("available_bytes", "unowned_bytes", "compressor_bytes")
 MET = 0
@@ -89,7 +93,7 @@ def _is_int(value) -> bool:
 
 
 def _read_state(directory: Path) -> date | None:
-    """The target day, None when there is no state or its `since_at` is null."""
+    """The target day, None when there is no state or it has no `hold_since_at` yet."""
     try:
         with (directory / STATE_NAME).open(encoding="utf-8") as handle:
             state = json.load(handle)
@@ -97,11 +101,11 @@ def _read_state(directory: Path) -> date | None:
         return None
     if not isinstance(state, dict):
         raise ValueError(f"{directory / STATE_NAME} is not a JSON object")
-    since = state.get("since_at")
+    since = state.get("hold_since_at")
     if since is None:
         return None
     if not isinstance(since, str):
-        raise ValueError(f"since_at is not an ISO time: {since!r}")
+        raise ValueError(f"hold_since_at is not an ISO time: {since!r}")
     return datetime.fromisoformat(since).date() + timedelta(days=1)
 
 
@@ -160,6 +164,7 @@ def _replay(samples, records, target: date, trigger: int, needed: int) -> tuple[
     logged = Counter(moment for moment, record in records if moment.date() == target)
     lines = {moment for moment, _ in samples}
     streak, done, episode = 0, False, 0
+    last_over = None
     missing = duplicated = 0
     due: set[datetime] = set()
     episodes: set[int] = set()
@@ -167,12 +172,15 @@ def _replay(samples, records, target: date, trigger: int, needed: int) -> tuple[
         if rank == 1:
             done = done or record["outcome"] in ("restarted", "interrupted")
             continue
-        if figure is None:
+        if streak and moment - last_over > STALE_AFTER:
             streak = 0
+        if figure is None:
+            pass
         elif figure <= trigger:
             streak, done, episode = 0, False, episode + 1
         else:
             streak += 1
+            last_over = moment
         if figure is not None and streak >= needed and not done and moment.date() == target:
             due.add(moment)
             episodes.add(episode)

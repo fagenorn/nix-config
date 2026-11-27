@@ -351,7 +351,8 @@ growth is real and the server is idle.
 
 - Trigger: the fresh census's unowned memory plus the compressor is over
   `omlxRestartTriggerGiB`. A sample over it adds one to the streak, a sample at or under it ends the
-  episode, and a sample without a fresh census zeroes the streak and keeps the episode.
+  episode, and a sample without a fresh census holds the streak and keeps the episode. A streak whose
+  last fresh over sample is more than 15 minutes old is zeroed, so a stale reading never restarts oMLX.
 - Episode: one restart per episode. The attempt is due once the streak reaches
   `omlxRestartSamples` and the episode has not restarted oMLX yet.
 - Room: available memory under `omlxRestartRoomGiB` defers the attempt.
