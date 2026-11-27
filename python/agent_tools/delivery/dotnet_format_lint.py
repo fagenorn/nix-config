@@ -33,7 +33,10 @@ and the bytes of `flake.nix`, `flake.lock` and `lib/agent-tools.nix`, the files 
 attribute's evaluation reads. A link there that leads to an executable `bin/dotnet` is
 used and no `nix` runs. Otherwise the lint runs `nix build --out-link <that path>
 --print-out-paths <root>#agent-platform.dotnet-tools` from the root with stdin closed; the
-out-link is a garbage-collector root. The build must print exactly one absolute path whose
+out-link is a garbage-collector root, so after a build every other key-named link in that
+directory is removed and a superseded SDK is no longer one; a link of another name is
+kept, a link already gone is skipped, and a link that cannot be removed is
+`tools_unavailable`. The build must print exactly one absolute path whose
 `bin` holds an executable `dotnet`. A `HOME` that is not absolute, an unreadable key input,
 a cache directory that cannot be created, or any other build outcome prints
 `dotnet-format-lint: tools_unavailable` on stderr and exits 2. An input the attribute
@@ -73,6 +76,7 @@ COMMAND = "dotnet-format-lint"
 TOOLS_ATTRIBUTE = "agent-platform.dotnet-tools"
 KEY_INPUTS = ("flake.nix", "flake.lock", "lib/agent-tools.nix")
 CACHE_PARTS = (".cache", "agent-platform", "dotnet-tools")
+KEY_NAME = re.compile("[0-9a-f]{64}")
 SOURCE_SUFFIXES = (".cs", ".csproj", ".slnx", ".sln")
 SOLUTION_SUFFIXES = (".slnx", ".sln")
 IGNORED_DIRECTORIES = frozenset({"bin", "obj"})
@@ -196,6 +200,26 @@ def cached_tools(link: Path) -> str | None:
     return f"{target}/bin"
 
 
+def prune(cache: Path, keep: str) -> None:
+    """Remove every key-named symlink in `cache` but `keep`, each one a garbage-collector root.
+
+    A link of another name is kept and one already gone is skipped. Any other
+    `OSError` is `tools_unavailable`.
+    """
+    try:
+        with os.scandir(cache) as entries:
+            stale = [entry.name for entry in entries
+                     if entry.is_symlink() and KEY_NAME.fullmatch(entry.name)
+                     and entry.name != keep]
+        for name in stale:
+            try:
+                os.unlink(cache / name)
+            except FileNotFoundError:
+                continue
+    except OSError:
+        raise Refusal("tools_unavailable") from None
+
+
 def tools_directory(root: Path) -> str:
     """The `bin` directory of the .NET tools, cached by key, when it holds an executable `dotnet`."""
     home = os.environ.get("HOME")
@@ -228,6 +252,7 @@ def tools_directory(root: Path) -> str:
     tools = f"{lines[0]}/bin"
     if shutil.which("dotnet", path=tools) is None:
         raise Refusal("tools_unavailable")
+    prune(cache, key)
     return tools
 
 

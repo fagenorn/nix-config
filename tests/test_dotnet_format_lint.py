@@ -12,6 +12,7 @@ import errno
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -453,6 +454,99 @@ class CacheTest(LintCase):
                                  ["dotnet-format-lint: tools_unavailable"])
                 self.assertEqual(read_log(self.nix_log), [])
                 self.assertEqual(read_log(self.dotnet_log), [])
+
+
+STALE_KEY = "0" * 64
+
+
+class PruneTest(LintCase):
+    def key_links(self) -> list[str]:
+        return sorted(p.name for p in self.cache.iterdir()
+                      if p.is_symlink() and re.fullmatch("[0-9a-f]{64}", p.name))
+
+    def change_key_input(self) -> None:
+        with (self.root / "flake.lock").open("a", encoding="utf-8") as handle:
+            handle.write("# changed\n")
+
+    def stale_cache(self) -> None:
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        self.assertEqual(self.run_lint().returncode, 0)
+        os.symlink(out, self.cache / STALE_KEY)
+        self.change_key_input()
+
+    def run_in_process(self, failure: OSError):
+        for log in (self.nix_log, self.dotnet_log):
+            log.unlink(missing_ok=True)
+        out, err = io.StringIO(), io.StringIO()
+        with (mock.patch.dict(os.environ, {
+                  "PATH": f"{self.stubs}{os.pathsep}{os.environ['PATH']}",
+                  "HOME": str(self.home)}),
+              mock.patch("os.unlink", side_effect=failure),
+              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err)):
+            code = main(["--root", str(self.root)])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_build_keeps_only_the_current_keys_link(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        self.assertEqual(self.run_lint().returncode, 0)
+        (first_key,) = self.key_links()
+        (self.cache / "keep.txt").write_text("x\n", "utf-8")
+        os.symlink(out, self.cache / STALE_KEY)
+        self.change_key_input()
+        result = self.run_lint()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(read_log(self.nix_log)), 1)
+        (current,) = self.key_links()
+        self.assertNotIn(current, (first_key, STALE_KEY))
+        self.assertTrue((self.cache / "keep.txt").is_file())
+
+    def test_a_build_keeps_links_whose_names_are_not_keys(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        self.assertEqual(self.run_lint().returncode, 0)
+        names = (f"{'1' * 64}.tmp-1-2", "other")
+        for name in names:
+            os.symlink(out, self.cache / name)
+        self.change_key_input()
+        result = self.run_lint()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(read_log(self.nix_log)), 1)
+        for name in names:
+            self.assertTrue((self.cache / name).is_symlink(), name)
+
+    def test_a_cache_hit_removes_nothing(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        self.assertEqual(self.run_lint().returncode, 0)
+        os.symlink(out, self.cache / STALE_KEY)
+        result = self.run_lint()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(read_log(self.nix_log), [])
+        self.assertTrue((self.cache / STALE_KEY).is_symlink())
+
+    def test_a_failed_prune_is_tools_unavailable(self):
+        self.stale_cache()
+        code, out, err = self.run_in_process(
+            PermissionError(errno.EACCES, os.strerror(errno.EACCES)))
+        self.assertEqual(code, 2, out)
+        self.assertEqual(err.splitlines(), ["dotnet-format-lint: tools_unavailable"])
+        self.assertEqual(out, "")
+        self.assertEqual(read_log(self.dotnet_log), [])
+
+    def test_a_link_another_run_already_removed_is_skipped(self):
+        self.stale_cache()
+        code, out, err = self.run_in_process(
+            FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.splitlines(), ["dotnet-format-lint: passed"])
+        self.assertEqual(err, "")
+        self.assertEqual(len(read_log(self.dotnet_log)), 1)
 
 
 class RootTest(LintCase):
