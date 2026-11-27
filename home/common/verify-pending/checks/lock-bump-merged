@@ -1,0 +1,3 @@
+#!/bin/sh
+# Checks that a lock bump of the fixture merged with green required checks: exit 0 met, 1 not met, 75 not yet, 2 forge error.
+PYTHONPATH=python exec python3 -m agent_tools.console.lock_bump observed "$@"

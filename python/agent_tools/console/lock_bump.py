@@ -14,10 +14,15 @@ after each forge write. A red bump is never merged or closed by the pass before 
 prints one `console: lock_bump <project> <action> <revision> <pull> <issue>` line per step, or one
 `console: lock_bump_failed` line when the pass is refused. `start` runs it in a daemon thread every ten
 minutes until its stop event is set, and that event is the pass's `cancel`.
+
+`python -m agent_tools.console.lock_bump observed --repo O/N` is the evidence check: it finds the latest merged
+`lock-bump-<revision>` pull request of the repository and judges its required contexts as the merge does.
+It prints one JSON line and exits 0 met, 1 not met, 75 when no bump has merged, 2 on a forge error.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -29,8 +34,9 @@ from pathlib import Path
 from typing import NamedTuple, Protocol, TextIO
 
 from agent_tools.console import approve
+from agent_tools.console import lock_bump_forge
 from agent_tools.console.lock_bump_forge import Checks, GitHubBumpForge, OpenBump
-from agent_tools.console.lock_bump_tree import BumpRefused, GitBuilder, branch_for
+from agent_tools.console.lock_bump_tree import BRANCH, BumpRefused, GitBuilder, branch_for
 from agent_tools.delivery import proof_run
 from agent_tools.project_contract import agent_platform
 from agent_tools.system import forge_api
@@ -284,3 +290,44 @@ def start(bumper: Callable[[threading.Event], object], stop: threading.Event,
     thread = threading.Thread(target=run_loop, args=(bumper, stop, seconds), name=LOCK_BUMP_THREAD, daemon=True)
     thread.start()
     return thread
+
+
+def observe(repo: str, *, pages: Callable[[str], list], verdict: Callable[[str, int], Checks]) -> tuple[int, dict]:
+    """The exit code and the printed record of the latest merged bump of `repo`, judged on required contexts."""
+    merged = []
+    for page in pages(f"repos/{repo}/pulls?state=closed&per_page=100"):
+        for pull in page if isinstance(page, list) else []:
+            head = pull.get("head") if isinstance(pull, dict) else None
+            head = head if isinstance(head, dict) else {}
+            source = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+            ref, sha, number = head.get("ref"), head.get("sha"), pull.get("number")
+            if (isinstance(pull.get("merged_at"), str) and isinstance(ref, str) and BRANCH.fullmatch(ref)
+                    and source.get("full_name") == repo and isinstance(sha, str) and approve.COMMIT.fullmatch(sha)
+                    and isinstance(number, int) and not isinstance(number, bool)):
+                merged.append((pull["merged_at"], number))
+    if not merged:
+        return 75, {"pull": None, "state": "not_yet"}
+    number = max(merged)[1]
+    if verdict(repo, number).state == "green":
+        return 0, {"pull": number, "state": "met"}
+    return 1, {"pull": number, "state": "not_met"}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="lock_bump", description="Check that a lock bump merged green.")
+    modes = parser.add_subparsers(dest="mode", required=True)
+    modes.add_parser("observed").add_argument("--repo", required=True, metavar="O/N")
+    args = parser.parse_args(argv)
+    if re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", args.repo) is None:
+        parser.error("--repo is owner/name")
+    try:
+        code, record = observe(args.repo, pages=forge_api.api_pages, verdict=lock_bump_forge.GitHubBumpForge().verdict)
+    except forge_api.ForgeError as error:
+        print(f"lock-bump: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps(record, sort_keys=True, separators=(",", ":")))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
