@@ -83,6 +83,8 @@ refused; reword it or use `git commit -F`.
 A session whose environment holds a non-empty `CLAUDE_READ_ONLY_SHELL` (a role holding `Bash` only as read-only
 shapes) is also refused, read the same way, the whole word `xargs` and `--output` after a `git` word: a rule sees
 neither the arguments `xargs` feeds from stdin nor `--out""put` rebuilt by the shell (`grep -e '--output'` still runs).
+So is, after a `git` word, an option name that holds an expansion, a brace alternative or an escape
+(`--out{p,p}ut`, `--${x:-output}`) and a word that opens with one (`$'\055\055output'`).
 
 Transmitting git invocations
 ----------------------------
@@ -995,6 +997,15 @@ READ_ONLY_SHELL_ENV = "CLAUDE_READ_ONLY_SHELL"
 READ_ONLY_SHELL_PATTERN = re.compile(
     r"(?:(?<![A-Za-z0-9_-])|(?<=[cs])|(?<=\$[0-9!@*]))xargs(?![A-Za-z0-9_-])"
     r"|(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_-])[\s\S]*?--output(?![A-Za-z0-9_-])",
+    re.IGNORECASE | re.ASCII,
+)
+# What the deletion copy cannot recover, read in the raw text only, after a `git` word: an option whose name holds
+# an expansion, a brace alternative or an escape (`--out{p,p}ut`, `--out$@put`, `--${x:-output}`, `--$'\157'utput`),
+# and a word that opens with one (the dashes rebuilt: `$'\055\055output'`, `"${x:--}${x:--}output"`, `-${x:--}output`).
+# Only the name is read, up to `=` or a space, so `--grep='a$'` is not one.
+READ_ONLY_REBUILT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_-])[\s\S]*?"
+    r"(?:--[^\s=]*[$`{}()\\'\"]|(?<!\S)[\"']*-?[\"']*[$`{])",
     re.IGNORECASE | re.ASCII,
 )
 READ_ONLY_SHELL_REFUSAL = (
@@ -3017,8 +3028,10 @@ def detaching_word(command):
 
 
 def read_only_shell_problem(command):
-    """True when `command`, read as `detaching_word` reads it, holds `xargs` or `--output` after a `git` word."""
-    return any(READ_ONLY_SHELL_PATTERN.search(text) for text in detaching_texts(command))
+    """True when `command`, read as `detaching_word` reads it, holds `xargs` or `--output` after a `git` word, or
+    (in the raw text) a `git` option name, or a word's opening, the shell builds by expansion (`READ_ONLY_REBUILT_PATTERN`)."""
+    return (any(READ_ONLY_SHELL_PATTERN.search(text) for text in detaching_texts(command))
+            or READ_ONLY_REBUILT_PATTERN.search(command.replace("\\\n", "")) is not None)
 
 
 def lifecycle_words(command):

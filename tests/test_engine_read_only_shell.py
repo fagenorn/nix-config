@@ -153,9 +153,28 @@ class ReadOnlyShellTest(unittest.TestCase):
             "git log -1 --OUTPUT=l.txt",
             "git diff --output d.patch",
         ]
+        expanded = [  # the shell builds the name from an alternative, an escape or an expansion the deletion copy keeps
+            "git diff --out{p,p}ut=d.patch HEAD~1",
+            "git diff --{output,output}=d.patch HEAD~1",
+            "git log --outp{u,u}t=l.txt -1",
+            "git diff --$'\\157'utput=d.patch HEAD~1",
+            "git diff --out$@put=d.patch HEAD~1",
+            "git diff --${x:-output}=d.patch HEAD~1",
+            "git diff $'\\055\\055output=d.patch' HEAD~1",
+            'git diff "${x:--}${x:--}output=d.patch" HEAD~1',
+            "git diff -${x:--}output=d.patch HEAD~1",
+            "git diff --out${x}put=d.patch HEAD~1",
+        ]
+        for command in expanded:
+            with self.subTest(guard_alone=command):
+                self.assertTrue(GUARD.read_only_shell_problem(command))
+        for command in ("git log --grep='a$' -1", "git log --format=%H -3", "git log --grep=x --oneline",
+                        "git show HEAD:python/x.py", "git log -S '[{]' -- python"):
+            with self.subTest(guard_alone_admitted=command):
+                self.assertFalse(GUARD.read_only_shell_problem(command))
         for name in READ_ONLY_ROLES:
             words = launch_words(name)
-            for command in rebuilt:
+            for command in rebuilt + expanded:
                 with self.subTest(role=name, command=command):
                     self.assertFalse(read_only_admits(command, *words))
             with self.subTest(role=name, admitted="a search for the text"):
