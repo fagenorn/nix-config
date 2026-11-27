@@ -810,6 +810,12 @@ class CarryVerbTest(unittest.TestCase):
         self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", f"picture-input-changed: {self.TOOL}"))
         self.assertEqual(self.posted(), [])
 
+    def test_a_manager_pictured_carry_names_the_screenshot_clock_a_merge_changed(self):
+        clock = "tests/console_screenshot_clock.py"
+        code, out = self.manager_run(("docs/x.md", clock))
+        self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", f"picture-input-changed: {clock}"))
+        self.assertEqual(self.posted(), [])
+
     def test_a_manager_pictured_carry_names_the_own_file_a_merge_changed(self):
         code, out = self.manager_run((self.OWN,))
         self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", f"own-files-touched: {self.OWN}"))

@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import service
+from agent_tools.console import register, service
 
 from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -114,7 +114,7 @@ class StreamTest(unittest.TestCase):
 
     def test_a_registry_change_during_startup_is_not_lost(self):
         support.write_registry(self.registry, support.entries(2))
-        real = service.read_fleet
+        real = register.read_fleet
         calls = []
 
         def wrapper(path):
@@ -124,7 +124,7 @@ class StreamTest(unittest.TestCase):
                 support.write_registry(self.registry, support.entries(3))
             return fleet
 
-        with mock.patch.object(service, "read_fleet", side_effect=wrapper):
+        with mock.patch.object(register, "read_fleet", side_effect=wrapper):
             svc = support.service(self, self.store, self.registry)
         self.assertNotIn(b"owner/p02", svc.view_bytes)
         deadline = time.monotonic() + 2.0

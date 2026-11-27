@@ -54,4 +54,13 @@ rec {
   fseventsdRestartMinutes = 60;
   # Unowned memory (system footprint minus process footprints) over which the watcher alerts.
   unownedAlertGiB = 5;
+  # Unowned plus compressor memory over which the watcher counts a sample toward a reactive oMLX restart.
+  omlxRestartTriggerGiB = 25;
+  # Consecutive samples over the trigger before the watcher asks for the restart.
+  omlxRestartSamples = 3;
+  # Available memory a restart needs, provisional: on 26 Nov
+  # 138 of 160 samples over the trigger had at least 16 GiB free (provisional until more days show it).
+  omlxRestartRoomGiB = 16;
+  # The shortest time between the end of one reactive restart and the next.
+  omlxRestartMinMinutes = 30;
 }
