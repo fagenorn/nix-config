@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from agent_tools.delivery import agnostic_lint
+from agent_tools.delivery.codex_review_effort import EFFORT
 from agent_tools.project_contract import agent_platform
 from agent_tools.skill_lint import working_tree
 
@@ -75,7 +76,7 @@ SHARED_SKILL_MACHINE_TEXT = {
 # JSON fields DIFF-REVIEW.md reads. No guidance sentence is pinned.
 CODEX_COLLABORATION_MACHINE_TEXT = {
     COLLABORATION: (
-        "bindings.commands[review_id].argv", "--model gpt-6.2-astra", "--effort high",
+        "bindings.commands[review_id].argv", "--model gpt-6.2-astra", f"--effort {EFFORT}",
         "--cwd <absolute-worktree> --json", "`error`",
     ),
     DIFF_REVIEW: (
@@ -519,7 +520,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             self.assertNotIn(forbidden, corpus)
         for required in (
             "ResolvedProject", "bindings.workflow.review.code",
-            "bindings.commands", "gpt-6.2-astra", "--effort high",
+            "bindings.commands", "gpt-6.2-astra", f"--effort {EFFORT}",
             "runtime.reasoningEffort", "rawOutput",
         ):
             self.assertIn(required, corpus)
@@ -723,14 +724,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         blocks = re.findall(r"```text\n(.*?)```", self.collaboration, re.S)
         self.assertEqual(blocks, [
             "bindings.commands[review_id].argv \\\n"
-            "  --model gpt-6.2-astra --effort high \\\n"
+            f"  --model gpt-6.2-astra --effort {EFFORT} \\\n"
             "  --cwd <absolute-worktree> --json\n",
         ])
 
     def test_codex_collaboration_validation_pins_the_runtime_model(self):
         text = normalized(self.collaboration)
         self.assertIn(
-            "`runtime.model` `gpt-6.2-astra`, `runtime.reasoningEffort` `high`", text,
+            f"`runtime.model` `gpt-6.2-astra`, `runtime.reasoningEffort` `{EFFORT}`", text,
         )
         evals = json.loads((
             REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/evals/evals.json"
@@ -740,7 +741,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for item in reviewing:
             with self.subTest(eval=item["name"]):
                 self.assertIn(
-                    "runtime.model gpt-6.2-astra, runtime.reasoningEffort high",
+                    f"runtime.model gpt-6.2-astra, runtime.reasoningEffort {EFFORT}",
                     item["expected_output"],
                 )
 
