@@ -19,12 +19,14 @@ public sealed record SolutionGraph(IReadOnlyList<ProjectFile> Projects, IReadOnl
         foreach (var file in SolutionTree.Files(solutionRoot))
         {
             var rel = SolutionTree.Relative(solutionRoot, file);
-            var isProject = file.EndsWith(".csproj", StringComparison.Ordinal);
+            // MSBuild files are matched without regard to case: on a case-insensitive file system
+            // Directory.Build.PROPS is read as Directory.Build.props.
+            var isProject = file.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase);
             // A response file (Directory.Build.rsp, MSBuild.rsp) sets global properties, which override
             // the shared props, so it is refused like any other MSBuild file.
-            var isOther = file.EndsWith(".props", StringComparison.Ordinal)
-                || file.EndsWith(".targets", StringComparison.Ordinal)
-                || file.EndsWith(".user", StringComparison.Ordinal)
+            var isOther = file.EndsWith(".props", StringComparison.OrdinalIgnoreCase)
+                || file.EndsWith(".targets", StringComparison.OrdinalIgnoreCase)
+                || file.EndsWith(".user", StringComparison.OrdinalIgnoreCase)
                 || file.EndsWith(".rsp", StringComparison.OrdinalIgnoreCase);
             if (!isProject && !isOther)
             {

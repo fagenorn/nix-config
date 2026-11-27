@@ -57,6 +57,16 @@ public sealed class SelfStartTests
     [InlineData("var exe = Environment.ProcessPath!; Process.Start(new ProcessStartInfo(exe!));")]
     [InlineData("var exe = Environment.ProcessPath!; using var p = new Process { StartInfo = new(exe) }; p.Start();")]
     [InlineData("var exe = Environment.ProcessPath!; var p = new Process(); p.StartInfo = new() { FileName = exe }; p.Start();")]
+    [InlineData("if (Environment.ProcessPath is { } exe) { Process.Start(exe); }")]
+    [InlineData("if (Environment.ProcessPath is string exe) { Process.Start(exe); }")]
+    [InlineData("if (Environment.ProcessPath is var exe && exe is not null) { Process.Start(exe); }")]
+    [InlineData("if (Environment.ProcessPath is { Length: > 0 } exe) { Process.Start(new ProcessStartInfo(exe)); }")]
+    [InlineData("var self = Assembly.GetEntryAssembly()!.Location; Process.Start(\"dotnet\", $\"{self} commands\");")]
+    [InlineData("var self = Assembly.GetEntryAssembly()!.Location; Process.Start(\"dotnet\", self + \" commands\");")]
+    [InlineData("var self = Environment.ProcessPath!; Process.Start(self + \" commands\");")]
+    [InlineData("var self = Environment.ProcessPath!; Process.Start(Path.Combine(\"bin\", self));")]
+    [InlineData("var self = Assembly.GetEntryAssembly()!.Location; var line = $\"{self} commands\"; Process.Start(\"dotnet\", line);")]
+    [InlineData("var self = Environment.ProcessPath!; var info = new ProcessStartInfo { FileName = $\"{self}\" }; Process.Start(info);")]
     public void StartingTheToolsOwnBinaryIsAViolation(string source)
     {
         Assert.Equal(new[] { OwnBinary }, ViolationsOfHostsSource(source));
@@ -141,6 +151,46 @@ public sealed class SelfStartTests
     {
         var source = "var self = new ProcessStartInfo(Environment.ProcessPath!); var info = new ProcessStartInfo(\"git\"); "
             + "using var p = new Process { StartInfo = info }; p.Start();";
+
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void ABoundPathThatStartsAnotherProgramIsNoViolation()
+    {
+        var source = "if (Environment.ProcessPath is { } self) { Log(self); } if (Lookup() is { } git) { Process.Start(git); }";
+
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void AnOwnPathNamedOnlyInsideAStringLiteralIsNoViolation()
+    {
+        var source = "var self = Environment.ProcessPath!; Process.Start(\"git\", \"self {self} status\");";
+
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void AnOwnPathInsideAnEscapedBraceIsNoViolation()
+    {
+        var source = "var self = Environment.ProcessPath!; Process.Start(\"git\", $\"{{self}} status\");";
+
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void AnExpressionOfAnotherProgramBesideTheOwnPathIsNoViolation()
+    {
+        var source = "var self = Environment.ProcessPath!; var dir = \"bin\"; Process.Start(Path.Combine(dir, \"git\"));";
+
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void SelfReferencingAssignmentsEndWithoutBlowingUp()
+    {
+        var source = "var a = a + a; var b = a + a; var c = b + b; var d = c + c; var e = d + d; Process.Start(e + e);";
 
         Assert.Empty(ViolationsOfHostsSource(source));
     }

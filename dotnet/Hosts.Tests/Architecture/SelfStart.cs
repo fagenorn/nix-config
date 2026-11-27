@@ -20,6 +20,7 @@ public static class SelfStart
     private static readonly Regex StaticLaunch = new(@"\bProcess\s*\.\s*Start\s*\(");
     private static readonly Regex InstanceLaunch = new(@"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*Start\s*\(\s*\)");
     private static readonly Regex Identifier = new(@"^[A-Za-z_][A-Za-z0-9_]*$");
+    private static readonly Regex Token = new(@"(?<![.\w])[A-Za-z_]\w*");
     private static readonly Regex NamedArgument = new(@"^([A-Za-z_][A-Za-z0-9_]*)\s*:(?!:)(.*)$", RegexOptions.Singleline);
     // A target-typed `new(...)` handed to a launch or assigned to a StartInfo can only build a start info.
     private static readonly Regex TargetTypedNew = new(@"^new\s*[({]");
@@ -286,26 +287,159 @@ public static class SelfStart
         return position < text.Length && text[position] == '\'' ? position + 1 : start;
     }
 
-    // Follows a chain of single assignments back from the launch. Each step reads only text before
-    // the assignment it came from, so the chain ends even when a variable is assigned from itself.
+    // Follows a chain of bindings back from the launch: the expression itself first, then, joined
+    // by spaces, what every variable inside it was bound to. Each step reads only text before the
+    // binding it came from and a binding is followed once, so the walk ends even when a variable
+    // is bound from itself and stays linear when bindings share their variables.
     private static string Resolve(string expression, string text, int launchIndex)
     {
+        var collected = new List<string>();
+        Follow(expression, text, launchIndex, new HashSet<int>(), collected);
+        return string.Join(' ', collected);
+    }
+
+    private static void Follow(string expression, string text, int before, HashSet<int> seen, List<string> collected)
+    {
         var current = Unwrap(expression);
-        var before = launchIndex;
-        while (Identifier.IsMatch(current))
+        while (Identifier.IsMatch(current) && Binding(text, current, before) is { } binding && seen.Add(binding.Index))
         {
-            var assignment = LastAssignment(text, $@"\b{Regex.Escape(current)}", before);
-            if (assignment is null)
+            current = Unwrap(binding.Value);
+            before = binding.Index;
+        }
+
+        collected.Add(current);
+        if (Identifier.IsMatch(current))
+        {
+            return;
+        }
+
+        foreach (var name in Names(current).Distinct())
+        {
+            if (Binding(text, name, before) is not null)
+            {
+                Follow(name, text, before, seen, collected);
+            }
+        }
+    }
+
+    // The identifiers an expression reads: those outside string literals and, in an interpolated
+    // string, those inside its holes. A member name after a dot is not a variable.
+    private static IEnumerable<string> Names(string expression)
+    {
+        var code = new StringBuilder();
+        var index = 0;
+        while (index < expression.Length)
+        {
+            if (expression[index] != '"')
+            {
+                code.Append(expression[index]);
+                index++;
+                continue;
+            }
+
+            var end = StringEnd(expression, index);
+            if (IsInterpolated(expression, index))
+            {
+                code.Append(' ').Append(Holes(expression[index..end]));
+            }
+
+            code.Append(' ');
+            index = end;
+        }
+
+        return Token.Matches(code.ToString()).Select(match => match.Value);
+    }
+
+    private static bool IsInterpolated(string text, int quote)
+    {
+        for (var back = quote - 1; back >= 0 && text[back] is '@' or '$'; back--)
+        {
+            if (text[back] == '$')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string Holes(string literal)
+    {
+        var holes = new StringBuilder();
+        for (var index = 0; index < literal.Length; index++)
+        {
+            if (literal[index] != '{')
+            {
+                continue;
+            }
+
+            if (index + 1 < literal.Length && literal[index + 1] == '{')
+            {
+                index++;
+                continue;
+            }
+
+            var end = Cut(literal, index + 1, string.Empty);
+            holes.Append(' ').Append(literal, index + 1, end - index - 1);
+            index = end;
+        }
+
+        return holes.ToString();
+    }
+
+    // What a name was last bound to before a point: an assignment, or a pattern that declares it
+    // (`value is { } name`, `value is string name`), whose value is the matched expression.
+    private static (string Value, int Index)? Binding(string text, string name, int before)
+    {
+        var escaped = Regex.Escape(name);
+        var assigned = LastAssignment(text, $@"\b{escaped}", before);
+        var pattern = Regex
+            .Matches(text[..before], $@"\bis\s+(?:\{{[^{{}}]*\}}\s*|[A-Za-z_][\w.<>?\[\]]*\s+){escaped}\b")
+            .LastOrDefault();
+        if (pattern is null)
+        {
+            return assigned;
+        }
+
+        return assigned is { } found && found.Index > pattern.Index ? found : (Subject(text, pattern.Index), pattern.Index);
+    }
+
+    // The expression a pattern tests: the text before `is`, back to the nearest separator that is
+    // not inside brackets.
+    private static string Subject(string text, int isIndex)
+    {
+        var depth = 0;
+        var start = isIndex;
+        while (start > 0)
+        {
+            var character = text[start - 1];
+            if (character is ')' or ']')
+            {
+                depth++;
+            }
+            else if (character is '(' or '[')
+            {
+                if (depth == 0)
+                {
+                    break;
+                }
+
+                depth--;
+            }
+            else if (depth == 0 && IsSeparator(text, start - 1))
             {
                 break;
             }
 
-            current = Unwrap(assignment.Value.Value);
-            before = assignment.Value.Index;
+            start--;
         }
 
-        return current;
+        return text[start..isIndex].Trim();
     }
+
+    private static bool IsSeparator(string text, int index) =>
+        text[index] is ';' or ',' or '{' or '}' or '=' or ':' or '&' or '|'
+        || (text[index] == '?' && !(index + 1 < text.Length && text[index + 1] is '.' or '['));
 
     // Drops what leaves a value's identity alone: surrounding whitespace, a null-forgiving
     // operator and enclosing parentheses.

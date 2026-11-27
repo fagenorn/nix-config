@@ -303,6 +303,9 @@ public sealed class ReferenceGraphTests
     [InlineData("System/Directory.Build.rsp")]
     [InlineData("MSBuild.rsp")]
     [InlineData("directory.build.RSP")]
+    [InlineData("System/Directory.Build.PROPS")]
+    [InlineData("System/Directory.Build.Targets")]
+    [InlineData("System/Directory.Build.USER")]
     public void AResponseFileIsAViolation(string path)
     {
         using var planted = new PlantedSolution();
