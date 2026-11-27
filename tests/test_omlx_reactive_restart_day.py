@@ -160,6 +160,31 @@ class RestartDayTest(unittest.TestCase):
         self.healthy_target(over=("10:00", "10:01", "10:02"))
         self.assertNotMet("episode_unlogged", missing=1)
 
+    def blank_target(self, over, blank, records=()):
+        """The target day with the minutes in `blank` lacking a census (null figures)."""
+        self.healthy_target(over=over, records=records)
+        lines = minute_lines(TARGET, over=over)
+        for line in lines:
+            if datetime.fromisoformat(line["at"]).strftime("%H:%M") in blank:
+                line["unowned_bytes"] = None
+        self.write_samples(TARGET, lines)
+
+    def test_census_less_samples_hold_the_streak_for_fifteen_minutes(self):
+        over = ("10:00", "10:05", "10:10")
+        blank = ("10:01", "10:02", "10:03", "10:04", "10:06", "10:07", "10:08", "10:09")
+        with self.subTest("three fresh samples within fifteen minutes need a record"):
+            self.blank_target(over, blank)
+            self.assertNotMet("episode_unlogged", missing=1)
+        with self.subTest("and are met with one"):
+            self.blank_target(over, blank, records=[record("2026-11-28T10:10:00+00:00")])
+            self.assertMet(episodes=1, restarts=1)
+        with self.subTest("a stretch over fifteen minutes zeroes the streak"):
+            self.blank_target(("10:00", "10:01", "10:20", "10:21"), tuple(f"10:{m:02d}" for m in range(2, 20)))
+            self.assertMet(episodes=0)
+        with self.subTest("a fresh sample at the line ends the episode"):
+            self.blank_target(("10:00", "10:01", "10:04", "10:05"), ("10:03",))
+            self.assertMet(episodes=0)
+
     def test_every_retried_attempt_needs_its_own_record(self):
         over = ("10:00", "10:01", "10:02", "10:03", "10:04")
         deferred, restarted = "2026-11-28T10:02:00+00:00", "2026-11-28T10:03:00+00:00"

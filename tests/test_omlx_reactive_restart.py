@@ -136,11 +136,12 @@ class ReactiveRestartTest(RecordsCase):
     def test_a_new_episode_inside_thirty_minutes_waits_for_the_gap(self):
         self.over_at(at("12:00"), at("12:01"), at("12:02"))
         self.over_at(at("12:03"), unowned=UNDER)
-        self.over_at(at("12:04"), at("12:05"), at("12:06"), at("12:31"))
+        self.over_at(at("12:04"), at("12:05"), at("12:06"), at("12:20"), at("12:31"))
         self.assertEqual(len(self.calls()), 1)
-        first, second = self.records()[1:]
+        first, middle, second = self.records()[1:]
         self.assertEqual((first["outcome"], first["at"]), ("deferred", at("12:06")))
         self.assertIn("4 minutes", first["reason"])
+        self.assertEqual((middle["outcome"], middle["at"]), ("deferred", at("12:20")))
         self.assertEqual((second["outcome"], second["at"]), ("deferred", at("12:31")))
         self.assertIn("29 minutes", second["reason"])
         self.assertIn("under 30", second["reason"])
@@ -159,12 +160,13 @@ class ReactiveRestartTest(RecordsCase):
         self.over_at(at("12:03"))
         self.assertEqual(len(self.calls()), 1)
 
-    def test_a_sample_without_a_fresh_census_breaks_the_row(self):
+    def test_a_sample_without_a_fresh_census_holds_the_row(self):
         self.over_at(at("12:00"), at("12:01"))
         self.put_census(census(at="2026-11-24T11:50:00", unowned_bytes=OVER))
         self.sample_at(at("12:02"))
-        self.over_at(at("12:03"))
         self.assertEqual(self.calls(), [])
+        self.over_at(at("12:03"))
+        self.assertEqual(self.calls(), ["--reactive"])
 
     def test_a_figure_exactly_at_the_line_is_not_over_it(self):
         self.over_at(at("12:00"), at("12:01"), at("12:02"), unowned=AT_LINE)
@@ -338,6 +340,49 @@ class ReactiveStepTest(unittest.TestCase):
 
     def held(self):
         return json.loads((self.dir / self.m.RESTART_STATE_NAME).read_text())
+
+    def run_clocks(self, *steps):
+        """Step each `(clock, unowned)`; a `unowned` of None is a sample without a fresh census."""
+        for clock, unowned in steps:
+            self.go(clock, unowned=unowned)
+
+    def test_three_fresh_over_samples_split_by_census_less_ones_within_fifteen_minutes_give_one_attempt(self):
+        self.run_clocks(("12:00", OVER), ("12:01", None), ("12:07", None), ("12:08", OVER), ("12:14", None))
+        self.assertEqual(self.gate_calls, [])
+        self.run_clocks(("12:22", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+        [record] = self.records()
+        self.assertEqual((record["outcome"], record["at"], record["streak"]), ("restarted", at("12:22"), 3))
+
+    def test_a_census_less_stretch_over_fifteen_minutes_zeroes_the_streak(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:10", None), ("12:17", None), ("12:18", OVER),
+                        ("12:19", OVER))
+        self.assertEqual(self.gate_calls, [])
+        self.assertEqual(self.held()["streak"], 2)
+        self.run_clocks(("12:20", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+
+    def test_a_fresh_sample_after_a_gap_over_fifteen_minutes_starts_the_streak_again(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:17", OVER), ("12:18", OVER))
+        self.assertEqual(self.gate_calls, [])
+        self.run_clocks(("12:19", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+
+    def test_a_gap_of_exactly_fifteen_minutes_still_holds_the_streak(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:16", None), ("12:16", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+
+    def test_a_fresh_sample_at_or_under_the_line_ends_the_episode_across_census_less_samples(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:02", UNDER), ("12:03", None), ("12:04", OVER),
+                        ("12:05", OVER))
+        self.assertEqual(self.gate_calls, [])
+        self.assertEqual(self.held()["streak"], 2)
+
+    def test_a_census_less_sample_keeps_a_restarted_episode_closed(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:02", OVER), ("12:03", None))
+        for clock in ("12:40", "12:41", "12:42"):
+            self.go(clock)
+        self.assertEqual(len(self.gate_calls), 1)
 
     def test_a_timed_out_gate_is_ended_with_its_children(self):
         script = self.dir / "slow"

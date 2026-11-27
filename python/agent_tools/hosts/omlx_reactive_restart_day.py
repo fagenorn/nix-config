@@ -27,8 +27,9 @@ The target day T is the date of `since_at` plus one day. The first decision that
 10. The lines of `samples/<T-1>.jsonl` (when present) and of T's file are replayed with the criterion's fixed 25 GiB trigger and
     three samples (`TRIGGER_BYTES`, `SAMPLES`), never the saved limits, merged in time
     order with the records dated T-1 or T (a record sorts after the sample line with the same `at`). A line's
-    figure is `unowned_bytes + compressor_bytes`, None when either is not an integer. None resets the streak
-    and keeps the episode; a figure at or under `trigger_bytes` resets the streak and reopens the episode; a
+    figure is `unowned_bytes + compressor_bytes`, None when either is not an integer. None holds the streak
+    and keeps the episode; a streak whose last figure over the trigger is more than 15 minutes older than the
+    sample (`STALE_AFTER`) is zeroed first; a figure at or under `trigger_bytes` resets the streak and reopens the episode; a
     figure over it adds one to the streak. A sample is due when the streak is at least `samples` and the episode
     is not done. Every due sample on T needs exactly one record with exactly its `at`: none adds to `missing`,
     more than one to `duplicated`. A `restarted` or `interrupted` record marks the episode done; `deferred`
@@ -64,6 +65,7 @@ MIN_SAMPLES = 1296
 # The criterion's own numbers, not the watcher's saved ones: a limit raised after the day cannot excuse it.
 TRIGGER_BYTES = 25 * 1024**3
 SAMPLES = 3
+STALE_AFTER = timedelta(minutes=15)
 OUTCOMES = ("restarted", "deferred", "failed", "interrupted")
 FIGURES = ("available_bytes", "unowned_bytes", "compressor_bytes")
 MET = 0
@@ -160,6 +162,7 @@ def _replay(samples, records, target: date, trigger: int, needed: int) -> tuple[
     logged = Counter(moment for moment, record in records if moment.date() == target)
     lines = {moment for moment, _ in samples}
     streak, done, episode = 0, False, 0
+    last_over = None
     missing = duplicated = 0
     due: set[datetime] = set()
     episodes: set[int] = set()
@@ -167,12 +170,15 @@ def _replay(samples, records, target: date, trigger: int, needed: int) -> tuple[
         if rank == 1:
             done = done or record["outcome"] in ("restarted", "interrupted")
             continue
-        if figure is None:
+        if streak and moment - last_over > STALE_AFTER:
             streak = 0
+        if figure is None:
+            pass
         elif figure <= trigger:
             streak, done, episode = 0, False, episode + 1
         else:
             streak += 1
+            last_over = moment
         if figure is not None and streak >= needed and not done and moment.date() == target:
             due.add(moment)
             episodes.add(episode)
