@@ -9,6 +9,12 @@ costs one more activation, a restart that does not wait can cut off a running re
 it is removed only by a restart that succeeded, so a deferral and a failure both keep it.
 A reason starting with `launchd plist changed: ` is applied by `--reload-bin` (an unload and load
 of the job) instead of a kill, because a kill only relaunches the job definition launchd holds.
+The kill is given the uid of `--server-user`, the user the server runs as, never the caller's, so
+root through sudo signals the server's processes. Its exit 1 means it matched no server process: that
+is reported as nothing restarted and keeps the marker, and exits 1 unless `/health` found the server
+down (a stopped server has nothing to end, and launchd starts it on the new code). A caller that
+cannot read the server's private state directory (another account without sudo) is refused with a
+message naming the server's user, before any kill.
 
 `--reactive` is the gate for a restart nobody scheduled: it needs no marker, reads the API key from the
 first line of stdin and asks the authenticated `/api/status` for the requests in flight. It restarts only
@@ -24,6 +30,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import pwd
 import subprocess
 import sys
 import urllib.error
@@ -48,6 +55,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 STATUS_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
 UNRECORDED = "unrecorded change"
 RELOAD_PREFIX = "launchd plist changed: "
+NOTHING_MATCHED = 1
+SERVER_DOWN = "server down"
 
 
 def read_reasons(marker):
@@ -79,11 +88,11 @@ def loaded_count(body):
 
 
 def classify(url):
-    """Return None when the server may be restarted, else why it must wait."""
+    """Return None or SERVER_DOWN when the server may be restarted, else why it must wait."""
     try:
         status, raw = read_health(url)
         if status is None:
-            return None
+            return SERVER_DOWN
         body = json.loads(raw)
     except (OSError, ValueError, http.client.HTTPException) as error:
         return f"server state unknown: {error}"
@@ -99,10 +108,22 @@ def classify(url):
     return f"server state unknown: status {status} with an unexpected body"
 
 
-def restart(restart_bin, reload_bin, marker, reasons):
+def restart(restart_bin, reload_bin, server_user, down, marker, reasons):
     reloading = any(reason.startswith(RELOAD_PREFIX) for reason in reasons)
     verb, done = ("reload", "reloaded its launchd job") if reloading else ("restart", "restarted")
-    returncode = subprocess.run([reload_bin if reloading else restart_bin]).returncode
+    if reloading:
+        returncode = subprocess.run([reload_bin]).returncode
+    else:
+        try:
+            uid = pwd.getpwnam(server_user).pw_uid
+        except KeyError:
+            print(f"oMLX: restart failed (no user {server_user}); .restart-needed retained", file=sys.stderr)
+            return 1
+        returncode = subprocess.run([restart_bin, str(uid)]).returncode
+        if returncode == NOTHING_MATCHED:
+            kept = "; .restart-needed retained for the next activation" if marker.exists() else ""
+            print(f"oMLX: nothing was restarted (no omlx-server process of user {server_user}){kept}", file=sys.stderr)
+            return 0 if down else 1
     if returncode != 0:
         print(
             f"oMLX: {verb} failed (exit {returncode}); .restart-needed retained for the next activation",
@@ -233,6 +254,7 @@ def main(argv=None):
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--restart-bin", required=True)
     parser.add_argument("--reload-bin", required=True)
+    parser.add_argument("--server-user", help="the user the oMLX server runs as (required without --reactive)")
     parser.add_argument("--health-url", default="http://127.0.0.1:8000/health")
     parser.add_argument("--status-url", default="http://127.0.0.1:8000/api/status")
     parser.add_argument("--pinned-model", action="append", default=[])
@@ -250,13 +272,21 @@ def main(argv=None):
             return DEFERRED
         return restart_reactive(args.restart_bin)
 
+    if args.server_user is None:
+        parser.error("--server-user is required without --reactive")
+    if not os.access(args.state_dir, os.R_OK | os.X_OK):
+        print(
+            f"oMLX: cannot read {args.state_dir}; run omlx-restart as {args.server_user} or with sudo",
+            file=sys.stderr,
+        )
+        return 1
     marker = args.state_dir / ".restart-needed"
     if not marker.exists() and not args.now:
         return 0
     reasons = read_reasons(marker)
     why = None if args.now else classify(args.health_url)
-    if why is None:
-        return restart(args.restart_bin, args.reload_bin, marker, reasons)
+    if why in (None, SERVER_DOWN):
+        return restart(args.restart_bin, args.reload_bin, args.server_user, why == SERVER_DOWN, marker, reasons)
     print(
         f"oMLX: restart deferred ({why}); pending: {'; '.join(reasons)}. "
         "Apply it with omlx-restart --now when the server may drop its requests.",
