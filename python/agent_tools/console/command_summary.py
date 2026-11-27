@@ -29,8 +29,8 @@ function eval source . { } [[ ]]`.
 
 Standard input is a script unless a known plain-data reader takes it. One closed allowlist names the
 readers of data (`cat tee head tail wc sort uniq cut tr grep` without `-f`, `jq yq less base64 gzip` and
-their close kin, `git`); `xargs`, a wrapper (`sudo`, `env`) and every program not on it are not on it, named
-in a table or not. Standard input that reaches any other program from a here-document, a here-string or a
+their close kin); `git`, `xargs`, a wrapper (`sudo`, `env`) and every program not on it are not on it,
+named in a table or not. Standard input that reaches any other program from a here-document, a here-string or a
 pipe is a script that program may run, whatever options or operands it is given (`awk -f -`,
 `sed -f /dev/stdin`, `pwsh -Command -`): the card shows its script line, named by the program word as
 written. The one exception is a shell given `-c` code and no `s` in its short options, whose input is data.
