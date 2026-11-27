@@ -18,7 +18,10 @@ previous sample, in this order (every event is a JSON object whose `kind` names 
 5. Finished verify runs, the lines the verify-slot history gained: `verify_run`, one per run that held a
    slot, in history order: `{"kind", "repository", "command", "exit", "held_from", "held_until"}`, where
    `held_from` is the run's `started` plus its `waited_seconds` and `held_until` is `held_from` plus its
-   `held_seconds`, both ISO 8601 in UTC (`+00:00`).
+   `held_seconds`, both ISO 8601 in UTC (`+00:00`), then `tree_peak_bytes` and `tree_peak_at`, the run's
+   own largest reading of its command's tree and when it was read (ISO 8601 in UTC), which `verify-slot run`
+   wrote into its history line (both null for a line without them). A run is recorded even when it started
+   and ended between two samples, because the line is read after the fact.
 6. Floor kills (`floor_kill`, appended by the watcher from the floor record's new `recent` entries):
    `{"kind", "at", "reason", "owner", "root_pid", "signals", "tree_gib"}`.
 
@@ -155,12 +158,15 @@ def verify_events(runs: list[dict]) -> list[dict]:
         try:
             held_from = _started(run["started"]) + timedelta(seconds=run["waited_seconds"])
             held_until = held_from + timedelta(seconds=run["held_seconds"])
+            peak_at = None if run.get("tree_peak_at") is None else _started(run["tree_peak_at"])
         except (ValueError, OverflowError):
             continue
         events.append({
             "kind": "verify_run", "repository": run["repository"], "command": run["command"], "exit": run["exit"],
             "held_from": held_from.isoformat(),
             "held_until": held_until.isoformat(),
+            "tree_peak_bytes": run.get("tree_peak_bytes"),
+            "tree_peak_at": None if peak_at is None else peak_at.isoformat(),
         })
     return events
 

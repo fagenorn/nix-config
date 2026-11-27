@@ -259,6 +259,8 @@ agent-workflow-tests *args:
     tests/test_omlx_reactive_restart.py \
     tests/test_omlx_memory_events.py \
     tests/test_omlx_memory_census_day.py \
+    tests/test_omlx_memory_verify_trees.py \
+    tests/test_omlx_memory_verify_day.py \
     tests/test_omlx_reactive_restart_day.py \
     tests/test_memory_floor.py \
     tests/test_memory_floor_priority.py \
@@ -361,6 +363,7 @@ agent-workflow-tests *args:
     tests/test_verify_slot_short_lane.py \
     tests/test_verify_slot_timeouts.py \
     tests/test_verify_queue.py \
+    tests/test_verify_tree.py \
     tests/test_verification_command.py \
     tests/test_touched_tests.py \
     tests/test_console_event_log.py \
