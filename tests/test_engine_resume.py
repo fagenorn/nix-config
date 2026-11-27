@@ -426,6 +426,20 @@ class ResumeTest(unittest.TestCase):
         record = json.loads((run / "sessions/draft.1.continue-3.json").read_text())
         self.assertEqual([d["tool_input"]["command"] for d in record["denials"]], ["rm x"])
 
+    def test_a_denial_reask_after_a_miss_cut_short_names_the_miss_resumes_denied_call(self):
+        log = install_answers(self.project, [
+            {"stdout": str(RESULT_MISSING), "exit": 0, "account": "p1"},
+            self.denying("git log | head"), self.hang(), self.denying("rm x", "toolu_02")])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 3)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        self.assertEqual(len(self.records(log)), 4)
+        self.assertLess(line["detail"].index(repr("git log | head")),
+                        line["detail"].index(repr("rm x")))
+
     def test_a_second_interruption_resumes_again_under_the_next_attempt(self):
         log = install_answers(self.project, [self.hang(), self.hang(), self.normal()])
         procedures = one_step(self.project)

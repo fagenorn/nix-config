@@ -363,12 +363,15 @@ def asked_calls(sessions: Path, name: str, visit: int) -> tuple[str, ...] | None
     """The calls of the launch a visit's denial re-ask was about, None when the visit made no re-ask."""
     if not (sessions / f"{name}.{visit}.denied.prompt.md").exists():
         return None
-    try:
-        document = json.loads((sessions / f"{name}.{visit}.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ()
-    denials = document.get("denials") if isinstance(document, dict) else None
-    return calls_of(denials) if isinstance(denials, list) else ()
+    for suffix in (".resume", ""):  # a miss re-ask's launch stores `.resume`; the denied one is the latest
+        try:
+            document = json.loads((sessions / f"{name}.{visit}{suffix}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        denials = document.get("denials") if isinstance(document, dict) else None
+        if isinstance(denials, list) and denials:
+            return calls_of(denials)
+    return ()
 
 
 def summed(launched: Launched, reading: Reading,
