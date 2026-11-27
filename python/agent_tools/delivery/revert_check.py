@@ -42,10 +42,14 @@ base (it would lead out of the scratch), and a new test's top-level directory th
 shadow it. Each new test then runs once as `python -m unittest <id>` with the scratch checkout as the
 working directory, no standard stream inherited, in its own session behind a small watcher that kills
 the session when the checker dies; the guard and the watcher are given the checker's pid, so a checker
-that dies before they start is noticed too; at that death, and after `TEST_SECONDS`, every process below the
-watcher is killed by its parent links (a service of a session of its own included) and then the watcher's group.
+that dies before they start is noticed too; at that death, after `TEST_SECONDS` and once the test has ended,
+every process below the watcher is killed by its parent links (a service of a session of its own included), then
+every process whose launch environment carries the test's random `REVERT_CHECK_TOKEN` (a daemon handed to init by
+a double fork keeps it; read from `/proc` on Linux and `ps -E` on macOS, same user only), and then the watcher's
+group. A process that clears its environment and also leaves the parent links escapes, and nothing contains it.
 Where the host has `sandbox-exec` (macOS) or `bwrap` (Linux) and it starts, the test runs under it so that
-nothing below the run's worktree, its git directory or the repository's common git directory can be written to
+nothing below the run's worktree, its git directory, the repository's common git directory or any worktree
+`git worktree list` names (the main checkout, which holds the other runs' worktrees, included) can be written to
 (the scratch directory still can); a host where it cannot start runs the test unsealed. Exit 0 is still passing, any other
 exit or a timeout is not; a timeout adds `new tests stopped at the <n> s limit: <ids>` to `reason`, so a test
 the limit interrupted is told from one whose assertion failed. The tests' `PYTHONPATH` is the checkout, then `<checkout>/<D>` for each
@@ -81,6 +85,7 @@ import inspect
 import json
 import os
 import posixpath
+import secrets
 import shutil
 import signal
 import subprocess
@@ -98,6 +103,7 @@ GIT_SECONDS = 120
 WATCH_SECONDS = 0.1
 TEST_PYTHON = sys.executable
 HOLDER_PREFIX = "revert-check-"
+TOKEN_ENV = "REVERT_CHECK_TOKEN"
 
 
 def force_remove(path):
@@ -147,8 +153,44 @@ for _ in range(100):
     time.sleep(%s)
 """ % (HOLDER_PREFIX, WATCH_SECONDS, WATCH_SECONDS)
 
-def descendants(root):
-    """The pids of every process below `root` by parent links, whatever session or group each one is in."""
+def tagged(token):
+    """The pids of the processes whose environment, as they were launched, carried `TOKEN_ENV=<token>`.
+
+    A daemon (a double fork) is handed to init and no parent link reaches it, but it keeps the environment of
+    the test that started it. Only processes of the same user can be read; one that cleared its environment
+    first escapes."""
+    needle = TOKEN_ENV + "=" + token
+    found = set()
+    if not token:
+        return found
+    if sys.platform.startswith("linux"):
+        try:
+            names = [name for name in os.listdir("/proc") if name.isdigit()]
+        except OSError:
+            return found
+        for name in names:
+            try:
+                with open("/proc/" + name + "/environ", "rb") as handle:
+                    if needle.encode() in handle.read().split(b"\0"):
+                        found.add(int(name))
+            except OSError:
+                pass
+        return found
+    try:
+        listing = subprocess.run(["ps", "-A", "-E", "-ww", "-o", "pid=,command="], capture_output=True,
+                                 text=True, errors="replace", timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return found
+    for line in listing.splitlines():
+        pid, _, rest = line.strip().partition(" ")
+        if pid.isdigit() and needle in rest.split():
+            found.add(int(pid))
+    return found
+
+
+def descendants(root, token=""):
+    """The pids of every process below `root` by parent links, whatever session or group each one is in, and
+    every other process `tagged(token)` finds (`root` itself never)."""
     try:
         listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
@@ -164,17 +206,18 @@ def descendants(root):
             if child not in found:
                 found.add(child)
                 pending.append(child)
-    return found
+    return (found | tagged(token)) - {root}
 
 
-def kill_tree(root):
-    """Kill every process below `root`, a service in a session of its own included, then `root`'s group.
+def kill_tree(root, token=""):
+    """Kill every process below `root` (and every one tagged with `token`), a service in a session of its own
+    or a daemon handed to init included, then `root`'s group.
 
     The descendants are stopped round by round until a round finds none new (a stopped process forks nothing)
     and only then killed, so none is reparented out of reach first."""
     stopped = set()
     for _ in range(20):
-        fresh = descendants(root) - stopped
+        fresh = descendants(root, token) - stopped
         if not fresh:
             break
         for pid in fresh:
@@ -199,13 +242,13 @@ def kill_tree(root):
 # the checker is gone, kills every process below it. When it cannot start the test it writes why to its own
 # standard error and exits 1, and nothing else of it ever reaches that stream, so a message there is a launch
 # error and never a test's outcome.
-WATCHER = "import json, os, signal, subprocess, sys, threading, time\n" + inspect.getsource(
-    descendants) + inspect.getsource(kill_tree) + """
+WATCHER = ("import json, os, signal, subprocess, sys, threading, time\nTOKEN_ENV = " + repr(TOKEN_ENV) + "\n"
+           + inspect.getsource(tagged) + inspect.getsource(descendants) + inspect.getsource(kill_tree) + """
 parent = int(sys.argv[2])
 def watch():
     while os.getppid() == parent:
         time.sleep(%s)
-    kill_tree(os.getpid())
+    kill_tree(os.getpid(), os.environ.get(TOKEN_ENV, ""))
 threading.Thread(target=watch, daemon=True).start()
 seal = json.loads(sys.argv[4]) if len(sys.argv) > 4 else []
 python = sys.argv[3] if len(sys.argv) > 3 else sys.executable
@@ -218,7 +261,7 @@ except OSError as error:
     sys.stderr.write(str(error).replace("\\n", " ") + "\\n")
     sys.exit(1)
 sys.exit(child.wait())
-""" % WATCH_SECONDS
+""" % WATCH_SECONDS)
 
 RunGit = Callable[..., "subprocess.CompletedProcess[bytes]"]
 
@@ -542,11 +585,18 @@ def seal_argv(protected: Sequence[str], writable: str, *, system: str | None = N
 
 
 def _protected_paths(worktree: str, run_git: RunGit) -> list[str]:
-    """The real paths of the run's worktree, its git directory and the repository's common git directory."""
+    """The real paths of the run's worktree, its git directory, the repository's common git directory and
+    every existing worktree the repository lists (the main checkout, which holds the other runs' worktrees, too)."""
     done = run_git("-C", worktree, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
     if done.returncode:
         raise OSError(f"git rev-parse --git-dir: {_last_line(done)}")
-    paths = [worktree, *done.stdout.decode(errors="replace").split("\n")]
+    listed = run_git("-C", worktree, "worktree", "list", "--porcelain", "-z")
+    if listed.returncode:
+        raise OSError(f"git worktree list: {_last_line(listed)}")
+    others = [field[len("worktree "):] for field in listed.stdout.decode(errors="replace").split("\0")
+              if field.startswith("worktree ")]
+    paths = [worktree, *done.stdout.decode(errors="replace").split("\n"), *(path for path in others
+                                                                           if os.path.isdir(path))]
     return sorted({os.path.realpath(path) for path in paths if path})
 
 
@@ -557,20 +607,17 @@ class _TimedOut(Exception):
 def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds: float,
             seal: Sequence[str] = ()) -> bool:
     """Whether the test exits 0; an OSError when the watcher could not start it, `_TimedOut` when it ran too long."""
+    token = secrets.token_hex(16)  # in the environment of everything the test starts, a daemon included
     process = subprocess.Popen(
         [sys.executable, "-I", "-c", WATCHER, identifier, str(os.getpid()), TEST_PYTHON, json.dumps(list(seal))],
-        cwd=scratch, env=dict(env), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        start_new_session=True)
+        cwd=scratch, env={**env, TOKEN_ENV: token}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE, start_new_session=True)
     try:
         _, error = process.communicate(timeout=test_seconds)
     except subprocess.TimeoutExpired:
-        kill_tree(process.pid)  # the watcher is not reaped yet, so its pid is still its own
         raise _TimedOut(identifier) from None
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        kill_tree(process.pid, token)  # a timed out watcher is not reaped yet, so its pid is still its own
         process.wait()
         if process.stderr:
             process.stderr.close()

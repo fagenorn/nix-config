@@ -61,6 +61,12 @@ WRITER = (
     "import unittest\n\n\nclass WriterCheck(unittest.TestCase):\n    def test_writes_outside(self):\n"
     "        for target in {targets!r}:\n            try:\n                open(target, 'w').write('x')\n"
             "            except OSError:\n                pass\n")
+DAEMON = (
+    "import os\nimport time\nimport unittest\n\n\nclass DaemonCheck(unittest.TestCase):\n"
+    "    def test_daemonizes(self):\n"
+    "        if os.fork() == 0:\n            os.setsid()\n            if os.fork() == 0:\n"
+    "                open({marker!r}, 'w').write(str(os.getpid()) + '\\n')\n                time.sleep(60)\n"
+    "            os._exit(0)\n        time.sleep(60)\n")
 READONLY = (
     "import os\nimport unittest\n\n\nclass RoCheck(unittest.TestCase):\n"
     "    def test_a_leaves(self):\n        os.makedirs('ro/sub')\n        open('ro/sub/x', 'w').write('x')\n"
@@ -566,6 +572,31 @@ class CheckTest(unittest.TestCase):
         self.assertEqual([Path(target).exists() for target in targets], [not sealed] * 2)
         for target in targets:
             Path(target).unlink(missing_ok=True)
+
+    def test_a_new_test_cannot_write_into_the_main_checkout_or_another_worktree(self):
+        repository = FixtureRepository(self)
+        other = repository.tmp / "other"
+        repository.git(repository.main, "worktree", "add", "-q", "-b", "other-topic", str(other), "main")
+        targets = [str(repository.main / "fixture" / "leak.txt"), str(other / "leak.txt")]
+        repository.commit({"checks/check_writer.py": WRITER.format(targets=targets)})
+        scratch = scratch_directory(self)
+        sealed = bool(seal_argv([str(repository.worktree)], scratch))
+        result = check(str(repository.worktree), "main", scratch_root=scratch, environ=os.environ)
+        self.assertEqual(result["still_passing"], result["new_tests"])
+        self.assertEqual([Path(target).exists() for target in targets], [not sealed] * 2)
+
+    def test_a_daemon_a_timed_out_test_handed_to_init_is_killed_too(self):
+        repository = FixtureRepository(self)
+        marker = repository.tmp / "daemon-pid"
+        repository.commit({"checks/check_daemon.py": DAEMON.format(marker=str(marker))})
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self),
+                       environ=os.environ, test_seconds=3)
+        self.assertEqual(result["still_passing"], [])
+        self.assertIn("stopped at the 3 s limit", result["reason"])
+        self.assertTrue(eventually(lambda: marker.exists() and marker.read_text().endswith("\n"), 5))
+        pid = int(marker.read_text())
+        self.addCleanup(lambda: alive(pid) and os.kill(pid, signal.SIGKILL))
+        self.assertTrue(eventually(lambda: not alive(pid)), "the daemon outlived the timed out test")
 
     def test_the_seal_names_the_protected_paths_and_the_writable_one_or_is_empty(self):
         def run(code):
