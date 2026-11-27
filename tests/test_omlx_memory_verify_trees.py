@@ -274,7 +274,7 @@ class VerifyTreeAlertTest(VerifyTreeCase):
                 self.assertIn("argument --verify-alert-gib:", result.stderr)
 
     def test_a_failed_send_is_retried_without_a_second_alert(self):
-        self.settings.unlink()
+        self.settings_on("not an object")
         self.run_line("2026-11-24T12:00:10Z", 30.0, 3.0, "2026-11-24T12:00:20Z")
         failed = self.sample(now="2026-11-24T12:01:00")
         self.assertEqual(failed.returncode, 3, failed.stderr)

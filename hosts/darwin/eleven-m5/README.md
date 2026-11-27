@@ -381,11 +381,20 @@ Alerts go to the owner's Telegram bot. The owner sets it up on the console page,
 which writes `~/.config/host-alerts/telegram.json` (mode `0600`, owned by the
 owner) with `enabled`, `bot_token` and `chat_id`.
 
-When the file is missing, unreadable, too open or incomplete, or when Telegram
-does not accept the post, the alert goes to `~/.local/state/host-alerts/alerts.log`,
-the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
-on every sample until the alert is sent. With `enabled` false, alerts are
-recorded in the alerts log only.
+When the file is unreadable, too open or incomplete, or when Telegram does not
+accept the post, the alert goes to `~/.local/state/host-alerts/alerts.log`, the
+error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3 on
+every sample until the alert is sent. With `enabled` false, alerts are recorded
+in the alerts log only.
+
+When the file does not exist, alerts are not configured: the watcher holds its
+alerts, logs `host alerts are not configured` once a day and exits 0, with or
+without an alert to send. A held alert older than 24 hours is dropped with one
+line in the alerts log, and the queue keeps the newest held alert of each kind
+per day. A restart alert is held the same way. When the file appears, the
+watcher sends one summary of the held alerts (counts per kind since the oldest
+kept), not the backlog. An alert that failed while the file existed (Telegram
+down, or the file refused) is never dropped or merged: it is retried until sent.
 
 The kinds:
 

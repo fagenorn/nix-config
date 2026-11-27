@@ -2,8 +2,9 @@
 
 Run as `python claude_stub.py <log> <canned> <resumed> <exit> <diagnostic> <hold> <launcher args...>`:
 it appends one compact JSON line
-`{"announced", "argv", "config_dir", "cwd", "host_settings", "stdin"}` to `<log>`
-(`config_dir` and `host_settings` are the values of `CLAUDE_CONFIG_DIR` and
+`{"announced", "argv", "config_dir", "cwd", "git_env", "host_settings", "stdin"}` to `<log>`
+(`git_env` is the sorted names of the environment variables starting with `GIT_`;
+`config_dir` and `host_settings` are the values of `CLAUDE_CONFIG_DIR` and
 `CLAUDE_ACCOUNT_HOST_SETTINGS` in the environment, or null when unset), prints the bytes of the `<resumed>` file to stdout unchanged when the
 launcher args hold `--resume` and `<resumed>` is not `-` (never in the `.answers.json` mode),
 else those of the `<canned>` file, writes the bytes of the `<diagnostic>` file to stderr unless
@@ -136,6 +137,7 @@ def main(argv: list[str]) -> int:
     record = {"announced": announced(words), "answer_file": answer_path is not None,
               "account_env": os.environ.get("CLAUDE_ACCOUNT"), "argv": words,
               "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"), "cwd": os.getcwd(),
+              "git_env": sorted(k for k in os.environ if k.startswith("GIT_")),
               "host_settings": os.environ.get("CLAUDE_ACCOUNT_HOST_SETTINGS"),
               "hung_alive": hung_alive(log),
               "stdin": sys.stdin.read()}
