@@ -5,4 +5,6 @@ Report Important or Critical correctness defects and unmet code criteria only, e
 
 Give each finding a kind, one of edge-or-failure-path, weak-test, missing-test, contract-mismatch, stale-docs, security, concurrency, plan-step-not-executable or other, and a rule only when the finding breaches a standard: that standard's id, as B12; leave rule out otherwise.
 
+The revert check ran the change's new tests once with its source changes reverted to the merge base and the new tests kept. These new tests still passed without the change (an empty list [] means none of the tests that completed did): {{revert-check.still_passing}}. Judge each one as an item: a test that pins behaviour that already existed may rightly pass, while a test meant to show a criterion that passes without the change cannot fail and leaves that criterion without evidence, which is an Important finding naming the test and its file. When the check could not run or did not finish, its reason follows and the list covers only the tests that completed, so a test missing from it may not have run; an empty reason means every new test ran: {{revert-check.reason}}
+
 A reply with a critical or important finding that names neither a file nor a failing input is discarded and this step runs once more.

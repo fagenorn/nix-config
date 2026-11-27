@@ -218,6 +218,7 @@ agent-workflow-tests *args:
     tests/test_engine_stubbed_run.py \
     tests/test_engine_stubbed_world.py \
     tests/test_engine_step_coverage.py \
+    tests/test_revert_check.py \
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_closing.py \
@@ -227,6 +228,7 @@ agent-workflow-tests *args:
     tests/test_verify_rounds.py \
     tests/test_engine_land_recovery.py \
     tests/test_engine_verify_rounds.py \
+    tests/test_engine_revert_check_run.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \

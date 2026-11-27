@@ -1224,6 +1224,8 @@ SHIPPED_MEMBERS = {
     "lite-independent": ({"findings": []},),
     "full-independent": ({"findings": []},),
     **{f"{route}-rereview": ({}, {"findings": []}, UNNAMED) for route in ("lite", "escalated", "full")},
+    **{name: ({"still_passing": [], "reason": ""},)
+       for name in ("revert-check", "lite-revert-check", "escalated-revert-check", "full-revert-check")},
     "round": ({"head": "h", "clean": True, "problems": [], "start_head": "s", "guards": [], "digest": "d",
                "results": [{"id": "lint", "status": "pass"},
                            {"id": "test", "status": "fail", "named": ["a.json"]}]},),
