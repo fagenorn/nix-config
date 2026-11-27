@@ -609,31 +609,45 @@ cmd_run() {
     IFS=$'\t' read -r name session <"$request" || true
     rm -f "$request"
     [ -n "$session" ] || exit "$status"
-    # The conversation carries over with the flags that bound what it may run, never with fewer
-    # permissions or wider tools than it started with; its other flags are not repeated.
-    # The tool lists take every value up to the next option, in either spelling or as --flag=value;
-    # --settings, --agent and --agents take one value, as does --permission-mode.
+    # The conversation carries over with every flag that restricts what it may run, so it never runs with
+    # fewer restrictions than it started with; a flag that only widens it or binds no tool is not repeated.
+    # The words are read as the client reads them, so an option's value is never taken for a flag; the
+    # tool lists take every value up to the next option and the other valued flags one, in either
+    # spelling or as --flag=value.
     carried=()
     while [ $# -gt 0 ]; do
       flag="$1"
       shift
+      if [[ "$flag" =~ ^-[chpv]*n$ ]]; then
+        if [ $# -ge 1 ]; then shift; fi
+        continue
+      fi
       case "$flag" in
         --) break ;;
-        --dangerously-skip-permissions|--strict-mcp-config) carried+=("$flag") ;;
-        --tools=*|--allowedTools=*|--allowed-tools=*|--disallowedTools=*|--disallowed-tools=*|--permission-mode=*|\
-        --settings=*|--agent=*|--agents=*)
+        --dangerously-skip-permissions|--strict-mcp-config|--restricted|--safe-mode|--bare|\
+        --disable-slash-commands|--no-chrome)
           carried+=("$flag") ;;
-        # --settings carries deny rules that bind in bypass mode; --agent and --agents bound the tools.
-        --permission-mode|--settings|--agent|--agents)
+        --tools=*|--allowedTools=*|--allowed-tools=*|--disallowedTools=*|--disallowed-tools=*|--permission-mode=*|\
+        --settings=*|--agent=*|--agents=*|--setting-sources=*|--plugin-dir=*|--plugin-url=*)
+          carried+=("$flag") ;;
+        --permission-mode|--settings|--setting-sources|--agent|--agents|--plugin-dir|--plugin-url)
           if [ $# -ge 1 ]; then carried+=("$flag" "$1"); shift; fi ;;
         --tools|--allowedTools|--allowed-tools|--disallowedTools|--disallowed-tools)
           values=()
+          if [ $# -gt 0 ]; then values+=("$1"); shift; fi
           while [ $# -gt 0 ]; do
-            case "$1" in -*) break ;; esac
+            case "$1" in -?*) break ;; esac
             values+=("$1")
             shift
           done
           if [ "${#values[@]}" -gt 0 ]; then carried+=("$flag" "${values[@]}"); fi ;;
+        # The values of these dropped options are skipped unread.
+        --add-dir|--append-system-prompt|--autocompact|--betas|--debug-file|--effort|--environment|\
+        --fallback-model|--file|--input-format|--json-schema|--max-budget-usd|--mcp-config|--model|--name|\
+        --output-format|--permission-prompts|--remote-control-session-name-prefix|--session-id|\
+        --system-prompt|--system-prompt-snapshot|--system-prompt-file|--append-system-prompt-file|\
+        --permission-prompt-tool)
+          if [ $# -ge 1 ]; then shift; fi ;;
       esac
     done
     set -- --resume "$session" ${carried[@]+"${carried[@]}"}

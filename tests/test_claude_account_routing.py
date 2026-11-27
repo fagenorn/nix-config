@@ -679,7 +679,7 @@ class ProfileChoiceTest(LauncherCase):
 
 
 class SwitchRelaunchTest(LauncherCase):
-    """A session that asks for an account switch is relaunched with the permission and tool flags it started with."""
+    """A session that asks for an account switch is relaunched with every flag it started with that restricts it."""
 
     switch = {"CLAUDE_CACHE_PROXY": "0"}
 
@@ -721,14 +721,34 @@ class SwitchRelaunchTest(LauncherCase):
                                     "--model", "opus"),
                     ["--resume", "sess-1", "--dangerously-skip-permissions", *kept])
 
-    def test_the_relaunch_keeps_the_settings_and_agent_flags_that_restrict_a_bypass_session(self):
+    def test_the_relaunch_keeps_every_flag_that_restricts_a_bypass_session(self):
         deny = '{"permissions":{"deny":["Edit"]}}'
+        agents = '{"r":{"tools":["Read"]}}'
+        plugin_url = "https://plugins.invalid/p.zip"
         cases = {
             "settings json": (("--settings", deny), ["--settings", deny]),
             "settings equals form": (("--settings=" + deny,), ["--settings=" + deny]),
             "a read-only agent": (("--agent", "reviewer"), ["--agent", "reviewer"]),
             "the agent equals form": (("--agent=reviewer",), ["--agent=reviewer"]),
-            "agents json": (("--agents", '{"r":{"tools":["Read"]}}'), ["--agents", '{"r":{"tools":["Read"]}}']),
+            "agents json": (("--agents", agents), ["--agents", agents]),
+            "restricted mode": (("--restricted",), ["--restricted"]),
+            "safe mode": (("--safe-mode",), ["--safe-mode"]),
+            "bare mode": (("--bare",), ["--bare"]),
+            "no slash commands": (("--disable-slash-commands",), ["--disable-slash-commands"]),
+            "no chrome": (("--no-chrome",), ["--no-chrome"]),
+            "the permission mode": (("--permission-mode", "plan"), ["--permission-mode", "plan"]),
+            "setting sources": (("--setting-sources", "project"), ["--setting-sources", "project"]),
+            "the setting sources equals form": (("--setting-sources=project",), ["--setting-sources=project"]),
+            "an empty setting sources list": (("--setting-sources", ""), ["--setting-sources", ""]),
+            "a plugin dir": (("--plugin-dir", "/opt/deny-hooks"), ["--plugin-dir", "/opt/deny-hooks"]),
+            "every plugin dir": (
+                ("--plugin-dir", "/a", "--plugin-dir", "/b.zip"), ["--plugin-dir", "/a", "--plugin-dir", "/b.zip"]),
+            "the plugin dir equals form": (("--plugin-dir=/a",), ["--plugin-dir=/a"]),
+            "a plugin url": (("--plugin-url", plugin_url), ["--plugin-url", plugin_url]),
+            "the plugin url equals form": (("--plugin-url=" + plugin_url,), ["--plugin-url=" + plugin_url]),
+            "the agents equals form": (("--agents=" + agents,), ["--agents=" + agents]),
+            "a settings file path": (
+                ("--settings", "/etc/claude/deny.json"), ["--settings", "/etc/claude/deny.json"]),
         }
         for name, (given, kept) in cases.items():
             with self.subTest(name):
@@ -736,6 +756,33 @@ class SwitchRelaunchTest(LauncherCase):
                     self.relaunched("--session-id", "sess-1", "--dangerously-skip-permissions", *given,
                                     "--model", "opus"),
                     ["--resume", "sess-1", "--dangerously-skip-permissions", *kept])
+
+    def test_an_option_value_is_never_read_as_a_flag_on_the_relaunch(self):
+        bypass = "--dangerously-skip-permissions"
+        cases = {
+            "a dropped option's value": (("--system-prompt", bypass), []),
+            "a dropped list's first value": (("--add-dir", bypass), []),
+            "the short name option": (("-n", bypass), []),
+            "a short cluster ending in the name option": (("-cn", bypass), []),
+            "a hidden prompt file option": (("--system-prompt-file", bypass), []),
+            "a carried list's first value": (("--tools", bypass), ["--tools", bypass]),
+            "a carried option's value": (("--settings", bypass), ["--settings", bypass]),
+            "an optional value never takes an option": (
+                ("--debug", "--strict-mcp-config"), ["--strict-mcp-config"]),
+        }
+        for name, (given, kept) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.relaunched("--session-id", "sess-1", *given, "--model", "opus"),
+                    ["--resume", "sess-1", *kept])
+
+    def test_the_relaunch_drops_the_flags_that_only_widen_or_bind_no_tool(self):
+        self.assertEqual(
+            self.relaunched("--session-id", "sess-1", "--dangerously-skip-permissions", "--add-dir", "/x",
+                            "--mcp-config", "m.json", "--allow-dangerously-skip-permissions", "--chrome",
+                            "--ide", "--brief", "--system-prompt", "be brief", "--append-system-prompt",
+                            "and kind", "--effort", "high", "-n", "a name", "--model", "opus"),
+            ["--resume", "sess-1", "--dangerously-skip-permissions"])
 
     def test_a_value_list_ends_at_the_next_option_and_nothing_after_the_end_of_options_is_kept(self):
         self.assertEqual(
