@@ -25,6 +25,8 @@ from tests.test_engine_stubbed_run import Scenario
 
 TIER = "integration"  # every run case builds a repository and runs the engine as a child process
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 FIXTURES = AdoptedFixtures()
 STEPS = StepCoverage(PROCEDURES, ("verify",))
 
@@ -321,6 +323,14 @@ class ShapeTest(unittest.TestCase):
         self.assertEqual(steps["fix-review"]["role"], "reviewer")
         self.assertEqual(steps["retest"]["role"], "implementer")
         self.assertNotIn("mutates", steps["retest"])
+
+    def test_the_round_step_reads_the_versioned_subcommand_and_the_old_subcommand_keeps_its_verdicts(self):
+        declared = json.loads((REPO_ROOT / "python/agent_tools/delivery/command_verdicts.json")
+                              .read_text("utf-8"))["verify-rounds"]["subcommands"]
+        self.assertEqual(steps_of("verify")["round"]["subcommand"], "round-reviewed")
+        self.assertEqual(declared["round"], ["passed", "retest", "fix", "spent", "verify", "error"])
+        self.assertEqual(declared["round-reviewed"],
+                         ["passed", "retest", "fix", "spent", "review-spent", "verify", "error"])
 
     def test_each_verification_stop_maps_to_the_deliver_stop_of_the_same_name(self):
         deliver, verify = procedure("deliver"), procedure("verify")

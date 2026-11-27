@@ -63,8 +63,8 @@ class Delivery(LedgerMaker):
         self.call(self.root, run, self.calls)
         return run
 
-    def round(self) -> dict:
-        return verify_rounds.answer(self.holder, str(self.repo))
+    def round(self, reviewed: bool = True) -> dict:
+        return verify_rounds.answer(self.holder, str(self.repo), reviewed=reviewed)
 
     def verified(self, document: dict, step: str = "checks", run: Path | None = None) -> Path:
         run = run or self.verify_run()
@@ -78,6 +78,13 @@ class Delivery(LedgerMaker):
     def ws_check(self, run: Path, start: str, commit: str, visit: int = 1) -> None:
         self.visit(run, "ws-check", visit, "read",
                    {"verdict": "read", "start_head": start, "commit": commit})
+
+
+    def reviewed(self, run: Path, fix_visit: int, step: str = "fix-review", narrowing: str = "narrowing") -> None:
+        """A fix, its review that returned `FINDING` and the narrowing that took those findings to `round`."""
+        self.fix(run, fix_visit, tests=["just test"])
+        self.visit(run, step, fix_visit, "findings", {"verdict": "findings", "findings": [FINDING, MINOR]})
+        self.visit(run, narrowing, fix_visit, "findings", {})
 
 
 class LedgerCase(Delivery, unittest.TestCase):
@@ -234,12 +241,6 @@ class RoundTest(LedgerCase):
         self.visit(run, "checks", 2, "passed", document("passed", head=C))
         self.assertEqual(self.round()["verdict"], "passed")
 
-    def reviewed(self, run: Path, fix_visit: int, step: str = "fix-review", narrowing: str = "narrowing") -> None:
-        """A fix, its review that returned `FINDING` and the narrowing that took those findings to `round`."""
-        self.fix(run, fix_visit, tests=["just test"])
-        self.visit(run, step, fix_visit, "findings", {"verdict": "findings", "findings": [FINDING, MINOR]})
-        self.visit(run, narrowing, fix_visit, "findings", {})
-
     def test_findings_of_the_first_fix_review_answer_fix_with_the_check_problems_and_the_blocking_findings(self):
         run = self.verified(FAILED)
         self.reviewed(run, 1)
@@ -279,9 +280,45 @@ class RoundTest(LedgerCase):
         run = self.verified(FAILED)
         self.reviewed(run, 1)
         self.fix(run, 2)
+        self.visit(run, "fix-review", 2, "pass", {"verdict": "pass", "findings": []})
+        self.visit(run, "narrowing", 2, "rerun-all", {})
         self.visit(run, "checks", 2, "failed", FAILED)
         answer = self.round()
         self.assertEqual((answer["verdict"], [p["id"] for p in answer["problems"]]), ("spent", ["test"]))
+
+    def test_findings_stay_outstanding_when_the_run_is_continued_before_the_second_fix_starts(self):
+        run = self.verified(FAILED)
+        self.reviewed(run, 1)
+        self.visit(run, "preflight", 2, "clear", {})
+        self.visit(run, "checks", 2, "passed", document("passed"))
+        answer = self.round()
+        self.assertEqual(answer["verdict"], "fix")
+        self.assertEqual([p["id"] for p in answer["problems"]], ["review"])
+
+    def test_findings_stay_outstanding_when_the_run_is_continued_during_the_second_fix(self):
+        run = self.verified(FAILED)
+        self.reviewed(run, 1)
+        self.enter(run, "fix", 2)
+        self.visit(run, "preflight", 2, "clear", {})
+        self.visit(run, "checks", 2, "passed", document("passed"))
+        self.assertEqual(self.round()["verdict"], "review-spent")
+
+    def test_a_later_review_resolves_the_findings_so_a_passing_read_passes(self):
+        run = self.verified(FAILED)
+        self.reviewed(run, 1)
+        self.fix(run, 2, tests=["just test"])
+        self.visit(run, "fix-review", 2, "pass", {"verdict": "pass", "findings": []})
+        self.visit(run, "narrowing", 2, "rerun-all", {})
+        self.visit(run, "checks", 2, "passed", document("passed"))
+        self.assertEqual(self.round()["verdict"], "passed")
+
+    def test_the_unversioned_round_never_reads_review_findings(self):
+        run = self.verified(FAILED)
+        self.reviewed(run, 1)
+        answer = self.round(reviewed=False)
+        self.assertEqual((answer["verdict"], [p["id"] for p in answer["problems"]]), ("fix", ["test"]))
+        self.reviewed(run, 2)
+        self.assertEqual(self.round(reviewed=False)["verdict"], "spent")
 
     def test_the_answer_carries_the_digest_of_its_results(self):
         self.verified(FAILED)
@@ -354,6 +391,16 @@ class CommandLineTest(RoundCase):
         self.assertEqual(done.stdout.count("\n"), 1)
         self.assertEqual(sorted(json.loads(done.stdout)),
                          ["clean", "digest", "guards", "head", "problems", "results", "start_head", "verdict"])
+
+    def test_the_versioned_round_prints_one_line_and_reads_review_findings(self):
+        run = self.verified(FAILED)
+        self.reviewed(run, 1)
+        done = self.run_tool("round-reviewed", "--holder", self.holder, "--worktree-path", str(self.repo))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["verdict"], "fix")
+        self.assertIn("review", [p["id"] for p in json.loads(done.stdout)["problems"]])
+        plain = self.run_tool("round", "--holder", self.holder, "--worktree-path", str(self.repo))
+        self.assertEqual([p["id"] for p in json.loads(plain.stdout)["problems"]], ["test"])
 
     def test_a_missing_flag_is_a_usage_error_with_exit_1(self):
         for argv in (("round", "--holder", "h/x"), ("fix-range", "--worktree-path", str(self.repo)),

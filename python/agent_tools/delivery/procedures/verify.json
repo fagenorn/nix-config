@@ -17,7 +17,7 @@
     {"id": "checks", "stage": "verifying", "kind": "command", "command": "verified-tree", "subcommand": "run", "holds": "live", "max_visits": 3,
      "in": ["preflight.worktree_path"],
      "on": {"passed": "round", "failed": "round", "dirty": "round", "error": "verify", "refused": "verify", "out-of-bounds": "verify", "exhausted": "verify"}},
-    {"id": "round", "stage": "verifying", "kind": "command", "command": "verify-rounds", "subcommand": "round", "holds": "live", "max_visits": 3,
+    {"id": "round", "stage": "verifying", "kind": "command", "command": "verify-rounds", "subcommand": "round-reviewed", "holds": "live", "max_visits": 3,
      "in": ["run.holder", "preflight.worktree_path"],
      "on": {"passed": "done", "retest": "retest", "fix": "fix", "spent": "verify", "review-spent": "verify-fix-review", "verify": "verify", "error": "verify", "refused": "verify", "out-of-bounds": "verify", "exhausted": "verify"}},
     {"id": "fix", "stage": "verifying", "kind": "agent", "role": "implementer", "prompt": "verify-fix.md", "reply": "verify-fix.reply.json", "outcome_from": "status", "holds": "run", "mutates": true, "max_visits": 2,

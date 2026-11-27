@@ -368,7 +368,7 @@ def _scope_reads_a_round(path: str) -> Callable[[dict], None]:
         scope = step(toy, "scope")
         scope.update(command="verify-rounds", subcommand="round",
                      on={"passed": "draft", "retest": "draft", "fix": "draft", "spent": "needs-owner",
-                         "review-spent": "needs-owner", "verify": "needs-owner", "error": "needs-owner", "refused": "needs-owner"})
+                         "verify": "needs-owner", "error": "needs-owner", "refused": "needs-owner"})
         _each_over(path)(toy)
     return change
 
@@ -699,6 +699,16 @@ class ToyProcedureTest(unittest.TestCase):
         code, out, err = run_check()
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out, SHIPPED_OK)
+
+    def test_a_run_saved_before_the_review_spent_edge_still_validates(self):
+        def saved_before_issue_1954(verify: dict) -> None:
+            round_step = step(verify, "round")
+            round_step["subcommand"] = "round"
+            del round_step["on"]["review-spent"]
+            for name in ("narrowing", "narrowing-again"):
+                step(verify, name)["on"]["findings"] = "verify-fix-review"
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("verify", saved_before_issue_1954))))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_a_command_step_may_map_out_of_bounds(self):
         def map_bound(toy: dict) -> None:
