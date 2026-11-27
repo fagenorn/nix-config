@@ -99,73 +99,53 @@ row-check child runs.
 
 What is refused:
 
-- A global option outside `GIT_GLOBAL_OPTIONS`, a closed table of each option
-  and the number of words it takes (an attached `=value` counts only for the
-  one-word long options). `-c`, `--config-env`, `--exec-path=<dir>` and any
-  unknown option are refused for every subcommand, because a `-c` value such as
-  `core.pager`, `core.fsmonitor` or `core.sshCommand` runs a command from any
-  of them.
-- A subcommand outside `GIT_LOCAL_SUBCOMMANDS`, a closed list of the
-  subcommands that cannot transmit refs: an alias (repository, global or `-c`
-  config), an external `git-<name>` program, a transport (`send-pack`,
-  `http-push`, `subtree`) and the subcommands that run a caller-supplied command
-  (`submodule`, `bisect`, `filter-branch`, `difftool`, `mergetool`).
-- A `git-<name>` program in any spelling (`git-push`,
-  `/usr/libexec/git-core/git-send-pack`, `git-lfs`), since one on `PATH` is an
-  alias by another spelling. An argument such as a branch or path named
-  `git-<x>` is refused too, inside an otherwise admitted lifecycle command as
-  well, once its grammar check has passed; this workflow's branches start with
-  `issue-`.
-- A git run cut by an opening operator (`(`, `{`, or a backtick with an even
-  number of backtick tokens before the git word in its segment) before its
-  subcommand is certain: no subcommand word remains, or the subcommand is the
-  last word and may be glued to the substitution (`` git add`echo -x` `` runs
-  the alias `add-x`). `git $(printf p) origin x` and `git -C $(pwd) status` are
-  refused; `(git status)`, `` `git status` ``, `echo $(which git)` and `git log
+- A global option outside `GIT_GLOBAL_OPTIONS`, a closed table of each option and the number of words it takes (an
+  attached `=value` counts only for the one-word long options). `-c`, `--config-env`, `--exec-path=<dir>` and any
+  unknown option are refused for every subcommand, because a `-c` value such as `core.pager`, `core.fsmonitor` or
+  `core.sshCommand` runs a command from any of them.
+- A subcommand outside `GIT_LOCAL_SUBCOMMANDS`, a closed list of the subcommands that cannot transmit refs: an alias
+  (repository, global or `-c` config), an external `git-<name>` program, a transport (`send-pack`, `http-push`,
+  `subtree`) and the subcommands that run a caller-supplied command (`submodule`, `bisect`, `filter-branch`,
+  `difftool`, `mergetool`).
+- A `git-<name>` program in any spelling (`git-push`, `/usr/libexec/git-core/git-send-pack`, `git-lfs`), since one on
+  `PATH` is an alias by another spelling. An argument such as a branch or path named `git-<x>` is refused too, inside
+  an otherwise admitted lifecycle command as well, once its grammar check has passed; this workflow's branches start
+  with `issue-`.
+- A git run cut by an opening operator (`(`, `{`, or a backtick with an even number of backtick tokens before the git
+  word in its segment) before its subcommand is certain: no subcommand word remains, or the subcommand is the last
+  word and may be glued to the substitution (`` git add`echo -x` `` runs the alias `add-x`). `git $(printf p) origin
+  x` and `git -C $(pwd) status` are refused; `(git status)`, `` `git status` ``, `echo $(which git)` and `git log
   $(printf HEAD) -1` pass.
-- A bare git word (no subcommand after its global options) whose subcommand the
-  shell supplies from elsewhere: at an argument position in a command where a
-  pipe comes before it or a redirection (`<`, `<<`, `<<<`) appears anywhere,
-  whichever segment or grouping the pipe or redirection belongs to (`echo p
-  origin t | xargs git`, `echo p | { true; xargs git; }`, `{ xargs git; } <<<
-  'push …'`, `exec <f; xargs git`, a pipe followed by a newline, also inside
-  evaluator text), whether the git word is plain, the last word `"$(which
-  git)"` or `${G:-git}` (the brace forms `${G-git}` and `${G:=git}` too), and a
-  git word that is the output of an unglued `$(…)` or backtick substitution that
-  words follow (`$(echo git) p origin t`, `xargs $(echo git) p`, a substitution
-  that ends the segment before it closes, and the quoted `"$(which git)" push
-  …`). `which git`, `brew install git`, `echo $(which git)` and `xargs git
-  status` pass; so does `x="$(which git)" y`, whose output is assigned.
-  `ps aux | grep git`, `echo $(which git) status` and a `which git` that follows
-  a pipe or shares a command with a redirection are refused; write `grep
+- A bare git word (no subcommand after its global options) whose subcommand the shell supplies from elsewhere: at an
+  argument position in a command where a pipe comes before it or a redirection (`<`, `<<`, `<<<`) appears anywhere,
+  whichever segment or grouping the pipe or redirection belongs to (`echo p origin t | xargs git`, `echo p | { true;
+  xargs git; }`, `{ xargs git; } <<< 'push …'`, `exec <f; xargs git`, a pipe followed by a newline, also inside
+  evaluator text), whether the git word is plain, the last word `"$(which git)"` or `${G:-git}` (the brace forms
+  `${G-git}` and `${G:=git}` too), and a git word that is the output of an unglued `$(…)` or backtick substitution
+  that words follow (`$(echo git) p origin t`, `xargs $(echo git) p`, a substitution that ends the segment before it
+  closes, and the quoted `"$(which git)" push …`). `which git`, `brew install git`, `echo $(which git)` and `xargs
+  git status` pass; so does `x="$(which git)" y`, whose output is assigned. `ps aux | grep git`, `echo $(which git)
+  status` and a `which git` that follows a pipe or shares a command with a redirection are refused; write `grep
   '[g]it'`.
-- A command option hidden from the option scan: the scan also reads a word that
-  holds an expansion and does not start with `-` (`"${X:---exec=sh p.sh}"`, a
-  `-` after one of `:=+?-` starts a candidate), and the words that follow the
+- A command option hidden from the option scan: the scan also reads a word that holds an expansion and does not start
+  with `-` (`"${X:---exec=sh p.sh}"`, a `-` after one of `:=+?-` starts a candidate), and the words that follow the
   operator which cut the run (`git rebase $(x) --exec …`).
-- `git config` naming `core.hooksPath` (issue 672 D8): any later word of the
-  invocation, the words after an operator in the same segment included, that
-  equals `core.hookspath` or starts with `core.hookspath=`, compared lowercase,
-  so the get, set and unset spellings, `--global`, `--local`, `--file` and `git
-  config set`/`unset` all refuse as `git config naming core.hooksPath would
-  change which hook judges a push; read it with git rev-parse --git-path
-  hooks`. Any other key passes, `git config --get core.hooksPathX` included.
-  `--no-verify` and `-n` on `git push` stay refused as an unsafe push form.
-- Clearing the agent session marker (issue 672 D3), in every repository: a
-  segment refuses with `clearing or unsetting CLAUDECODE would hide the agent
-  session from the pre-push hook` when a non-operator token assigns
-  `CLAUDECODE` in any position (a prefix, a standalone assignment, an
-  `export`/`declare`/`typeset`/`local`/`readonly` argument), when a token is
-  exactly `CLAUDECODE`, `-uCLAUDECODE` or `--unset=CLAUDECODE` (`unset [-v]`,
-  `export -n`, `declare +x`, `env -u`), when an `env` word has `-`, `-i`,
-  `--ignore-environment` (or a prefix of it) or a short cluster holding `i`
-  among its options, when an `env` unset option names it in any spelling (`-u
-  CLAUDECODE`, `-vuCLAUDECODE`, `--unset CLAUDECODE`, an abbreviation such as
-  `--unse=CLAUDECODE`), or when an `exec` word has a cluster holding `c`; the
-  same tests apply to evaluator text, so `sh -c 'unset CLAUDECODE; …'` and `sh
-  -c 'env -i ./push.sh'` refuse. A read (`$CLAUDECODE`) never refuses. A
-  bare-word mention such as `printenv CLAUDECODE` refuses too; write `echo
-  $CLAUDECODE` instead.
+- `git config` naming `core.hooksPath` (issue 672 D8): any later word of the invocation, the words after an operator
+  in the same segment included, that equals `core.hookspath` or starts with `core.hookspath=`, compared lowercase, so
+  the get, set and unset spellings, `--global`, `--local`, `--file` and `git config set`/`unset` all refuse as `git
+  config naming core.hooksPath would change which hook judges a push; read it with git rev-parse --git-path hooks`.
+  Any other key passes, `git config --get core.hooksPathX` included. `--no-verify` and `-n` on `git push` stay refused
+  as an unsafe push form.
+- Clearing the agent session marker (issue 672 D3), in every repository: a segment refuses with `clearing or unsetting
+  CLAUDECODE would hide the agent session from the pre-push hook` when a non-operator token assigns `CLAUDECODE` in
+  any position (a prefix, a standalone assignment, an `export`/`declare`/`typeset`/`local`/`readonly` argument), when
+  a token is exactly `CLAUDECODE`, `-uCLAUDECODE` or `--unset=CLAUDECODE` (`unset [-v]`, `export -n`, `declare +x`,
+  `env -u`), when an `env` word has `-`, `-i`, `--ignore-environment` (or a prefix of it) or a short cluster holding
+  `i` among its options, when an `env` unset option names it in any spelling (`-u CLAUDECODE`, `-vuCLAUDECODE`,
+  `--unset CLAUDECODE`, an abbreviation such as `--unse=CLAUDECODE`), or when an `exec` word has a cluster holding
+  `c`; the same tests apply to evaluator text, so `sh -c 'unset CLAUDECODE; …'` and `sh -c 'env -i ./push.sh'`
+  refuse. A read (`$CLAUDECODE`) never refuses. A bare-word mention such as `printenv CLAUDECODE` refuses too; write
+  `echo $CLAUDECODE` instead.
 
 The same rule judges a git word at a command position, at an argument position and in raw text. At an argument
 position it is `git_argument_problem`, whatever runs the word (`xargs git p`, `timeout 5 git p`, `find -exec git p`);
@@ -997,15 +977,6 @@ READ_ONLY_SHELL_ENV = "CLAUDE_READ_ONLY_SHELL"
 READ_ONLY_SHELL_PATTERN = re.compile(
     r"(?:(?<![A-Za-z0-9_-])|(?<=[cs])|(?<=\$[0-9!@*]))xargs(?![A-Za-z0-9_-])"
     r"|(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_-])[\s\S]*?--output(?![A-Za-z0-9_-])",
-    re.IGNORECASE | re.ASCII,
-)
-# What the deletion copy cannot recover, read in the raw text only, after a `git` word: an option whose name holds
-# an expansion, a brace alternative or an escape (`--out{p,p}ut`, `--out$@put`, `--${x:-output}`, `--$'\157'utput`),
-# and a word that opens with one (the dashes rebuilt: `$'\055\055output'`, `"${x:--}${x:--}output"`, `-${x:--}output`).
-# Only the name is read, up to `=` or a space, so `--grep='a$'` is not one.
-READ_ONLY_REBUILT_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_-])[\s\S]*?"
-    r"(?:--[^\s=]*[$`{}()\\'\"]|(?<!\S)[\"']*-?[\"']*[$`{])",
     re.IGNORECASE | re.ASCII,
 )
 READ_ONLY_SHELL_REFUSAL = (
@@ -3027,11 +2998,24 @@ def detaching_word(command):
     return None
 
 
+def read_only_rebuilt(command):
+    """True when, after a `git` word with quotes and backslashes removed (a quote between two dashes joins them), a
+    word opens with an expansion (`$'\\055\\055output'`) or its name, up to `=`, holds `$`, a backtick, a brace or a
+    parenthesis and leads with a dash or holds two (`-"-"out{p,p}ut`, `--${x:-output}`, `diff${IFS}--out$@put`)."""
+    text = re.sub(r"[\\'\"]", "", command.replace("\\\n", ""))
+    git = re.search(r"(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_-])", text, re.IGNORECASE | re.ASCII)
+    for word in text[git.end():].split() if git else ():
+        name = word.split("=", 1)[0]
+        if word[0] in "$`{" or (name[0] == "-" or "--" in name) and any(mark in name for mark in "$`{}()"):
+            return True
+    return False
+
+
 def read_only_shell_problem(command):
     """True when `command`, read as `detaching_word` reads it, holds `xargs` or `--output` after a `git` word, or
-    (in the raw text) a `git` option name, or a word's opening, the shell builds by expansion (`READ_ONLY_REBUILT_PATTERN`)."""
+    a `git` option name, or a word's opening, the shell builds by expansion (`read_only_rebuilt`)."""
     return (any(READ_ONLY_SHELL_PATTERN.search(text) for text in detaching_texts(command))
-            or READ_ONLY_REBUILT_PATTERN.search(command.replace("\\\n", "")) is not None)
+            or read_only_rebuilt(command))
 
 
 def lifecycle_words(command):

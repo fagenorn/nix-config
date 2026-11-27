@@ -164,6 +164,14 @@ class ReadOnlyShellTest(unittest.TestCase):
             'git diff "${x:--}${x:--}output=d.patch" HEAD~1',
             "git diff -${x:--}output=d.patch HEAD~1",
             "git diff --out${x}put=d.patch HEAD~1",
+            'git diff -"-"out{p,p}ut=d.patch HEAD~1',  # a quote or a backslash between the two dashes
+            "git diff -\\-out{p,p}ut=d.patch HEAD~1",
+            'git diff "-"-out$@put=d.patch HEAD~1',
+            "git diff -'-'out$@put=d.patch HEAD~1",
+            "git diff -\\-$'\\157'utput=d.patch HEAD~1",
+            'git diff -"-"out${x}put=d.patch HEAD~1',
+            "git log -\\-outp{u,u}t=l.txt -1",
+            "git diff${IFS}-\\-out{p,p}ut=d.patch HEAD~1",  # joined to the word before it
         ]
         for command in expanded:
             with self.subTest(guard_alone=command):
