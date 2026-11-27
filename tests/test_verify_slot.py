@@ -150,7 +150,7 @@ class SlotHarness:
         if owner is not None:
             env["CLAUDE_CODE_SESSION_ID"] = owner
         return {**env, "HOME": home or self.home, "PYTHONPATH": str(REPO_ROOT / "python"),
-                SLOT_DIR_ENV: str(self.slots)}
+                SLOT_DIR_ENV: str(self.slots), "VERIFY_SLOT_FOOTPRINT": str(Path(self.home) / "no-footprint")}
 
     def start(self, name, *opts, code=None, argv=None, home=None, cwd=None, owner=None):
         tail = [str(code)] if code is not None else []
@@ -1149,7 +1149,8 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.assertEqual(len(self.history()), 2)
         for entry in entries.values():
             self.assertEqual(set(entry), {"command", "exit", "held_seconds", "lane", "owner", "place",
-                                          "repository", "started", "waited_seconds"})
+                                          "repository", "started", "tree_peak_at", "tree_peak_bytes",
+                                          "waited_seconds"})
             self.assertEqual(entry["lane"], "long")
             self.assertIsNone(entry["owner"])
         command = " ".join(" ".join([sys.executable, "-c", CHILD]).split()[:3])

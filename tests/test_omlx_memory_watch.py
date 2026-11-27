@@ -99,6 +99,7 @@ DAY_LINE = {
     "peak_anonymous_gib": None, "peak_anonymous_at": None,
     "peak_compressions_gib": None, "peak_compressions_at": None,
     "peak_owners": [], "census_samples": 0, "records_since": None,
+    "peak_verify_gib": None, "peak_verify_at": None, "verify_runs": 0,
 }
 
 
@@ -165,7 +166,7 @@ class WatchCase(unittest.TestCase):
         argv = [
             sys.executable, "-m", "agent_tools.hosts.omlx_memory_watch", "sample",
             "--state-dir", str(self.state_dir), "--floor-gib", "16", "--others-budget-gib", "46", "--unowned-alert-gib", "5",
-            "--omlx-jetsam-priority", "100", "--host", "eleven-m5",
+            "--verify-alert-gib", "2.5", "--omlx-jetsam-priority", "100", "--host", "eleven-m5",
             "--vm-stat", str(self.d / "vm_stat"), "--sysctl", str(self.d / "sysctl"),
             "--launchctl", str(self.d / "launchctl"), "--ps", str(self.d / "ps"),
             "--footprint", str(self.d / "footprint"),
