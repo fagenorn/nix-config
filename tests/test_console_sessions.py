@@ -392,58 +392,62 @@ class RegistryTest(unittest.TestCase):
             self.assertEqual(read_session_registry(
                 [tmp / "reg"], alive=functools.partial(process_matches, **kw)), {})
 
-    def fake_proc(self, tmp):
-        """A procfs for pid 2164 (`procStart` 976) in the pid domain `HERE`; returns its keywords."""
-        (tmp / "proc" / "self" / "ns").mkdir(parents=True)
-        (tmp / "proc" / "self" / "stat").write_text("1 (x) S")
-        os.symlink("pid:[4026532224]", tmp / "proc" / "self" / "ns" / "pid")
-        (tmp / "proc" / "2164").mkdir()
-        (tmp / "proc" / "2164" / "stat").write_text(
-            "2164 (a) S " + " ".join(["0"] * 18) + " 976 0 0\n")
-        (tmp / "machine-id").write_text("21b1c3eb3a554a8792391e610443b8b8\n")
-        return dict(proc=tmp / "proc", machine_id=tmp / "machine-id")
-
-    HERE = "linux:21b1c3eb3a554a8792391e610443b8b8:pid:[4026532224]"
-
     def test_a_strict_liveness_raises_on_a_failed_proc_read_and_not_on_a_process_that_is_gone(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
-            kw = self.fake_proc(tmp)
-            self.assertIs(process_matches(2164, "976", self.HERE, strict=True, **kw), True)
-            self.assertIs(process_matches(2164, "1", self.HERE, strict=True, **kw), False)
+            kw = support.fake_proc(tmp)
+            self.assertIs(process_matches(2164, "976", support.PROC_PID_DOMAIN, strict=True, **kw), True)
+            self.assertIs(process_matches(2164, "1", support.PROC_PID_DOMAIN, strict=True, **kw), False)
             self.assertIs(process_matches(
-                2165, "976", self.HERE, strict=True, **kw), False)
+                2165, "976", support.PROC_PID_DOMAIN, strict=True, **kw), False)
             (tmp / "proc" / "2164" / "stat").unlink()
             (tmp / "proc" / "2164" / "stat").mkdir()
-            self.assertIs(process_matches(2164, "976", self.HERE, **kw), False)
+            self.assertIs(process_matches(2164, "976", support.PROC_PID_DOMAIN, **kw), False)
             with self.assertRaises(OSError):
-                process_matches(2164, "976", self.HERE, strict=True, **kw)
+                process_matches(2164, "976", support.PROC_PID_DOMAIN, strict=True, **kw)
             (tmp / "proc" / "self" / "ns" / "pid").unlink()
-            self.assertIs(process_matches(2164, "976", self.HERE, **kw), False)
+            self.assertIs(process_matches(2164, "976", support.PROC_PID_DOMAIN, **kw), False)
             with self.assertRaises(OSError):
-                process_matches(2164, "976", self.HERE, strict=True, **kw)
+                process_matches(2164, "976", support.PROC_PID_DOMAIN, strict=True, **kw)
             (tmp / "proc" / "self" / "ns" / "pid").symlink_to("pid:[4026532224]")
             (tmp / "machine-id").unlink()
-            self.assertIs(process_matches(2164, "976", self.HERE, **kw), False)
+            self.assertIs(process_matches(2164, "976", support.PROC_PID_DOMAIN, **kw), False)
             with self.assertRaises(OSError):
-                process_matches(2164, "976", self.HERE, strict=True, **kw)
+                process_matches(2164, "976", support.PROC_PID_DOMAIN, strict=True, **kw)
+
+    def test_a_process_name_that_is_not_utf8_is_read_as_a_live_process(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            kw = support.fake_proc(tmp)
+            (tmp / "proc" / "2164" / "stat").write_bytes(
+                b"2164 (\xff\xfe) b) S " + b" ".join([b"0"] * 18) + b" 976 0 0\n")
+            for strict in (False, True):
+                with self.subTest(strict=strict):
+                    self.assertIs(process_matches(
+                        2164, "976", support.PROC_PID_DOMAIN, strict=strict, **kw), True)
+                    self.assertIs(process_matches(
+                        2164, "1", support.PROC_PID_DOMAIN, strict=strict, **kw), False)
 
     def test_a_strict_reading_raises_when_a_proc_read_fails_and_a_plain_one_drops_the_session(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
-            kw = self.fake_proc(tmp)
+            kw = support.fake_proc(tmp)
             (tmp / "proc" / "2164" / "stat").unlink()
             (tmp / "proc" / "2164" / "stat").mkdir()
             directory = tmp / "sessions"
             directory.mkdir()
             (directory / "2164.json").write_text(json.dumps({
                 "pid": 2164, "sessionId": "s-held", "cwd": "/srv/p00", "status": "idle",
-                "procStart": "976", "pidDomain": self.HERE}))
+                "procStart": "976", "pidDomain": support.PROC_PID_DOMAIN}))
             with mock.patch.object(sessions, "process_matches",
-                                   functools.partial(process_matches, **kw)):
+                                   functools.partial(process_matches, **kw)), \
+                    mock.patch.object(sessions, "liveness_unreadable",
+                                      functools.partial(liveness_unreadable, **kw)):
                 self.assertEqual(read_session_registry([directory]), {})
                 with self.assertRaises(OSError):
                     read_session_registry([directory], strict=True)
+                with self.assertRaises(OSError):
+                    read_session_registry([directory], alive=sessions.process_matches, strict=True)
                 (tmp / "proc" / "2164" / "stat").rmdir()
                 self.assertEqual(set(read_session_registry([directory], strict=True)), set())
                 (tmp / "proc" / "2164" / "stat").write_text(

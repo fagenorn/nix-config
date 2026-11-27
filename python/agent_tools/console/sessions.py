@@ -295,7 +295,7 @@ def process_matches(pid: int, proc_start: str | None, pid_domain: str | None, *,
     if own is None or not isinstance(pid_domain, str) or pid_domain != own:
         return False
     try:
-        line = (proc / str(pid) / "stat").read_text()
+        line = (proc / str(pid) / "stat").read_bytes()
     except (FileNotFoundError, ProcessLookupError):
         return False
     except OSError:
@@ -304,10 +304,11 @@ def process_matches(pid: int, proc_start: str | None, pid_domain: str | None, *,
         return False
     except ValueError:
         return False
-    fields = line.rsplit(")", 1)[1].split() if ")" in line else []
+    # Bytes: a process name (the parenthesised field) is any bytes, not always UTF-8.
+    fields = line.rsplit(b")", 1)[1].split() if b")" in line else []
     if len(fields) < 20:
         return False
-    return isinstance(proc_start, str) and proc_start == fields[19]
+    return isinstance(proc_start, str) and proc_start == fields[19].decode("ascii", "replace")
 
 
 def profile_name(config_dir: Path) -> str:
@@ -393,11 +394,11 @@ def read_session_registry(
     A directory or a file that cannot be read is skipped. With `strict` it raises instead (`OSError`,
     or `ValueError` for a file that is not JSON; a directory or a file that is not there is no
     session), so a caller that must know a session is gone is never told so by a failed read. So
-    does a liveness that cannot be judged (`liveness_unreadable`, with the default `alive`) or a
+    does a liveness that cannot be judged (`liveness_unreadable`, with the default `alive` or `process_matches`) or a
     pid-domain or proc read of the default `alive` that fails (`process_matches(strict=True)`): a
     session is then dropped as dead for no reason it could know.
     """
-    default = alive is None
+    default = alive is None or alive is process_matches
     if default:
         alive = functools.partial(process_matches, strict=True) if strict else process_matches
     result: dict[str, Observation] = {}
