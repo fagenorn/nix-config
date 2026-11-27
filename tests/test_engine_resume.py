@@ -387,6 +387,45 @@ class ResumeTest(unittest.TestCase):
         self.assertTrue((run / "sessions/draft.1.continue-2.json").exists())
         self.assertFalse((run / "sessions/draft.1.resume.json").exists())
 
+    def denying(self, command: str, ident: str = "toolu_01") -> dict:
+        path = self.project.tmp / f"denying-{ident}.json"
+        path.write_bytes(canned_result(permission_denials=[
+            {"tool_name": "Bash", "tool_use_id": ident, "tool_input": {"command": command}}]))
+        return {"stdout": str(path), "exit": 0, "account": "p1"}
+
+    def test_a_denial_on_the_continued_resume_stops_at_tool_denied_with_no_second_ask(self):
+        log = install_answers(self.project, [self.hang(), self.denying("rm x")])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 1)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        self.assertIn(repr("rm x"), line["detail"])
+        (run,) = self.project.runs()
+        self.assertEqual(len(self.records(log)), 2)
+        self.assertEqual(list((run / "sessions").glob("*.denied.prompt.md")), [])
+
+    def test_a_denial_reask_cut_short_names_both_calls_when_the_visit_continues(self):
+        log = install_answers(self.project, [
+            self.denying("git log | head"), self.hang(), self.denying("rm x", "toolu_02")])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 2)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"),
+                         after(records[0]["argv"], "--session-id"))
+        self.assertLess(line["detail"].index(repr("git log | head")),
+                        line["detail"].index(repr("rm x")))
+        (run,) = self.project.runs()
+        self.assertEqual(len(list((run / "sessions").glob("*.denied.prompt.md"))), 1)
+        record = json.loads((run / "sessions/draft.1.continue-3.json").read_text())
+        self.assertEqual([d["tool_input"]["command"] for d in record["denials"]], ["rm x"])
+
     def test_a_second_interruption_resumes_again_under_the_next_attempt(self):
         log = install_answers(self.project, [self.hang(), self.hang(), self.normal()])
         procedures = one_step(self.project)
@@ -430,10 +469,25 @@ class ResumeTest(unittest.TestCase):
         self.faulted_then_normal({"stdout": str(empty), "exit": 1, "account": "p1"})
 
     def test_a_visit_stopped_on_a_denied_shell_command_is_entered_again_under_a_new_visit(self):
-        denial = {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm -rf x"}}
-        denied = self.project.tmp / "denied.json"
-        denied.write_bytes(canned_result(permission_denials=[denial]))
-        self.faulted_then_normal({"stdout": str(denied), "exit": 0, "account": "p1"}, code=3)
+        denied = self.denying("rm -rf x")
+        log = install_answers(self.project, [denied, denied, self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        session = after(self.records(log)[0]["argv"], "--session-id")
+        self.assertEqual(after(self.records(log)[1]["argv"], "--resume"), session)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (run,) = self.project.runs()
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertIn("--session-id", records[2]["argv"])
+        self.assertNotIn("--resume", records[2]["argv"])
+        self.assertNotEqual(after(records[2]["argv"], "--session-id"), session)
+        self.assertEqual(self.entered(run), [1, 2])
+        self.assertEqual(len(run_continued(self.project.events(run))), 1)
+        resuming = [e for e in self.project.events(run) if e["event"] == "session_resuming"]
+        self.assertEqual([e["visit"] for e in resuming], [1])
 
     def test_a_stale_earlier_result_still_rewinds_before_the_interrupted_session(self):
         log = install_answers(self.project, [self.hang(), self.normal()])

@@ -15,7 +15,7 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
     stop-request   a pending stop request for the lock holder it names (engine_stop)
     results/<step>.<visit>.json
                         a step visit's stored result
-    sessions/<step>.<visit>.{system.md,prompt.md,json,resume.json,resume.prompt.md}
+    sessions/<step>.<visit>.{system.md,prompt.md,json,resume.json,resume.prompt.md,denied.json,denied.prompt.md}
     sessions/<step>.<visit>.continue-<n>.{json,prompt.md}
                         an agent step visit's launch files and raw result (the `continue-<n>` ones
                         are a continued run's launch under attempt `n`, 2 or more),
@@ -528,7 +528,7 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
 
 SESSION_FILE_RE = re.compile(
     r"[a-z][a-z0-9-]*\.[1-9][0-9]*\."
-    r"(json|system\.md|prompt\.md|resume\.json|resume\.prompt\.md"
+    r"(json|system\.md|prompt\.md|resume\.json|resume\.prompt\.md|denied\.json|denied\.prompt\.md"
     r"|continue-[1-9][0-9]*\.json|continue-[1-9][0-9]*\.prompt\.md)")
 
 

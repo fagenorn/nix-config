@@ -975,12 +975,13 @@ class DeliverSessionTest(unittest.TestCase):
         document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
         document["permission_denials"] = [{"tool_name": "Bash", "tool_use_id": "toolu_03",
                                            "tool_input": {"command": "make build"}}]
-        install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
+        log = install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
         done = self.project.deliver(self.capped_procedures(), issue=1520)
         self.assertEqual(done.returncode, 3, done.stderr)
         line = json.loads(done.stdout)
         self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"))
         self.assertIn(repr("make build"), line["detail"])
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
         run = self.run_dir()
         self.assertFalse((run / "results/draft.1.json").exists())
         self.assertNotIn("outcome_graded", [e["event"] for e in self.project.events(run)])

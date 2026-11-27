@@ -53,7 +53,8 @@ forms, any `>` (even `2>/dev/null`) and, by `HOST_WRITING`, each write the host 
 strips `nohup` before matching), and `shell_rules` gives a role's Bash rules. A role that
 needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
 one that is denied a tool call anyway ends the run at the engine's own stop
-`tool-denied` (`engine_shell`), never a graded reply.
+`tool-denied` (`engine_shell`), never a graded reply. `denial_prompt` tells a denied session which calls
+were refused and its role's shell rules.
 
 The recorded exception: under the engine only, a step that names its own `worktree` gives a
 `WHOLE_SHELL_ROLES` role the whole `Bash`, `Edit` and `Write` (`Role.whole_shell`, launched in that
@@ -113,7 +114,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
@@ -121,7 +122,7 @@ from typing import Callable, Mapping, Sequence
 from agent_tools.canonical import (
     parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal,
 )
-from agent_tools.delivery import engine_stop
+from agent_tools.delivery import engine_ledger, engine_reply, engine_stop
 from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
 from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES, TOOL_DENIED, WHOLE_SHELL_ROLES
@@ -140,10 +141,10 @@ CAP_SUBTYPES: Mapping[str, str] = MappingProxyType(
 NOT_STARTED = 127
 STRUCTURED_OUTPUT_EXHAUSTED = "error_max_structured_output_retries"
 MISS_SUBTYPES: tuple[str, ...] = ("success", STRUCTURED_OUTPUT_EXHAUSTED)
-REASK_PROMPT = (
-    "Your last answer was not a valid structured answer. Reply again with only the structured "
-    "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
-    "other text.")
+REASK_REQUEST = (
+    "Reply again with only the structured answer, a single call of the StructuredOutput tool whose "
+    "members follow the schema, and no other text.")
+REASK_PROMPT = f"Your last answer was not a valid structured answer. {REASK_REQUEST}"
 CONTINUE_PROMPT = (
     "Your session was interrupted. Finish the task you were given, then give only the structured "
     "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
@@ -315,10 +316,14 @@ class EngineStop(Exception):
 
 
 def denied_calls(reading: Reading) -> tuple[str, ...]:
+    return calls_of(reading.denials)
+
+
+def calls_of(denials: Sequence) -> tuple[str, ...]:
     """One text per tool call the session was denied, in order: a shell command whole, any other call
     as its tool name and its input in compact sorted-key JSON."""
     calls = []
-    for entry in reading.denials:
+    for entry in denials:
         if not isinstance(entry, dict):
             calls.append(json.dumps(entry, sort_keys=True))
             continue
@@ -337,6 +342,63 @@ def denial_detail(step: str, calls: Sequence[str]) -> str:
     return (f"Step {step} was denied {count} tool call{'' if count == 1 else 's'}: "
             + "; ".join(repr(call) for call in calls)
             + "; its reply is not graded and the run stops at tool-denied.")
+
+
+def denial_prompt(role: Role, calls: Sequence[str]) -> str:
+    """The prompt that asks a denied session again: the refused calls, `role`'s shell rules, the shapes."""
+    allowed, denied = shell_rules(role)
+    refused = "\n".join(f"- {call!r}" for call in calls)
+    return (
+        f"These tool calls were refused:\n{refused}\n\n"
+        f"Shell rules allowing a command: {', '.join(allowed) or 'none'}.\n"
+        f"Shell rules refusing a command: {', '.join(denied) or 'none'}.\n"
+        "A rule `Bash` alone means every shell command. A call runs only when every part of it, split at "
+        "`|`, `;`, `&&`, `||` and `&`, matches an allowed rule and no part matches a refusing one. "
+        "`Bash(x:*)` is `x` alone or followed by a space and arguments. No `>` redirection runs.\n\n"
+        "Redo the checks the refused calls were for with those shapes or the file tools. "
+        f"{REASK_REQUEST}")
+
+
+def asked_calls(sessions: Path, name: str, visit: int) -> tuple[str, ...] | None:
+    """The calls of the launch a visit's denial re-ask was about, None when the visit made no re-ask."""
+    if not (sessions / f"{name}.{visit}.denied.prompt.md").exists():
+        return None
+    try:
+        document = json.loads((sessions / f"{name}.{visit}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    denials = document.get("denials") if isinstance(document, dict) else None
+    return calls_of(denials) if isinstance(denials, list) else ()
+
+
+def summed(launched: Launched, reading: Reading,
+           earlier: Sequence[tuple[Launched, Reading]]) -> tuple[Launched, Reading]:
+    """The final launch and reading with the wall, turns, spend and tokens of each earlier launch added."""
+    for ran, read in earlier:
+        before = read.wall_seconds if read.wall_seconds is not None else ran.wall_seconds
+        launched = replace(launched, wall_seconds=launched.wall_seconds + before)
+        reading = replace(
+            reading, turns=reading.turns + read.turns, spend_usd=reading.spend_usd + read.spend_usd,
+            wall_seconds=(launched.wall_seconds if reading.wall_seconds is None
+                          else reading.wall_seconds + before),
+            tokens={key: reading.tokens[key] + read.tokens[key] for key in reading.tokens})
+    return launched, reading
+
+
+def reading_problem(schema: Mapping, reading: Reading) -> str | None:
+    return ("no structured_output" if reading.reply is None
+            else engine_reply.reply_problem(schema, reading.reply))
+
+
+def store_record(run_dir: Path, visit_of: tuple[str, int, str, int], launched: Launched,
+                 reading: Reading, schema: Mapping, suffix: str) -> None:
+    name, visit, session, attempt = visit_of
+    record = {"attempt": attempt, "denials": reading.denials, "exit_code": launched.exit_code,
+              "problem": reading_problem(schema, reading), "prose": reading.prose, "session": session,
+              "subtype": reading.subtype}
+    engine_ledger.store_session_file(
+        run_dir, f"{name}.{visit}{suffix}.json",
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
 def joined(stops: Sequence[EngineStop]) -> EngineStop:

@@ -42,8 +42,11 @@ usable reply (none, or one that breaks the schema) is a miss when `engine_sessio
 its stdout: the same session is then resumed once (`session_resuming`, `--resume <session>`,
 `REASK_PROMPT`) and a second miss grades `no-reply` with `{}` stored, its measurements the sums of
 both launches (in a continued visit a miss is `no-reply` at once, see "Continuing"). Any other reading with no usable reply is a `Fault`. A session denied a tool call (any
-tool, the resume launches included) is not graded: its reply may rest on a check it never ran, so the run ends at the engine's own
-stop `tool-denied` (need `owner-decision`, exit 3), its detail naming every denied call and an open usage-limit wait ended first. A
+tool, the resume launches included) is not graded: its reply may rest on a check it never ran. It is asked once more on the same
+session (`--resume`, `engine_session.denial_prompt`, stored as `<step>.<visit>.denied.prompt.md`, its record `.denied.json`); a second
+denial, a denial a bound or a usage-limit or API error came with, or one in a continued visit ends the run at the engine's own
+stop `tool-denied` (need `owner-decision`, exit 3), its detail naming every distinct denied call of the visit and an open usage-limit
+wait ended first. After that re-ask a miss is `no-reply`. A
 group or a call records one stop joining its members' or children's. Before each launch, the resumes included,
 the host's settings are read again and a lifecycle guard hook that is gone is a `Fault`. A session ended
 by a bound is graded `out-of-bounds` before any fault is considered: the bounds are a turn or spend cap
@@ -78,7 +81,7 @@ is appended and no new visit starts. The session recorded for the visit is launc
 `engine_session.CONTINUE_PROMPT` when a process of the visit had started, else `--session-id <session>` with the
 stored `prompt.md`. The launch's prompt is stored as `sessions/<step>.<visit>.continue-<attempt>.prompt.md` when
 absent, and each record as `.continue-<attempt>.json`. The continued launches are not re-asked, so a miss is
-`no-reply`; every later launch of the visit resumes. A visit with a stored result (with or without its outcome) or
+`no-reply` and a denial is not re-asked either; every later launch of the visit resumes. A visit with a stored result (with or without its outcome) or
 a recorded stop after its entry (`quota-wait`, `tool-denied`, `stopped-by-request`) or a launch that ended with its record stored (a
 `Fault` such as no structured reply; each record names its `attempt`) is not resumed but
 rewound to a new visit as before, its `run_continued` clearing the stop and closing an open usage-limit wait. A resumed visit
@@ -1362,16 +1365,17 @@ def _launch_until_answered(
         defer: bool = False, resumed: _Resumed | None = None,
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
     """Launch the session, again with `--resume` after a usage limit, a first API error (once, after
-    `API_RETRY_SECONDS`) or a first miss (once, with `REASK_PROMPT`); return the first launch that is none of these,
-    or follows a second error or miss, with its record stored and the wait ended (a miss and its resume summed in
-    the measurements), the `quota-wait` stop (wait open; unrecorded with `defer`) and whether the outcome is
-    `no-reply`. With `resumed` the first launch is its attempt, each later one resumes and a miss is `no-reply`."""
+    `API_RETRY_SECONDS`), a first miss (`REASK_PROMPT`) or a first denial (`denial_prompt`), once each; return the
+    first launch that is none of these, with its record stored and the wait ended (the launches asked again
+    summed in the measurements), the `quota-wait` stop (wait open; unrecorded with `defer`) and whether the
+    outcome is `no-reply`. With `resumed` the first launch is its attempt and no later launch is asked again."""
     name, visit, session = visit_of
     role, schema, system = launch_of
     attempt, limited, waiting, released, retried, no_reply = (
         1 if resumed is None else resumed.attempt), set(), False, False, False, False
     missed, text = resumed is not None, prompt
-    missed_once: tuple[engine_session.Launched, engine_session.Reading] | None = None
+    earlier: list[tuple[engine_session.Launched, engine_session.Reading]] = []
+    asked = None if resumed is None else engine_session.asked_calls(run_dir / "sessions", name, visit)
 
     def event(kind: str, **members: object) -> None:
         engine_ledger.append_event(run_dir, {"event": kind, "at": _now(), **members})
@@ -1384,9 +1388,10 @@ def _launch_until_answered(
         waiting = True
 
     def record(launched: engine_session.Launched, reading: engine_session.Reading) -> None:
-        _store_record(run_dir, (name, visit, session, attempt), launched, reading, schema,
-                      f".continue-{attempt}" if resumed is not None else
-                      ".resume" if missed else "")
+        engine_session.store_record(
+            run_dir, (name, visit, session, attempt), launched, reading, schema,
+            f".continue-{attempt}" if resumed is not None else ".denied" if asked is not None
+            else ".resume" if missed else "")
 
     def stop_at(launched: engine_session.Launched, reading: engine_session.Reading, end: str,
                 need: str, detail: str) -> tuple:
@@ -1433,11 +1438,21 @@ def _launch_until_answered(
             event("session_answered", step=name, visit=visit, session=session, attempt=attempt,
                   account=account)
         if calls := engine_session.denied_calls(reading):  # a reported refusal outranks a bound
+            if (asked is None and resumed is None and not launched.timed_out
+                    and reading.subtype not in engine_session.CAP_SUBTYPES
+                    and reading.api_failure is None):
+                record(launched, reading)
+                text = engine_session.denial_prompt(role, calls)
+                engine_ledger.store_session_file(
+                    run_dir, f"{name}.{visit}.denied.prompt.md", text.encode("utf-8"))
+                earlier.append((launched, reading))
+                asked, attempt = calls, attempt + 1
+                continue
             if waiting:
                 event("wait_ended", wait=engine_session.USAGE_LIMIT)
             return stop_at(launched, reading, procedure_terms.TOOL_DENIED,
-                           procedure_terms.TOOL_DENIED_NEED,
-                           engine_session.denial_detail(name, calls))
+                           procedure_terms.TOOL_DENIED_NEED, engine_session.denial_detail(
+                               name, tuple(dict.fromkeys((*(asked or ()), *calls)))))
         if launched.timed_out or reading.subtype in engine_session.CAP_SUBTYPES:
             break  # a bound ended the session: graded by the visit, before any fault below
         if reading.api_failure == engine_session.API_ERROR:
@@ -1448,15 +1463,16 @@ def _launch_until_answered(
             engine_stop.pause(API_RETRY_SECONDS, stop)
             continue
         if reading.api_failure != engine_session.USAGE_LIMIT:
-            if engine_session.is_miss(reading) and _problem(schema, reading) is not None:
-                if missed:
+            if (engine_session.is_miss(reading)
+                    and engine_session.reading_problem(schema, reading) is not None):
+                if missed or asked is not None:
                     no_reply = True
                     break
                 record(launched, reading)
                 engine_ledger.store_session_file(
                     run_dir, f"{name}.{visit}.resume.prompt.md",
                     engine_session.REASK_PROMPT.encode("utf-8"))
-                missed_once = (launched, reading)
+                earlier.append((launched, reading))
                 missed, text, attempt = True, engine_session.REASK_PROMPT, attempt + 1
                 continue
             break
@@ -1471,30 +1487,5 @@ def _launch_until_answered(
     if waiting:
         event("wait_ended", wait=engine_session.USAGE_LIMIT)
     record(launched, reading)
-    if missed_once is not None:  # the miss and its resume are one result
-        ran, read = missed_once
-        before = read.wall_seconds if read.wall_seconds is not None else ran.wall_seconds
-        launched = replace(launched, wall_seconds=launched.wall_seconds + before)
-        reading = replace(
-            reading, turns=reading.turns + read.turns, spend_usd=reading.spend_usd + read.spend_usd,
-            wall_seconds=(launched.wall_seconds if reading.wall_seconds is None
-                          else reading.wall_seconds + before),
-            tokens={key: reading.tokens[key] + read.tokens[key] for key in reading.tokens})
+    launched, reading = engine_session.summed(launched, reading, earlier)
     return launched, reading, None, no_reply
-
-
-def _problem(schema: Mapping, reading: engine_session.Reading) -> str | None:
-    return ("no structured_output" if reading.reply is None
-            else engine_reply.reply_problem(schema, reading.reply))
-
-
-def _store_record(run_dir: Path, visit_of: tuple[str, int, str, int],
-                  launched: engine_session.Launched, reading: engine_session.Reading,
-                  schema: Mapping, suffix: str) -> None:
-    name, visit, session, attempt = visit_of
-    record = {"attempt": attempt, "denials": reading.denials, "exit_code": launched.exit_code,
-              "problem": _problem(schema, reading), "prose": reading.prose, "session": session,
-              "subtype": reading.subtype}
-    engine_ledger.store_session_file(
-        run_dir, f"{name}.{visit}{suffix}.json",
-        json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))

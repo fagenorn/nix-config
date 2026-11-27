@@ -23,7 +23,7 @@ from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_deliver import EngineProject
 from tests.test_engine_fanout import FAN, REVIEWS, child, children_of, roots, with_session_files
 from tests.test_engine_session import (
-    REPO_ROOT, RESULT_LIMIT, RESULT_MISSING, agent_step, canned_result, copy_roles, install_answers,
+    REPO_ROOT, RESULT_LIMIT, RESULT_MISSING, after, agent_step, canned_result, copy_roles, install_answers,
     install_stub, one_step, write_procedures, REVIEW_REPLY, DRAFT_REPLY,
 )
 from tests.test_engine_stubbed_run import SHA, Scenario
@@ -48,7 +48,9 @@ def bash(command: str, ident: str = "toolu_01") -> dict:
     return {"tool_name": "Bash", "tool_use_id": ident, "tool_input": {"command": command}}
 
 
-class ToolDeniedStopTest(unittest.TestCase):
+class DeniedRun:
+    """The project, the run's ledger and the tool-denied stop check both denied-run classes use."""
+
     def setUp(self) -> None:
         self.project = EngineProject(self)
         self.project.env.pop("CLAUDE_ACCOUNT", None)
@@ -73,6 +75,8 @@ class ToolDeniedStopTest(unittest.TestCase):
                          ("stop_reached", "tool-denied", "owner-decision"))
         return line
 
+
+class ToolDeniedStopTest(DeniedRun, unittest.TestCase):
     def test_the_recorded_1639_denial_ends_the_run_at_tool_denied(self):
         fixture = json.loads(RESULT_DENIED.read_text(encoding="utf-8"))
         (denial,) = fixture["permission_denials"]
@@ -129,7 +133,9 @@ class ToolDeniedStopTest(unittest.TestCase):
         done = self.project.deliver(one_step(self.project), issue=1514)
 
         self.stopped(done, 1514)
-        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 3)
+        for name in ("draft.1.resume.json", "draft.1.denied.json"):
+            self.assertTrue((self.run_dir() / "sessions" / name).exists(), name)
         self.assertNotIn("outcome_graded", self.kinds())
 
     def test_a_reviewer_denied_a_shell_command_stops_at_tool_denied(self):
@@ -169,6 +175,125 @@ class ToolDeniedStopTest(unittest.TestCase):
         self.assertIsNone(json.loads(self.project.status(1919).stdout)["wait"])
 
 
+class DeniedReaskTest(DeniedRun, unittest.TestCase):
+    ISSUE = 1514
+    USAGE = {"input_tokens": 1, "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3,
+             "output_tokens": 4}
+
+    def answers(self, *documents: bytes) -> Path:
+        entries = []
+        for number, data in enumerate(documents, 1):
+            path = self.project.tmp / f"answer-{number}.json"
+            path.write_bytes(data)
+            entries.append({"stdout": str(path), "exit": 0, "account": "p1"})
+        return install_answers(self.project, entries)
+
+    def review(self, **on: str) -> Path:
+        steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner", **on},
+                            prompt="review.md", reply="review.reply.json", outcome_from="verdict")]
+        return write_procedures(self.project, steps, {
+            "review.md": "Review {{run.issue}}.\n", "review.reply.json": json.dumps(REVIEW_REPLY)})
+
+    @staticmethod
+    def verdict(value: str) -> dict:
+        return {"verdict": value, "status": "s"}
+
+    @staticmethod
+    def launches(log: Path) -> list[dict]:
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def sessions(self, name: str) -> Path:
+        return self.run_dir() / "sessions" / name
+
+    def test_a_session_denied_once_then_answering_in_an_allowed_shape_continues_the_run(self):
+        command = "git log | head; git ls-tree -r HEAD | grep x"
+        denial = bash(command)
+        log = self.answers(
+            canned_result(structured_output=self.verdict("revise"), duration_ms=1000, num_turns=3,
+                          total_cost_usd=0.1, usage=self.USAGE, permission_denials=[denial]),
+            canned_result(structured_output=self.verdict("approve"), duration_ms=2000, num_turns=4,
+                          total_cost_usd=0.2, permission_denials=[], usage={
+                              "input_tokens": 10, "cache_creation_input_tokens": 20,
+                              "cache_read_input_tokens": 30, "output_tokens": 40}))
+
+        done = self.project.deliver(self.review(), issue=self.ISSUE)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        first, second = self.launches(log)
+        self.assertEqual(after(second["argv"], "--resume"), after(first["argv"], "--session-id"))
+        prompt = self.sessions("review.1.denied.prompt.md").read_text(encoding="utf-8")
+        self.assertEqual(second["stdin"], prompt)
+        self.assertIn(repr(command), prompt)
+        role = engine_session.read_role(self.project.world.home / ".claude/agents", "reviewer")
+        for rules in engine_session.shell_rules(role):
+            for rule in rules:
+                self.assertIn(rule, prompt)
+        for name, denials in (("review.1.json", [denial]), ("review.1.denied.json", [])):
+            record = json.loads(self.sessions(name).read_text(encoding="utf-8"))
+            self.assertEqual(record["denials"], denials, name)
+        result = json.loads((self.run_dir() / "results/review.1.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["verdict"], "approve")
+        events = self.events()
+        kinds = [event["event"] for event in events]
+        self.assertIn("session_resuming", kinds)
+        self.assertEqual([e["outcome"] for e in events
+                          if e["event"] == "outcome_graded" and e["step"] == "review"], ["approve"])
+        self.assertFalse([e for e in events if e["event"] == "stop_reached"
+                          and e["stop"] == "tool-denied"])
+        (stored,) = [e for e in events if e["event"] == "result_stored" and e["step"] == "review"]
+        self.assertEqual(stored["turns"], 7)
+        self.assertEqual(stored["tokens"], {"input": 11, "cache_write": 22, "cache_read": 33,
+                                            "output": 44})
+        self.assertAlmostEqual(stored["spend_usd"], 0.3)
+        self.assertAlmostEqual(stored["wall_seconds"], 3.0)
+
+    def test_a_second_denial_stops_at_tool_denied_naming_both_commands(self):
+        first, second = bash("git log | head"), bash("git checkout main", "toolu_02")
+        log = self.answers(
+            canned_result(structured_output=self.verdict("approve"), permission_denials=[first]),
+            canned_result(structured_output=self.verdict("approve"), permission_denials=[second]))
+
+        done = self.project.deliver(self.review(), issue=self.ISSUE)
+
+        line = self.stopped(done, self.ISSUE)
+        self.assertEqual(len(self.launches(log)), 2)
+        detail = line["detail"]
+        self.assertLess(detail.index(repr("git log | head")), detail.index(repr("git checkout main")))
+        for name, denial in (("review.1.json", first), ("review.1.denied.json", second)):
+            record = json.loads(self.sessions(name).read_text(encoding="utf-8"))
+            self.assertEqual(record["denials"], [denial], name)
+        self.assertNotIn("outcome_graded", self.kinds())
+
+    def test_a_call_denied_on_both_launches_is_named_once(self):
+        first, second = bash("git log | head"), bash("rm x", "toolu_02")
+        self.answers(
+            canned_result(structured_output=self.verdict("approve"), permission_denials=[first]),
+            canned_result(structured_output=self.verdict("approve"),
+                          permission_denials=[first, second]))
+
+        done = self.project.deliver(self.review(), issue=self.ISSUE)
+
+        detail = self.stopped(done, self.ISSUE)["detail"]
+        self.assertEqual(detail.count(repr("git log | head")), 1)
+        self.assertLess(detail.index(repr("git log | head")), detail.index(repr("rm x")))
+        self.assertTrue(detail.startswith("Step review was denied 2 tool calls"), detail)
+
+    def test_a_miss_after_the_denial_reask_is_no_reply(self):
+        log = self.answers(
+            canned_result(structured_output=self.verdict("approve"),
+                          permission_denials=[bash("git log | head")]),
+            RESULT_MISSING.read_bytes())
+
+        done = self.project.deliver(self.review(**{"no-reply": "step-failed"}), issue=self.ISSUE)
+
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "step-failed")
+        self.assertEqual(len(self.launches(log)), 2)
+        self.assertTrue(self.sessions("review.1.denied.json").exists())
+        self.assertEqual([e["outcome"] for e in self.events() if e["event"] == "outcome_graded"],
+                         ["no-reply"])
+
+
 class FanOutDeniedTest(unittest.TestCase):
     def setUp(self) -> None:
         self.project = EngineProject(self)
@@ -182,6 +307,25 @@ class FanOutDeniedTest(unittest.TestCase):
     def denied(self, command: str) -> engine_session.Launched:
         return engine_session.Launched(
             0, canned_result(permission_denials=[bash(command)]), b"", 0.1)
+
+    def by_session(self, launches):
+        """A launch stand-in giving each child its own sequence: a launch with `--session-id` takes the next
+        item and waits for the other child, one with `--resume` gets the item remembered under its session."""
+        taken, remembered = threading.Lock(), {}
+        both = threading.Barrier(2, timeout=60)
+
+        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            resumed = "--resume" in argv
+            session = after(argv, "--resume" if resumed else "--session-id")
+            if not resumed:
+                with taken:
+                    remembered[session] = next(launches)
+            on_start(os.getpid())
+            if not resumed:
+                both.wait()
+            self.answer(env, {"account": "stub"})
+            return remembered[session]
+        return fake
 
     def test_two_group_members_denied_stop_the_run_at_tool_denied_naming_both(self):
         directory = with_session_files(self.project.procedures(REVIEWS()))
@@ -216,17 +360,7 @@ class FanOutDeniedTest(unittest.TestCase):
                         "out-of-bounds": "child-stop"}}])})
         (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
         (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
-        commands = iter(["echo first", "echo second"])
-        taken = threading.Lock()
-        both = threading.Barrier(2, timeout=60)
-
-        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
-            with taken:
-                command = next(commands)
-            on_start(os.getpid())
-            both.wait()
-            self.answer(env, {"account": "stub"})
-            return self.denied(command)
+        fake = self.by_session(iter([self.denied("echo first"), self.denied("echo second")]))
 
         with self.project.inside(), mock.patch.object(engine_session, "launch", fake):
             code, line = engine_shell.deliver(1919, directory)
@@ -274,17 +408,7 @@ class FanOutDeniedTest(unittest.TestCase):
                         "out-of-bounds": "child-stop"}}])})
         (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
         (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
-        launches = iter([self.denied("echo first"), self.faulted()])
-        taken = threading.Lock()
-        both = threading.Barrier(2, timeout=60)
-
-        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
-            with taken:
-                launched = next(launches)
-            on_start(os.getpid())
-            both.wait()
-            self.answer(env, {"account": "stub"})
-            return launched
+        fake = self.by_session(iter([self.denied("echo first"), self.faulted()]))
 
         with self.project.inside(), mock.patch.object(engine_session, "launch", fake):
             code, line = engine_shell.deliver(1919, directory)
