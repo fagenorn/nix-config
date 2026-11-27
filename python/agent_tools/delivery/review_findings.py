@@ -28,7 +28,7 @@ body and passes its name in that round's `filed`.
 finding naming only non-code criteria of `acceptance`, rather than importing it, so this module
 imports no engine module; a test holds the copy to the grader. The landing route's re-review (`LANDING_REREVIEWS`) takes any `pass` or `findings`
 verdict and stops on `findings`, so it is judged by that verdict, not by `usable`. A minor
-finding a re-review restates as a blocker keeps the restatement as its own finding. Nothing here reads a file, starts a process or reads a clock, and an
+finding, or one dropped by kind, that a re-review restates as a blocker keeps the restatement as its own finding. Nothing here reads a file, starts a process or reads a clock, and an
 odd shape never raises.
 """
 
@@ -167,7 +167,8 @@ def dispositions(rounds: Sequence[Round]) -> tuple[Disposed, ...]:
         for name, finding in again:
             restates = finding.get("restates")
             original = originals.get(restates) if isinstance(restates, str) else None
-            if original is not None and (_minor(finding) or not _minor(original)):
+            if original is not None and (
+                    _minor(finding) or not (_minor(original) or _drops(original, kinds))):
                 continue
             dropping = _minor(finding) or _drops(finding, kinds)
             value = "filed" if name in one.filed else "dropped" if dropping else "open"

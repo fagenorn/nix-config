@@ -172,6 +172,13 @@ CASES = [
      [Round((("lite-review", {"verdict": "findings", "findings": [dict(IMPORTANT, summary="AC5 has no evidence")]}),),
             FIX, ("lite-rereview", PASS), acceptance=ACCEPTANCE)],
      [(1, "lite-review:1", "dropped")]),
+    ("a code-criterion restatement of a finding dropped by kind keeps its own open disposition",
+     [Round((("lite-review", {"verdict": "findings", "findings": [dict(IMPORTANT, summary="AC5 has no evidence")]}),),
+            FIX, ("lite-rereview", {"verdict": "findings", "findings": [
+                dict(IMPORTANT, summary="still unresolved: AC1 test fails on empty input",
+                     restates="lite-review:1")]}),
+            acceptance=ACCEPTANCE)],
+     [(1, "lite-review:1", "dropped"), (1, "lite-rereview:1", "open")]),
 ]
 
 
