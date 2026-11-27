@@ -1,10 +1,11 @@
-"""The approve case's quick shutdown, publish-woken waits and copied reconcile repository (#1615).
+"""The approve case's quick shutdown, publish-woken waits, copied reconcile repository (#1615) and a saved contract's signing failure (#1095).
 
 Run: just agent-workflow-tests
 """
 
 from __future__ import annotations
 
+import json
 import socketserver
 import sys
 import threading
@@ -12,7 +13,7 @@ import time
 import types
 from unittest import mock
 
-from agent_tools.console import service
+from agent_tools.console import approve, service
 
 from . import approve_case_support as case_support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
@@ -310,3 +311,27 @@ class RestartedRegistrationTest(ApproveCase):
         self.assertEqual(self.results(), ["waiting"])
         gate["release"].set()
         self.listed_and_registered()
+
+
+class CommittedSigningTest(ApproveCase):
+    def test_a_signing_failure_from_a_committed_schema_two_contract_names_its_settings_and_edits_nothing(self):
+        self.start(Fake(plan=READY, apply_result=approve_service.SIGNING))
+        self.repo = reconciled(self.parent, contract=True)
+        contract = self.repo / ".agents/project.json"
+        contract.write_text(json.dumps(
+            {"schema_version": 2, "bindings": {"vcs": {"commit": {"signed": True}}}}) + "\n")
+        git(self.repo, "commit", "-q", "-am", "signed")
+        git(self.repo, "push", "-q", "origin", "main")
+        self.registered(self.repo)
+        self.settled_row(self.repo)
+        before = (git(self.repo, "status", "--porcelain"), git(self.repo, "rev-parse", "HEAD"),
+                  contract.read_bytes())
+        self.run_approval("apply_failed")
+        (card,) = self.apply_cards()
+        self.assertEqual(card["why"], approve.COMMITTED_SIGNING_NOTE)
+        self.assertEqual(card["questions"][0]["options"], ["Apply it again", "Not now"])
+        self.assertEqual(card["values"], ["apply", "not_now"])
+        self.assertIn("signed changes", card["headline"])
+        self.assertEqual(
+            (git(self.repo, "status", "--porcelain"), git(self.repo, "rev-parse", "HEAD"),
+             contract.read_bytes()), before)

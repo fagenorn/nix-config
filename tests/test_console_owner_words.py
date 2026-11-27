@@ -307,6 +307,34 @@ class FixedWordsTest(unittest.TestCase):
         self.assertIn(label, PAGE.read_text(encoding="utf-8"))
         self.assertIn(label, approve.FAILING_WHY)
 
+    def test_a_committed_signing_policy_names_the_repository_settings_in_plain_words(self):
+        from .test_console_approve import BANNED, INVARIANT, KEPT
+        signing = {"code": "verification_failed", "repair_id": approve.SIGNING_REPAIR, "violations": []}
+        hooked = {**signing, "commit_output": {"hook": "pre-commit", "exit": 1, "lines": []}}
+        other = {"code": "x", "repair_id": approve.COMMIT_REPAIR, "violations": []}
+        note = approve.COMMITTED_SIGNING_NOTE
+        for kept in (None, KEPT):
+            with self.subTest(kept=kept):
+                self.assertEqual(approve.apply_failure("r", signing, kept, committed=True),
+                                 (approve.SIGNING_REASON, note))
+                self.assertEqual(approve.apply_failure("r", signing, kept),
+                                 (approve.SIGNING_REASON, approve.SIGNING_NOTE))
+        self.assertEqual(
+            approve.apply_failure("r", hooked, None, committed=True),
+            (approve.SIGNING_REASON, approve.hook_signing_note("pre-commit", "it ended with exit status 1")))
+        self.assertEqual(approve.apply_failure("r", other, None, committed=True),
+                         approve.apply_failure("r", other, None))
+        self.assertEqual(
+            note,
+            "This project's own settings in its repository ask for signed changes. Set up a signing key "
+            "on this computer and choose Apply it again, or change those settings in the repository, "
+            "then register it again.")
+        self.assertLessEqual(len(re.findall(r"[.!?](?=\s|$)", note)), 2)
+        self.assertEqual(sprint.words_found(note), [])
+        self.assertIsNone(INVARIANT.search(note))
+        for word in BANNED:
+            self.assertNotIn(word, note)
+
     def test_page_words_reads_markup_text_and_visible_attributes(self):
         html = '<p title="Open the pull request">The land lock</p><style>.held{}</style><template id="x"><b>held</b></template><script>"use strict";</script>'
         words = page_words(html)

@@ -1315,5 +1315,63 @@ class StrandedHookTest(unittest.TestCase):
             self.assertEqual(looked, [])
 
 
+SIGNED_CONTRACT = {"schema_version": 2, "bindings": {"vcs": {"commit": {"signed": True}}}}
+
+
+class CommittedContractTest(unittest.TestCase):
+    def committed(self, tmp, text):
+        root = sample(Path(tmp), remote=False)
+        (root / ".agents").mkdir()
+        commit(root, {".agents/project.json": text})
+        return root
+
+    def test_asks_for_signing_only_for_a_schema_two_contract_that_asks_for_it(self):
+        def with_signed(value, version=2):
+            return {"schema_version": version, "bindings": {"vcs": {"commit": {"signed": value}}}}
+
+        self.assertIs(cd.asks_for_signing(SIGNED_CONTRACT), True)
+        for name, contract in (
+                ("false", with_signed(False)), ("string", with_signed("true")), ("one", with_signed(1)),
+                ("no commit", {"schema_version": 2, "bindings": {"vcs": {}}}),
+                ("no vcs", {"schema_version": 2, "bindings": {}}),
+                ("no bindings", {"schema_version": 2}),
+                ("schema 3", with_signed(True, 3)), ("bool schema", with_signed(True, True)),
+                ("float schema", with_signed(True, 2.0)), ("string schema", with_signed(True, "2")),
+                ("none", None), ("list", []), ("text", "x"), ("empty", {})):
+            with self.subTest(name):
+                self.assertIs(cd.asks_for_signing(contract), False)
+
+    def test_committed_contract_reads_the_contract_at_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, json.dumps({"schema_version": 2}))
+            (root / ".agents/project.json").write_text(json.dumps({"schema_version": 3}))
+            self.assertEqual(cd.committed_contract(str(root)), {"schema_version": 2})
+            self.assertEqual(git(root, "status", "--porcelain"), " M .agents/project.json\n")
+
+    def test_no_committed_contract_reads_as_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(cd.committed_contract(str(sample(Path(tmp), remote=False))))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(cd.committed_contract(str(self.committed(tmp, "not json"))))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(cd.committed_contract(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, json.dumps(SIGNED_CONTRACT))
+            stopped = threading.Event()
+            stopped.set()
+            self.assertIsNone(cd.committed_contract(str(root), stopped))
+
+    def test_signing_committed_reads_the_checkout_only_on_a_signing_refusal(self):
+        refusal = {"repair_id": "adopt.commit.signing_unavailable"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, json.dumps(SIGNED_CONTRACT))
+            self.assertIs(cd.signing_committed(str(root), refusal), True)
+            with unittest.mock.patch.object(cd, "_git", wraps=cd._git) as spy:
+                self.assertIs(cd.signing_committed(str(root), {"repair_id": "adopt.commit.failed"}), False)
+                self.assertEqual(spy.call_count, 0)
+            commit(root, {".agents/project.json": json.dumps({"schema_version": 3})})
+            self.assertIs(cd.signing_committed(str(root), refusal), False)
+
+
 if __name__ == "__main__":
     unittest.main()
