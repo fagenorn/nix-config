@@ -562,6 +562,10 @@ console-screenshots out="":
   dir="{{out}}"
   PLAYWRIGHT_BROWSERS_PATH="$browsers" PYTHONPATH="{{agent_tools_path}}" "$py/bin/python3" -m tests.console_screenshots --out "${dir:-$HOME/tmp/clarity-screenshots}"
 
+# Cut the stubbed delivery after each event and result file of its ledger and continue it (nightly, daily in CI).
+engine-cut-sweep:
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v tests/test_engine_cut_sweep_daily.py
+
 # Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build
   @set -- $(nix-store --query --requisites ./result \
