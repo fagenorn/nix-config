@@ -64,8 +64,9 @@ def resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> Resumed
     ended = [document for document in records if document.get("attempt") == max(launched, default=1)]
     retry = next((document["retry"] for document in ended if isinstance(document.get("retry"), str)), None)
     if ended and retry is None:
-        if not any(document.get("denials") for document in ended):
-            return None
+        if (not any(document.get("denials") for document in ended)
+                or any(document.get("exit_code") == engine_session.ALL_OUT_EXIT for document in ended)):
+            return None  # an all-out launch ends at `quota-wait` whatever it reported, so its visit is entered again
         # the launch ended with a refusal it was not asked about again, and was cut before its stop was recorded
         refused = [document for document in sorted(records, key=lambda d: d.get("attempt") or 0)
                    if isinstance(document.get("denials"), list)]

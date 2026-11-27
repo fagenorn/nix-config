@@ -12,13 +12,14 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_ledger, engine_stop
+from agent_tools.delivery import engine_ledger, engine_resume, engine_session, engine_stop
 from tests.process_liveness import process_alive
 from tests.test_engine_continue import gated
 from tests.test_engine_deliver import EngineProject, run_continued, shape, start_deliver, step
@@ -791,6 +792,31 @@ class ResumeTest(unittest.TestCase):
         self.assertNotIn("--resume", records[1]["argv"])
         self.assertEqual(self.entered(run), [1, 2])
         self.assertEqual(len(run_continued(self.project.events(run))), 1)
+
+
+class DeniedRecordTest(unittest.TestCase):
+    """`engine_resume.resumed` over a record that holds denials and no re-ask (the launcher stand-in never
+    prints a reading for an all-out launch, so the record is written by hand)."""
+
+    LEDGER = [{"event": "step_entered", "step": "draft", "visit": 1},
+              {"event": "session_starting", "step": "draft", "visit": 1, "session": "s-1"}]
+
+    def resumed(self, exit_code: int):
+        with tempfile.TemporaryDirectory() as scratch:
+            run = Path(scratch)
+            (run / "sessions").mkdir()
+            denial = {"tool_name": "Bash", "tool_use_id": "toolu_01", "tool_input": {"command": "rm x"}}
+            (run / "sessions/draft.1.json").write_text(json.dumps(
+                {"attempt": 1, "denials": [denial], "exit_code": exit_code}), encoding="utf-8")
+            return engine_resume.resumed(run, self.LEDGER, "draft", 1)
+
+    def test_a_refused_launch_cut_before_its_stop_was_recorded_resumes_with_the_tool_denied_stop(self):
+        resumed = self.resumed(0)
+        self.assertIsNotNone(resumed)
+        self.assertIn(repr("rm x"), resumed.stop)
+
+    def test_an_all_out_launch_holding_denials_is_entered_again_not_stopped_tool_denied(self):
+        self.assertIsNone(self.resumed(engine_session.ALL_OUT_EXIT))
 
 
 if __name__ == "__main__":
