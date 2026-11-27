@@ -648,6 +648,11 @@ def state_root() -> Path:
     return Path(os.environ["HOME"]) / ".agents" / "state"
 
 
+def engine_runs_root() -> Path:
+    """The directory holding one directory per engine run."""
+    return state_root() / "engine" / "runs"
+
+
 def ensure_directory(path: Path) -> Path:
     """Create `path` and its parents if absent, and return it."""
     path.mkdir(mode=0o755, parents=True, exist_ok=True)

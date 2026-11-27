@@ -9,7 +9,9 @@ command the guard refuses in a Claude Code session is refused here too.
       `Unavailable`, and `locate` never raises. A settings document with a hook
       switch on loads no user hook, a Bash hook with an `if` filter may be
       skipped, and an asynchronous Bash hook (`async` or `asyncRewake` set) may refuse
-      after the tool has run, so all three are `Unavailable` too.
+      after the tool has run, so all three are `Unavailable` too. Given the launch
+      directory, its project settings (`PROJECT_SETTINGS`) are read too: one that cannot
+      be read as a JSON object or that turns a hook switch on is `Unavailable`.
   D5  `judge` runs that hook as a subprocess with the Bash PreToolUse payload on
       stdin and `directory` as its working directory. Only exit 0 allows; exit 2
       refuses with the guard's stderr minus one line ending; any other exit, a
@@ -38,6 +40,7 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.delivery import engine_stop
 
 SETTINGS = Path(".claude") / "settings.json"
+PROJECT_SETTINGS = (Path(".claude") / "settings.json", Path(".claude") / "settings.local.json")
 MAX_TIMEOUT_SECONDS = 3600
 GUARD_SUFFIX = "/bin/claude-bash-lifecycle-guard"
 HOOK_SWITCHES = ("allowManagedHooksOnly", "disableAllHooks")
@@ -123,9 +126,31 @@ def _defect(document: object) -> tuple[Hook | None, str]:
     return Hook(command, float(hook["timeout"])), ""
 
 
-def locate(settings: Path | Unavailable) -> Hook | Unavailable:
+def _project_defect(directory: str) -> Unavailable | None:
+    for relative in PROJECT_SETTINGS:
+        path = Path(directory) / relative
+        if not path.exists():
+            continue
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"),
+                                  object_pairs_hook=reject_duplicate_keys,
+                                  parse_constant=reject_nonfinite_literal)
+        except (OSError, ValueError, RecursionError) as error:
+            return Unavailable(f"The project settings {path} cannot be read: {str(error).rstrip('.')}.")
+        if not isinstance(document, dict):
+            return Unavailable(f"The project settings {path} are not a JSON object.")
+        for name in HOOK_SWITCHES:
+            if name in document and document[name] is not False:
+                return Unavailable(f"The project settings {path} turn the hooks off: "
+                                   f"their {name} switch is on.")
+    return None
+
+
+def locate(settings: Path | Unavailable, directory: str | None = None) -> Hook | Unavailable:
     if isinstance(settings, Unavailable):
         return settings
+    if directory is not None and (defect := _project_defect(directory)) is not None:
+        return defect
     try:
         document = json.loads(settings.read_text(encoding="utf-8"),
                               object_pairs_hook=reject_duplicate_keys,

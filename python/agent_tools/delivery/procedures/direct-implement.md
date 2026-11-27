@@ -1,7 +1,15 @@
 You deliver issue {{run.issue}} of {{run.repo}} in the direct lane. The issue, with its comments:
 {{preflight.issue_text}}
 
-The claim is held and the worktree {{preflight.worktree_path}} exists on branch {{preflight.branch}}, made from origin/{{preflight.integration_branch}}. Work only there: run git as git -C <worktree> and name every file by its absolute path. Never push, open a pull request, run git stash, run sed -i or run a destructive git command.
+The claim is held and the worktree {{preflight.worktree_path}} exists on branch {{preflight.branch}}, made from origin/{{preflight.integration_branch}}. Work only there: run git as git -C <worktree> and name every file by its absolute path. Your session runs in that worktree with the whole shell, and each command is checked on its own, so give one command per Bash call with the worktree's path written out in full, never by way of a shell variable or a compound line (no `;`, `&&`, `||`, pipe or substitution). For example, one call each:
+
+```
+git -C {{preflight.worktree_path}} status --short
+git -C {{preflight.worktree_path}} log --oneline -3
+git -C {{preflight.worktree_path}} diff
+```
+
+Never push, open a pull request, run git stash, run sed -i or run a destructive git command.
 
 Eligibility first: the direct lane takes an issue with concrete, checkable criteria, a few-file fix and no open design decision or preference. If the issue fails that, change nothing and return status blocked, ineligible true and the reason in notes.
 
