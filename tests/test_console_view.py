@@ -198,16 +198,15 @@ class FoldTableTest(unittest.TestCase):
 class StatementTest(unittest.TestCase):
     def test_the_statement_says_nothing_needs_you(self):
         table = [
-            (0, "No project is registered yet."),
-            (1, "1 registered project, and nothing is waiting on you."),
-            (5, "5 registered projects, and nothing is waiting on you."),
+            (0, "Nothing needs you", "No project is registered yet."),
+            *((n, "You're done for now", "No sprint is working; we'll put anything that needs you here.") for n in (1, 5)),
         ]
-        for n, sentence in table:
+        for n, headline, sentence in table:
             with self.subTest(projects=n):
                 result = derive_view(state(f"p{i}", i) for i in range(n))
                 self.assertEqual(result["statement"], {
                     "inbox_items": 0,
-                    "headline": "Nothing needs you",
+                    "headline": headline,
                     "sentence": sentence,
                     "stale": False,
                 })
@@ -262,8 +261,8 @@ class RegistryChangesTest(unittest.TestCase):
 
 class SessionViewTest(unittest.TestCase):
     NO_SESSION_STATEMENT = {
-        "inbox_items": 0, "headline": "Nothing needs you",
-        "sentence": "1 registered project, and nothing is waiting on you.",
+        "inbox_items": 0, "headline": "You're done for now",
+        "sentence": "No sprint is working; we'll put anything that needs you here.",
         "stale": False}
 
     def test_a_projects_sessions_form_its_outside_sprints_line(self):
@@ -778,7 +777,7 @@ class InboxStatementTest(unittest.TestCase):
         self.assertIsNone(result["open"][0]["answered_at"])
 
     def test_the_headline_counts_open_items(self):
-        table = [(0, "Nothing needs you"), (1, "1 thing needs you"),
+        table = [(0, "You're done for now"), (1, "1 thing needs you"),
                  (3, "3 things need you")]
         for n, headline in table:
             with self.subTest(open=n):
@@ -852,7 +851,7 @@ class InboxStatementTest(unittest.TestCase):
         self.assertIs(fresh["stale"], False)
         self.assertEqual(fresh["read_at"], "r2")
         quiet = derive_view(states, None, healthy)["statement"]
-        self.assertEqual(quiet["headline"], "Nothing needs you")
+        self.assertEqual(quiet["headline"], "You're done for now")
         self.assertIs(quiet["stale"], False)
 
     def test_items_of_unregistered_projects_are_not_shown(self):
@@ -1147,7 +1146,7 @@ class BriefViewTest(unittest.TestCase):
         self.assertNotEqual(sprint_ball(stopping, T0_MS, 0, ()), "owner")
         self.assertEqual(sprint_ball(briefed(sprint(sid)), T0_MS, 0, ()), "owner")
         self.assertEqual(view["statement"]["inbox_items"], 0)
-        self.assertEqual(view["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(view["statement"]["headline"], "You're done for now")
 
     def test_a_brief_of_a_closed_or_stopped_sprint_is_no_item(self):
         a, b = "a" * 16, "b" * 16
@@ -1163,7 +1162,7 @@ class BriefViewTest(unittest.TestCase):
             b: briefed(sprint(b), decision=CHANGES, reply="shrink it"),
             c: briefed(sprint(c, pid="p09"))})
         self.assertEqual(view["inbox"]["open"], [])
-        self.assertEqual(view["statement"], derive_view([state("p00", 1)])["statement"])
+        self.assertEqual(view["statement"]["sentence"], "2 sprints are working; we'll put anything that needs you here.")
 
     def test_an_approved_brief_makes_the_sprint_starting(self):
         sid = "a" * 16
@@ -1428,7 +1427,7 @@ def permission_item(sid=A, prompt=7, title="make the importer resumable"):
 
 
 class HeadingCountsOwnerBallTest(unittest.TestCase):
-    """The heading never says "Nothing needs you" beside a sprint whose ball is the owner's (#1247)."""
+    """The heading never says "You're done for now" beside a sprint whose ball is the owner's (#1247)."""
 
     def shown(self, sprint_state, sessions=(), records=None, prompts=()):
         return derive_view([state("p00", 1)], records, sprints={A: sprint_state},
@@ -1482,7 +1481,7 @@ class PermissionPromptViewTest(unittest.TestCase):
                 shown = self.shown(waiting)
                 self.assertNotEqual(entry(shown)["ball"], "owner")
                 self.assertEqual(shown["statement"]["inbox_items"], 0)
-                self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+                self.assertEqual(shown["statement"]["headline"], "You're done for now")
                 self.assertNotIn("permission", entry(shown)["now_text"])
                 self.assertNotIn("answer", entry(shown)["now_text"])
 
@@ -1616,7 +1615,7 @@ class PermissionPromptViewTest(unittest.TestCase):
                 shown = self.shown(waiting, sprint_state=stopping)
                 self.assertEqual(entry(shown)["now_text"], view.NOW_STOPPING_TEXT)
                 self.assertEqual(shown["statement"]["inbox_items"], 0)
-                self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+                self.assertEqual(shown["statement"]["headline"], "You're done for now")
 
     def test_a_deaf_manager_beside_an_open_card_reads_both(self):
         B = "b" * 16
@@ -1636,7 +1635,7 @@ class PermissionPromptViewTest(unittest.TestCase):
         shown = self.shown("working")
         self.assertEqual(entry(shown)["ball"], "manager")
         self.assertEqual(shown["statement"]["inbox_items"], 0)
-        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(shown["statement"]["headline"], "You're done for now")
 
 
 class SprintReportViewTest(unittest.TestCase):
@@ -1656,7 +1655,7 @@ class SprintReportViewTest(unittest.TestCase):
         shown = entry(line(it, T0_MS + 5 * MIN))
         self.assertEqual(shown["progress"],
                          {"landed": 3, "in_delivery": 2, "queued": 2, "held": 0, "total": 7})
-        self.assertEqual(shown["progress_text"], "3 of 7 landed, 2 in delivery, 2 queued")
+        self.assertEqual(shown["progress_text"], "3 done, 2 in work, 2 waiting to start")
         self.assertEqual(shown["state_text"], "on track")
         self.assertEqual(shown["status"], "two slices are building")
         self.assertEqual(shown["status_at"], iso(R))
@@ -1666,7 +1665,7 @@ class SprintReportViewTest(unittest.TestCase):
         held = reported(started(A), R, issues=SEVEN[:6] + ((7, "held"),))
         shown = entry(line(held, T0_MS + 5 * MIN))
         self.assertEqual(shown["progress_text"],
-                         "3 of 7 landed, 2 in delivery, 1 queued, 1 held")
+                         "3 done, 2 in work, 1 waiting to start, 1 waiting for a check")
         self.assertEqual(shown["progress"]["held"], 1)
 
     def test_state_drafting_the_brief(self):
@@ -1717,7 +1716,7 @@ class SprintReportViewTest(unittest.TestCase):
                 shown = entry(line(HELD_SPRINT, R + 4 * MIN, records))
                 self.assertEqual((shown["ball"], shown["ball_text"]),
                                  ("manager", "manager working"))
-                self.assertEqual(shown["now_text"], "building 1 of 3: Importer resumes")
+                self.assertEqual(shown["now_text"], "Working on 1 issue.")
                 self.assertEqual(shown["waiting"], 0)
                 self.assertEqual(shown["state"], "on_track")
 
@@ -2092,7 +2091,7 @@ class SprintMovementViewTest(unittest.TestCase):
         shown = entry(line(self.base, now, sessions=[working_session]))
         self.assertEqual((shown["state"], shown["state_text"]), ("on_track", "on track"))
         self.assertEqual((shown["ball"], shown["ball_text"]), ("manager", "manager working"))
-        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(shown["now_text"], "Working on 2 issues.")
 
     def test_a_folded_run_on_an_unreported_issue_keeps_the_sprint_moving(self):
         rows = [
@@ -2113,7 +2112,7 @@ class SprintMovementViewTest(unittest.TestCase):
                 shown = entry(line(folded, now))
                 self.assertEqual(shown["state"], "on_track")
                 self.assertEqual(shown["ball"], "manager")
-                self.assertEqual(shown["now_text"], "building 1 of 2: Importer resumes")
+                self.assertEqual(shown["now_text"], "Working on 1 issue.")
 
     def test_the_state_the_ball_and_the_last_seen_prefix_agree_over_every_movement_signal(self):
         now, recent = R + 20 * MIN, R + 18 * MIN
@@ -2148,7 +2147,7 @@ class SprintMovementViewTest(unittest.TestCase):
                          ("quiet", "quiet for 20 min \u2014 may be stuck"))
         self.assertEqual((shown["ball"], shown["ball_text"]),
                          ("nobody", "nothing running, may be stuck"))
-        self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
+        self.assertEqual(shown["now_text"], "last seen working on 2 issues.")
 
     def test_a_failed_launch_drops_only_the_goals_freshness(self):
         now = R + 20 * MIN
@@ -2163,13 +2162,13 @@ class SprintMovementViewTest(unittest.TestCase):
             with self.subTest(label):
                 shown = entry(line(s, now))
                 self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
-                self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+                self.assertEqual(shown["now_text"], "Working on 2 issues.")
         with self.subTest("nothing moved for twenty minutes"):
             shown = entry(line(failed_at(reported(started(A), R), R + 5 * MIN), now))
             self.assertEqual((shown["state"], shown["state_text"]),
                              ("quiet", "quiet for 20 min \u2014 may be stuck"))
             self.assertEqual(shown["ball"], "nobody")
-            self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
+            self.assertEqual(shown["now_text"], "last seen working on 2 issues.")
         with self.subTest("drafting, a failed start is the owner's card"):
             fresh = failed_at(sprint(A), T0_MS)
             at = T0_MS + MIN
@@ -2281,7 +2280,7 @@ class SprintWaitViewTest(unittest.TestCase):
                                      ("quiet", "quiet for 16 min \u2014 may be stuck"))
                     self.assertEqual(shown["ball"], "nobody")
                     self.assertEqual(shown["now_text"],
-                                     "last seen building 1 of 7: Importer resumes")
+                                     "last seen working on 2 issues.")
                 else:
                     self.assertEqual(shown["ball"], "manager")
                     self.assertEqual(shown["now_text"], "waiting its turn to merge")
@@ -2315,7 +2314,7 @@ class SprintWaitViewTest(unittest.TestCase):
                                      ("quiet", "quiet for 20 min \u2014 may be stuck"))
                     self.assertEqual(shown["ball_text"], "nothing running, may be stuck")
                     self.assertEqual(shown["now_text"],
-                                     "last seen building 1 of 7: Importer resumes")
+                                     "last seen working on 2 issues.")
 
     def test_the_wait_sentence_follows_ci_then_committing_then_release_then_the_land_lock(self):
         now = self.now
@@ -2338,7 +2337,7 @@ class SprintWaitViewTest(unittest.TestCase):
     def test_the_wait_sentence_shows_only_while_nothing_else_moves(self):
         now = self.now
         movement = moving(release_ms=now - MIN)
-        stage = "building 1 of 7: Importer resumes"
+        stage = "Working on 2 issues."
         with self.subTest("a working session"):
             self.assertEqual(self.shown(movement, sessions=[working_session])["now_text"], stage)
         with self.subTest("a fresh report"):
@@ -2565,7 +2564,7 @@ class DeafManagerViewTest(unittest.TestCase):
                          (sprints_module.NOW_PERMISSION_TEXT, "owner"))
         shown = self.shown(False, "working")
         self.assertEqual((shown["now_text"], shown["ball"]),
-                         ("building 1 of 7: Importer resumes", "manager"))
+                         ("Working on 2 issues.", "manager"))
 
     def test_a_question_wait_without_a_card_reads_as_the_manager(self):
         shown = self.shown(False, "waiting_answer")
@@ -2577,14 +2576,14 @@ class DeafManagerViewTest(unittest.TestCase):
         shown = entry(line(self.base, self.now, sessions=[working_session, delivery],
                            movement=moving(sessions=(
                                SessionMovement("d1", A, None, None, None, self.now - MIN, True),))))
-        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(shown["now_text"], "Working on 2 issues.")
         other = entry(line(self.base, self.now, sessions=[working_session], movement=moving(
             sessions=(SessionMovement("s1", "b" * 16, None, None, None, self.now - MIN, True),))))
-        self.assertEqual(other["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(other["now_text"], "Working on 2 issues.")
 
     def test_no_movement_reading_never_reads_deaf(self):
         shown = entry(line(self.base, self.now, sessions=[working_session], movement=None))
-        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(shown["now_text"], "Working on 2 issues.")
 
 
 class SessionSignalViewTest(unittest.TestCase):
@@ -2602,10 +2601,10 @@ class SessionSignalViewTest(unittest.TestCase):
         now = self.now
         shown = self.shown(moving(sessions=(SessionMovement("s1", A, now - 5 * MIN, None, None),)))
         self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
-        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(shown["now_text"], "Working on 2 issues.")
         shown = self.shown(moving(sessions=(SessionMovement("s1", A, now - 5 * MIN, None, None),),
                                   release_ms=now - MIN))
-        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(shown["now_text"], "Working on 2 issues.")
 
     def test_a_running_check_moves_a_sprint_whose_manager_failed(self):
         now = self.now
@@ -2671,7 +2670,7 @@ class SessionSignalViewTest(unittest.TestCase):
             pulls=(PullMovement(1, frozenset({4}), now - 3 * MIN, now - 5 * MIN),),
             release_ms=now - 7 * MIN,
             sessions=(SessionMovement("s1", A, now - 5 * MIN, None, None),)))
-        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(shown["now_text"], "Working on 2 issues.")
         self.assertEqual(shown["movement"]["waits"], {
             "ci_at": utc(now - 3 * MIN), "commit_at": utc(now - 5 * MIN),
             "release_at": utc(now - 7 * MIN), "lock_at": None})
@@ -2939,9 +2938,9 @@ class SprintViewTest(unittest.TestCase):
             "now_until": None,
             "stated_at": T0, "started_by": None, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True, "move": False,
-            "progress": None, "progress_text": None, "status": None, "status_at": None,
+            "progress": None, "progress_text": None, "status": None, "status_at": None, "work_text": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
-            "checks": [], "waits": [], "live_faults": [],
+            "checks": [], "waits": [], "live_faults": [], "now_titled": False, "legend": None,
             "sessions": [], "messages": [], "approval": None, "reach_text": None,
             "tell_text": "The manager picks it up at its next turn.",
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
@@ -3111,7 +3110,7 @@ class NoticeViewTest(unittest.TestCase):
         self.assertEqual(with_["statement"], without["statement"])
         self.assertEqual(with_["inbox"], without["inbox"])
         self.assertEqual(with_["statement"]["inbox_items"], 0)
-        self.assertEqual(with_["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(with_["statement"]["headline"], "You're done for now")
 
         owner = {"p00": (Notice(9, at_min(9), "heads-up", "routes are frozen until Friday"),)}
         owned = derive_view([state("p00", 1)], sprints={A: sa}, owner_notices=owner,
@@ -3423,7 +3422,7 @@ class SigninViewTest(unittest.TestCase):
                              ends_at="2026-12-13T09:00:00+00:00")
         shown = derive_view([state("p00", 1)], capacity=signin_capacity(home, fresh))
         self.assertEqual(shown["inbox"]["open"], [])
-        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(shown["statement"]["headline"], "You're done for now")
 
     def test_a_signed_out_profile_a_colleague_added_raises_no_sign_in_item(self):
         """#1361, ADR-console-087: signing a colleague's account in is his, never the owner's."""
@@ -3435,7 +3434,7 @@ class SigninViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["inbox_items"], 2)
         alone = derive_view([state("p00", 1)], capacity=signin_capacity(his))
         self.assertEqual(alone["inbox"]["open"], [])
-        self.assertEqual(alone["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(alone["statement"]["headline"], "You're done for now")
 
     def test_a_never_signed_in_profile_is_offered_sign_in_not_sign_in_again(self):
         fresh = signin_entry("fresh", "signed_out", True, since="t1")
@@ -4029,7 +4028,7 @@ class WaitingLineTest(unittest.TestCase):
     def test_a_waiting_check_is_a_line_under_its_sprint_and_not_counted(self):
         shown = self.view_of(self.waiting())
         self.assertEqual(shown["statement"]["inbox_items"], 0)
-        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(shown["statement"]["headline"], "You're done for now")
         self.assertEqual(shown["inbox"]["open"], [])
         self.assertEqual(entry(shown)["waits"], [{
             "key": "k-wait", "issue": 619, "url": "https://example.test/k-wait", "until": self.UNTIL,

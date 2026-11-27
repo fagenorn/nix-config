@@ -48,7 +48,8 @@ child once one faults; `engine status` reads the root run, never a child:
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`; the end may be the
-  engine's own stop `quota-wait` (need `retry`), when every account is out of usage, or
+  engine's own stop `quota-wait` (need `retry`), when every account is out of usage,
+  `tool-denied` (need `owner-decision`), when a session was denied a tool call, or
   `stopped-by-request` (need `retry`), when `engine stop` ended the step in progress;
 - exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"}, "run"}`,
   another deliver of the issue holds its run's lock; nothing is written;

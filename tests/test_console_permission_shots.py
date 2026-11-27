@@ -69,7 +69,7 @@ class PermissionShotTest(unittest.TestCase):
                 mock.patch.dict(sys.modules, {"playwright": types.ModuleType("playwright"),
                                               "playwright.sync_api": api}), \
                 mock.patch.object(shots, "_shoot", side_effect=fake):
-            shots.capture(Path(tmp), states=(state,))
+            shots.capture(Path(tmp), states=(state,), home=Path(tmp) / "home")
         return views
 
     def test_the_permission_card_shot_finds_the_held_prompt_at_each_width(self) -> None:

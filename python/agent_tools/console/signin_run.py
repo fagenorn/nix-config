@@ -188,6 +188,7 @@ ENDS = ("exited", "timed_out", "cancelled")
 CODE_INPUT = "pipe"
 CODE_END = {"pipe": "\n", "pty": "\r"}
 POLL_SECONDS = 0.1
+EXIT_GRACE = 1.0
 
 _ACTION_OUTCOMES = {"start": START_OUTCOMES, "code": ("sent",), "cancel": ("cancelled",),
                     "signout": ("signed_out", "failed")}
@@ -503,8 +504,36 @@ class _Client:
         return code
 
     def kill_group(self) -> None:
-        with contextlib.suppress(ProcessLookupError):
+        """End the client's group; a group that is gone counts as ended.
+
+        On macOS a group holding only the exited leader answers EPERM, not ESRCH, and that EPERM
+        counts as ended once the kernel reports the leader exited. Elsewhere EPERM is raised.
+        """
+        try:
             os.killpg(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            if sys.platform != "darwin" or not self._exited():
+                raise
+
+    def _exited(self) -> bool:
+        """Whether the kernel reports the leader exited, within EXIT_GRACE.
+
+        A leader mid-exit already answers EPERM but is not yet a zombie, so the check polls the
+        kernel; it never depends on the waiter thread having recorded the exit.
+        """
+        end = time.monotonic() + EXIT_GRACE
+        while True:
+            try:
+                flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+                if os.waitid(os.P_PID, self.pid, flags) is not None:
+                    return True
+            except ChildProcessError:
+                return True
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.005)
 
     def output(self) -> int | None:
         if self._master is not None:

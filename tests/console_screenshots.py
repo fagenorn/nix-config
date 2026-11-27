@@ -3,9 +3,11 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-seven screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
-  the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
+  the sprint block with its Tell box opened; `sprint-fold-open` is the sprint block of `tell-box-open`
+  with its own fold and its End the sprint fold opened (`open_end_fold`); on a base console End the
+  sprint opens beside Tell the manager, the before picture; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
   running sprint's manager session, an outside-sprint session and one workflow run, with spend on
   at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold
@@ -30,7 +32,7 @@ Contract:
   the sprint) folded working, then a `PermissionRequest` hook row for a Bash prompt, then a
   transcript whose `user` record is stamped after that hook (the 21 Nov reading: the manager's own
   hook refused the prompt at once and it went on working); on the branch's console the heading reads
-  "Nothing needs you" and the session reads working after the first session poll, on the base
+  "You're done for now" and the session reads working after the first session poll, on the base
   commit's the same seed reads "1 thing needs you" with the terminal sentence, the before picture
   (#1424); `permission-card` is that sprint with its manager's held Bash prompt, `git worktree add
   ../.worktrees/issue-12` with the words "Create the delivery's worktree", posted to
@@ -55,7 +57,7 @@ Contract:
   characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
   typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
   `inbox-card` is `owner/web`'s question card with
-  two options and an owner check beside it; `question-words` and `question-refused` are
+  two options and an owner check beside it, and `owner/api`'s question as the second row; `question-words` and `question-refused` are
   `owner/web`'s look-check question card (Approve, Approve with one fix, Ask for changes, the last
   two marked as needing words) with Ask for changes picked: `question-words` with the words
   `LOOK_WORDS` typed in the card's words box (`WORDS_CARD`: the picked option, the words, the one
@@ -175,7 +177,7 @@ Contract:
   repository with no contract whose ready plan is drafted in schema 3 (`FACT_LINE`),
   served with a stand-in adopter and forge so the plan can be
   applied: `register-apply` is the ready Apply card of a project whose dev-shell hooks are not installed,
-  opening on the line that says Apply installs them (`register.HOOKS_LINE`) before the plan's own (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
+  opening on the line naming the development shell (`contract_draft.DRAFTED_ENVIRONMENT_LINE`), then the line that says Apply installs the hooks (`register.HOOKS_LINE`), before the plan's own (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
   and no draft beside it; `register-draft` is the same plan after the owner chose Not now (the
   `adoption.deferred` row is seeded), so no card asks and the registration's draft rows show with
   the project id as a fact line with no Change control. `register-reconcile-apply` and
@@ -183,64 +185,58 @@ Contract:
   and pending adoption work, a `reconcile` plan (#1333): the row seeds the reading the console takes
   of a pre-commit hook whose runner is not on the plain PATH and of a `devenv.nix`, so the plan
   proposes the same command, and the first is the Apply card, the second the plan after Not now.
-  `REGISTER_READING` reads the card's first
-  line, the proposal's draft row and whether that row has a Change button, and `REGISTER_SHOWN`
-  holds what each state must read on a page that proposes it (`proposes(state)`, which is
-  `shows_facts()` for `register-draft` and `proposes_reconcile()` for the reconcile pair); on
-  a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
-  picture, and any other reading fails. The base commit's register-draft has no facts and drafts the
-  commit environment as a main row with a Change button, so that row is its reading; its reconcile
-  row has no draft, so its Apply card opens on the plan's own first line and shows nothing.
-  `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
+  `REGISTER_READING` reads the card's first line, the proposal's draft row and whether that row has a Change button, and
+  `REGISTER_SHOWN` holds what each state must read on a page that proposes it (`proposes(state)`, which is
+  `shows_facts()` for `register-draft` and `proposes_reconcile()` for the reconcile pair); on a page that does not (the
+  base commit's) the reading is `REGISTER_BASE`, which is the before picture, and any other reading fails. The base
+  commit's register-draft has no facts and drafts the commit environment as a main row with a Change button, so that row
+  is its reading; its reconcile row has no draft, so its Apply card opens on the plan's own first line and shows
+  nothing. `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
   writes `<state>-<width>.png` for every pair, so a full run writes 114 files.
-- Each state is a fresh fixture console: a registry of three projects (`owner/web`,
-  `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
-  to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
-  written through the service, nothing is mocked in the page, and the launcher is an inert
-  stand-in that records what it is given and starts nothing (without one the view would say
-  managers are not available on this host).
-- The sandbox rule: every path the fixture touches lies under one temporary root, and
-  `main` points `HOME`, `CLAUDE_ACCOUNTS_DIR`, `CLAUDE_CONFIG_DIR`, `XDG_STATE_HOME` and
-  `XDG_CONFIG_HOME` under another for the run, so the owner's real accounts directory and real
-  registry are never read or written. The temporary roots are removed after each state.
+- Each state is a fresh fixture console: a registry of three projects (`owner/web`, `owner/api`, `owner/docs`) and an
+  event log seeded for that state, served by the real `ConsoleService` on a loopback port. Its event times, file times
+  and clock come from the run's one reading (`READING`, or `--now`); the page runs on it in `UTC` and `en-US`,
+  animations disabled. Nothing is written through the service or mocked in the page, and the launcher is an inert
+  stand-in that records what it is given and starts nothing (without one the view says managers are unavailable).
+- The sandbox rule: every path the fixture touches lies under one root, the fixed `root` of a private folder
+  of this user under `/tmp`, whatever `TMPDIR` is (or the `home` a caller passes), which is refused unless it is
+  this user's folder of mode 0700, held by one run at a time, and a `root` no run marked is never emptied, so a
+  path the page draws is the same on every run. `main` points `HOME`, `CLAUDE_ACCOUNTS_DIR`, `CLAUDE_CONFIG_DIR`,
+  `XDG_STATE_HOME` and `XDG_CONFIG_HOME` under a random temporary root for the run, so the owner's real accounts
+  directory and real registry are never read or written; the guest door is a random temporary folder too. An
+  output folder inside the private folder is refused.
 - `main(["--out", dir])` prints each written path. It returns 1 (and says so) when any shot's
-  `document.documentElement.scrollWidth` exceeds its width; when any sprint's "what it is
-  doing now" sentence is squeezed (it starts above its title's bottom, is narrower than the
-  head's line or than the title, is taller than two lines, or is clipped); when a shot shows a
-  jargon label (a "Detail" or "More" fold, an "Approved version" message row that is not
-  sent or not picked up, or one of the review's phrases in the rendered text: "on track",
-  "stated" before an age, "withdraw", "nudge", "stop or", "would do differently"); or when a
-  `tell-box-open` shot does not show the open Tell box (the textarea, the Send button and the
-  pick-up hint, with the label, the field and the hint not overlapping and the field as wide as
-  the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page that has the `ASK_OPEN`
-  button does not show `owner/web`'s open field, its working question and its answered question's
-  Read line (`OPEN_ASK`, or `HEAD_ASK` on a page with the reading panel); or when a
-  `activation-tooling` or `activation-host` shot does not read its `ACTIVATION_SHOWN` entry (nor, on a page that
-  cannot read `other`, `ACTIVATION_BASE`); or when a
-  `question-read` shot on a page with the panel does not read `READ_SHOWN` (`READ_READING`: the
-  panel in the main column at the column's full width, the question once (counted from the question the shot was seeded with, an argument of
-  the script), the answer holding bold,
-  a list, inline code and a block of code, the call-out last in its row after the answer, three
-  choices visible); or when a `deeper-offer` or `deeper-answer` shot on a page with the panel does not read as
-  `deeper_shows` says (each row's seeded answer phrase and exact spend line, Make it a goal and,
-  for the offer, the estimate holding the deeper row's figures), a None reading failing on a
-  page that has the panel; or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
-  opened, the follow-up's Read line shown, a follow-up button visible) nor `BASE_THREAD` (a page
-  without the fold that still lists the follow-up and its answer, the before picture), or when a `question-words` or `question-refused` shot's reading is not its `WORDS_CARD` or
-  `REFUSED_CARD`; or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
-  closed, the wrong text or project, or the field clipping the filled text); or when any
-  shot has a visible project line whose Ask a question button sits on another row than its Give it
-  a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the
-  page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
-  rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
-  tall (`SHORT_CONTROLS`, read after the state is drawn). When any shot misses a `STYLE_CHECKS`
-  row, the line names each miss: the row's computed style is read after the capture, with probes
-  and steps as `StyleCheck` and `STYLE_STEPS` say (`look-card` is shot with its viewer closed,
-  then opens its first picture, so the viewer rows read it open). The style reading and its steps run only when
-  `style_applies()` (the page served is the page beside this module), so a base run's pictures and
-  result are as before. In real-answer mode, `fixture` rows are skipped. `capture(...,
-  mutate=True)` records in `Shot.broke` each row whose `broken` rule made it miss. It returns 2
-  with a one-line reason when Playwright or Chromium is missing, else 0.
+  `document.documentElement.scrollWidth` exceeds its width; when any sprint's "what it is doing now" sentence is
+  squeezed (it starts above its title's bottom, is narrower than the head's line or than the title, is taller than two
+  lines, or is clipped); when a shot shows a jargon label (a "Detail" or "More" fold, an "Approved version" message
+  row that is not sent or not picked up, or one of the review's phrases in the rendered text: "on track", "stated"
+  before an age, "withdraw", "nudge", "stop or", "would do differently"); or when a `tell-box-open` shot does not show
+  the open Tell box (the textarea, the Send button and the pick-up hint, with the label, the field and the hint not
+  overlapping and the field as wide as the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page
+  that has the `ASK_OPEN` button does not show `owner/web`'s open field, its working question and its answered
+  question's Read line (`OPEN_ASK`, or `HEAD_ASK` on a page with the reading panel); or when a `activation-tooling` or
+  `activation-host` shot does not read its `ACTIVATION_SHOWN` entry (nor, on a page that cannot read `other`,
+  `ACTIVATION_BASE`); or when a `question-read` shot on a page with the panel does not read `READ_SHOWN`
+  (`READ_READING`: the panel in the main column at the column's full width, the question once (counted from the
+  question the shot was seeded with, an argument of the script), the answer holding bold, a list, inline code and a
+  block of code, the call-out last in its row after the answer, three choices visible); or when a `deeper-offer` or
+  `deeper-answer` shot on a page with the panel does not read as `deeper_shows` says (each row's seeded answer phrase
+  and exact spend line, Make it a goal and, for the offer, the estimate holding the deeper row's figures), a None
+  reading failing on a page that has the panel; or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
+  opened, the follow-up's Read line shown, a follow-up button visible) nor `BASE_THREAD` (a page without the fold that
+  still lists the follow-up and its answer, the before picture), or when a `question-words` or `question-refused`
+  shot's reading is not its `WORDS_CARD` or `REFUSED_CARD`; or when an `ask-goal` shot's reading is not `FILLED_GOAL`
+  (the box closed, the wrong text or project, or the field clipping the filled text); or when any shot has a visible
+  project line whose Ask a question button sits on another row than its Give it a goal button (their vertical centres
+  differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the page (`window.scrollY` is
+  not 0 right before its full-page capture); or when any shot has a control under 32 px tall, under 24 by 24 px, or (card answer, Tell the manager) under 44 px
+  while `PHONE_MEDIA` matches (`console_screenshot_controls.control_report`). When any shot
+  misses a `STYLE_CHECKS` row, the line names each miss: the row's computed style is read after the capture, with
+  probes and steps as `StyleCheck` and `STYLE_STEPS` say (`look-card` is shot with its viewer closed, then opens its
+  first picture, so the viewer rows read it open). The style reading and its steps run only when `style_applies()`
+  (the page served is the page beside this module), so a base run's pictures and result are as before. In real-answer
+  mode, `fixture` rows are skipped. `capture(..., mutate=True)` records in `Shot.broke` each row whose `broken` rule
+  made it miss. It returns 2 with a one-line reason when Playwright or Chromium is missing, else 0.
 - Real-answer mode: `main(["--out", dir, "--question", TEXT, "--answer-file", PATH])` (both or
   neither; one alone exits 2) shoots only `question-read`, seeded with that question and the
   file's UTF-8 text as the stored answer, so it writes exactly `question-read-1440.png` and
@@ -258,6 +254,7 @@ Contract:
   (the notice of a refused click whose card the forge's state removed); its two widths are
   served by two consoles, since the click cannot be repeated. On a page with no merge the opened step's `created` member is left out (a
   base console refuses it) and both shots wait only for the card, which is the before picture.
+- `live-several` reads issue titles from a stand-in tracker; a base console takes no `title_reader` and draws its stage phrase.
 - The before pictures are the base commit's service, view and page together: this module imports
   nothing from `agent_tools` that the base commit lacks, so running it with `PYTHONPATH` at an
   archive of the base commit's `python/` (`git archive <base> python`) serves the base page over the
@@ -294,11 +291,16 @@ from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret
 from agent_tools.system.forge_api import ForgeError
 
+from . import console_screenshot_stand_ins as stand_ins
+from . import console_screenshot_clock as shot_clock
 from .console_land_queue import land_queue_reader
+from .console_screenshot_controls import (ACTS_ROW, CONTROL_SELECTOR, SHORT_CONTROLS, SMALL_TARGETS,
+                                          control_report, open_end_fold)
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
+from .console_screenshot_stand_ins import UnixHTTPConnection as _UnixHTTPConnection, door_connection as _door_connection
 from .console_test_support import hook_body, write_registry
 
-STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open",
+STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open", "sprint-fold-open",
           "message-sent", "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
           "permission-long", "waiting-until", "paused",
@@ -652,6 +654,7 @@ class Fixture:
     adopting: bool = False
     refusing: bool = False
     prompting: str = ""
+    titled: bool = False
 
 
 @dataclass(frozen=True)
@@ -1337,7 +1340,6 @@ STYLE_CHECKS += (
     _narrow("viewer-pair-direction", _LOOK, ".viewer-pair", "flex-direction", "equals", "column",
             "row"),
 )
-CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
 KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "field-area",
          "field-code")
 BUTTON_KINDS = KINDS[:4]
@@ -1656,9 +1658,7 @@ STYLE_MUTATE = r"""((css) => {
 STYLE_SETTLE = r"""(async () => {
   // A picture is fetched after the page draws it, so wait for each one to have its source and load.
   for (let tries = 0; tries < 100; tries++) {
-    const waiting = Array.from(document.querySelectorAll('img.pic-img')).some(
-      (img) => !img.hidden && (!img.getAttribute('src') || !img.complete));
-    if (!waiting) break;
+    if (!(""" + shot_clock.PICTURES_PENDING + r""")) break;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   for (const animation of document.getAnimations()) {
@@ -2087,6 +2087,7 @@ class Shot:
     tell: tuple[bool, str | None, str | None, bool] | None = None
     scroll_y: float = 0.0
     short: tuple[str, ...] = ()
+    small: tuple[str, ...] = ()
     ask: tuple[bool, str | None, str | None] | None = None
     goal: tuple[bool, str | None, str | None, bool | None] | None = None
     acts: tuple[str, ...] = ()
@@ -2143,10 +2144,13 @@ class _Seed:
     def sprint(self, project: str, title: str, *, started: float, report: float | None = None,
                landed: bool = False, asks: bool = False, close: float | None = None,
                stop: float | None = None, held: bool = False,
-               look: bool = False, report_extra: Mapping | None = None) -> tuple[str, str]:
+               look: bool = False, report_extra: Mapping | None = None,
+               issues: Sequence[Mapping] | None = None,
+               then: tuple[float, Sequence[Mapping]] | None = None) -> tuple[str, str]:
         """One approved sprint with a started manager; returns `(sprint_id, goal)`.
 
-        `report_extra` is merged into the `sprint.reported` row's `report`."""
+        `report_extra` is merged into the `sprint.reported` row's `report`; `issues` replaces its default issue
+        rows, and `then` is a second `sprint.reported` row, that many seconds ago, with those issue rows."""
         self.count += 1
         sid = f"{self.count:016x}"
         goal = f"{title}."
@@ -2161,15 +2165,18 @@ class _Seed:
             "risks": ["a partial write"], "asks": []}})
         approved = self.put(started - 60, "brief.approved", project, {**base, "version": 1})
         self.put(started - 70, "sprint.read", project, {"sprint_id": sid, "through": approved.seq})
-        issues = ([{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "landed"}] if landed
+        issues = issues or ([{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "landed"}] if landed
                   else [{"issue": 11, "stage": "held"}, {"issue": 12, "stage": "building"},
                         {"issue": 13, "stage": "queued"}] if held
                   else [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "queued"}])
         if report is not None:
-            self.put(report, "sprint.reported", project, {**base, "report": {
-                "status": "the first slice is in review", "phase": "running",
-                "milestone": MILESTONES[title], "tracker_url": TRACKER_URL, "issues": issues,
-                "inbox": [], "next": "merge the first slice", **(report_extra or {})}})
+            member = {"status": "the first slice is in review", "phase": "running",
+                      "milestone": MILESTONES[title], "tracker_url": TRACKER_URL, "issues": issues,
+                      "inbox": [], "next": "merge the first slice", **(report_extra or {})}
+            self.put(report, "sprint.reported", project, {**base, "report": member})
+            if then is not None:
+                self.put(then[0], "sprint.reported", project, {
+                    **base, "report": {**member, "issues": list(then[1])}})
         if asks:
             self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
                 "question": "Which store should the checkpoint use?",
@@ -2363,7 +2370,7 @@ def _seed_registration(seed: _Seed, state: str, root: str) -> None:
     seed.put(MINUTE, event_log.REGISTRATION_ENDED, None, {
         "by": "owner", "root": root, "project_id": f"owner/{REGISTER_NAME}", "result": "planned",
         "outcome": "changes", "headline": f"What adopting {REGISTER_NAME} would change.",
-        "lines": [*filter(None, [getattr(register, "HOOKS_LINE", None)]), *REGISTER_PLAN_LINES], "note": None, "plan_id": REGISTER_PLAN_ID,
+        "lines": [*filter(None, [getattr(contract_draft, "DRAFTED_ENVIRONMENT_LINE", None), getattr(register, "HOOKS_LINE", None)]), *REGISTER_PLAN_LINES], "note": None, "plan_id": REGISTER_PLAN_ID,
         "state": "ready", "questions": [], "answered": [], "draft": fields, "remote": None})
     if state == "register-draft":
         seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
@@ -2435,11 +2442,17 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         _seed_adoption(seed, state, web_root)
         return ()
     if state == "live-several":
-        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
+        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE,
+                    issues=[{"issue": 31, "stage": "building"}, {"issue": 32, "stage": "queued"}])
         seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
                     report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
-        seed.sprint(web, "Fix the settings page", started=20 * MINUTE, report=2 * MINUTE)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
+                    asks=True, issues=[{"issue": 41, "stage": "building"}, {"issue": 42, "stage": "queued"}])
+        settings = [{"issue": 21, "stage": "held"}, {"issue": 22, "stage": "landing"},
+                    {"issue": 23, "stage": "building"}, {"issue": 24, "stage": "queued"}]
+        seed.sprint(web, "Fix the settings page", started=20 * MINUTE, report=4 * MINUTE, issues=settings,
+                    then=(2 * MINUTE, [{**row, "stage": "landed"} if row["issue"] == 22 else row
+                                       for row in settings]))
     elif state == "waiting-on-you":
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
     elif state == "stuck":
@@ -2496,7 +2509,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             seed.account("colleague-1", 0.95, session=0.5, week_in=2 * 86400, session_in=3 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
-    elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
+    elif state in ("tell-box-open", "sprint-fold-open", "goal-open", "goal-near", "goal-over"):
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
     elif state.startswith("message-"):
         sid, goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
@@ -2521,6 +2534,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
     elif state == "inbox-card":
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.check(web, 11, 3 * MINUTE)
+        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE,
+                    asks=True)
     elif state in ("look-card", "look-moved", "look-failed"):
         sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
         seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")
@@ -2773,7 +2788,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         accounts=accounts, config=config, state=state_dir, projects=projects,
         holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear",
         activating=ACTIVATION_PATHS.get(state, ()), registering=state in REGISTER_STATES,
-        adopting=state in ADOPTION_STATES, refusing=state == "adoption-failed")
+        adopting=state in ADOPTION_STATES, refusing=state == "adoption-failed", titled=state == "live-several")
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -2783,8 +2798,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         for name in ("work-main", "work-spare", *colleague):
             (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
         if colleague:
-            # The directory's own mark: the console owns the account to the colleague only while the
-            # row's identity is the directory's, and his pool row carries a token only then.
+            # Stamped before marked, as a stamp moves the birth time the mark reads; his pool row has a token only then.
+            shot_clock.stamp(accounts / "profiles" / "colleague-1", now_s)
             colleague_identity = account_add.mark(accounts / "profiles" / "colleague-1")
     log = EventLog(fixture.store, clock=lambda: at[0])
     try:
@@ -2805,6 +2820,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         _write_desk_spend(fixture, now_s, *sprint_ids)
     elif state in DEEPER_STATES:
         _write_deeper(fixture, now_s)
+    shot_clock.stamp(root, now_s)
     return fixture
 
 
@@ -2901,19 +2917,6 @@ def proposes(state: str) -> bool:
     return proposes_reconcile() if state.startswith("register-reconcile") else shows_facts()
 
 
-class _UnixHTTPConnection(http.client.HTTPConnection):
-    """An HTTP client of a guest door that is a Unix socket at `path`."""
-
-    def __init__(self, path: str, timeout: float = 5):
-        super().__init__("localhost", timeout=timeout)
-        self._path = path
-
-    def connect(self) -> None:
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(self.timeout)
-        self.sock.connect(self._path)
-
-
 def guest_door_kwargs(constructor, folder: Path) -> dict:
     """The constructor arguments that open the guest door: the branch's socket, else the base's port."""
     if "guest_socket" in inspect.signature(constructor).parameters:
@@ -2924,12 +2927,6 @@ def guest_door_kwargs(constructor, folder: Path) -> dict:
 def guest_door(service) -> str | tuple[str, int]:
     """Where `service` listens for guests: its socket path, else (the base commit) its address."""
     return service.guest_socket if hasattr(service, "guest_socket") else service.guest_address
-
-
-def _door_connection(door: str | tuple[str, int], timeout: float) -> http.client.HTTPConnection:
-    if isinstance(door, str):
-        return _UnixHTTPConnection(door, timeout)
-    return http.client.HTTPConnection(*door, timeout=timeout)
 
 
 def _tailnet_kwargs(guest_dir: Path | None, readable: bool, service: list) -> dict:
@@ -2974,17 +2971,20 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         profile_dirs=lambda: sorted((fixture.accounts / "profiles").glob("*")), token_path=fixture.token, sprint_secrets=fixture.secrets,
         session_poll_seconds=3600, nudger=lambda nudge: None, launcher=launcher,
         activity=lambda root: None,
-        slug_of=(lambda root: "owner/web") if fixture.holding else (lambda root: None),
+        slug_of=(lambda root: "owner/web") if fixture.holding or fixture.titled else (lambda root: None),
         branch_pattern_of=lambda repo: "issue-<num>-<slug>" if fixture.holding else None,
         dispatch=lambda job: job(),
         repo_of=lambda cwd: cwd, ping_log=lambda: None,
         **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)),
-        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **forge)
+        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **(stand_ins.title_kwargs(ConsoleService) if fixture.titled else {}),
+        **forge, **shot_clock.service_clocks(now_s))
     bound.append(service)
     service.start()
     if guest_dir is not None and "status_reader" in inspect.signature(ConsoleService).parameters:
         service.poll_serve()
     service.poll_spend()
+    if fixture.titled:
+        stand_ins.poll_titles(service)
     if fixture.activating:
         service.poll_activation()
     if fixture.holding:
@@ -3077,10 +3077,12 @@ class _Serve:
 
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
-            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False,
-            mutate: bool = False, composite: str | None = None) -> list[Shot]:
+            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False, home: Path | None = None,
+            mutate: bool = False, composite: str | None = None, now: float = shot_clock.READING) -> list[Shot]:
     if composite is not None and not sheets:
         raise ValueError("a composite is made of the sheets: pass sheets with it")
+    home = shot_clock.shots_home() if home is None else Path(home)
+    shot_clock.refuse_inside(out, home)
     try:
         from playwright.sync_api import Error, sync_playwright
     except ImportError as error:
@@ -3090,7 +3092,7 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
     taken: list[Shot] = []
     with sync_playwright() as pw:
         try:
-            browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            browser = pw.chromium.launch(args=shot_clock.LAUNCH_ARGS)
         except Error as error:
             raise Unavailable(f"no Chromium to launch: {' '.join(str(error).split())[:120]}") from error
         try:
@@ -3099,12 +3101,11 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                 groups = [(width,) for width in widths] if state in CLICKED_STATES else [tuple(widths)]
                 shot_paths = []
                 for group in groups:
-                    with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
+                    with shot_clock.fixture_dirs(home) as tmp, \
                             tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
-                        now_s = datetime.now(timezone.utc).timestamp()
-                        fixture = build_fixture(Path(tmp).resolve(), state, now_s, read=read)
+                        fixture = build_fixture(Path(tmp).resolve(), state, now, read=read)
                         service = start_service(
-                            fixture, now_s,
+                            fixture, now,
                             guest_dir=Path(door) if state in SHARING_STATES else None,
                             tailnet_readable=state != "sharing-unreadable")
                         serve = None
@@ -3125,7 +3126,7 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                                     _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
                                            question=read[0],
                                            canonical=read == (READ_QUESTION, READ_ANSWER),
-                                           mutate=mutate))
+                                           mutate=mutate, now_s=now))
                                 shot_paths.append(out / f"{state}-{width}.png")
                         finally:
                             if serve is not None:
@@ -3208,17 +3209,6 @@ GOAL_READING = """(() => {
           field ? shown && field.scrollHeight <= field.clientHeight + 1 : null];
 })()"""
 
-ACTS_ROW = """Array.from(document.querySelectorAll('li[data-project]')).filter((line) => {
-  const give = line.querySelector('button.give-goal');
-  const ask = line.querySelector('button.ask-open');
-  if (!give || !ask || line.getClientRects().length === 0) return false;
-  const centre = (node) => {
-    const rect = node.getBoundingClientRect();
-    return rect.top + rect.height / 2;
-  };
-  return Math.abs(centre(give) - centre(ask)) > 4;
-}).map((line) => line.dataset.project)"""
-
 THREAD_READING = f"""(() => {{
   const fold = document.querySelector('details[data-key="questions:owner/web"]');
   const homes = Array.from(document.querySelectorAll(
@@ -3266,11 +3256,6 @@ JARGON_COUNT = r"""(() => {
 })()"""
 
 
-SHORT_CONTROLS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
-  (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden").map(
-  (n) => [n, n.getBoundingClientRect().height]).filter(([n, h]) => h < 32).map(
-  ([n, h]) => n.tagName.toLowerCase() + "." + (n.getAttribute("class") || "").split(/\\s+/)[0]
-    + " " + Math.round(h * 100) / 100 + "px")"""
 SCROLL_TOP = "window.scrollTo(0, 0)"
 SCROLL_Y = "window.scrollY"
 
@@ -3323,9 +3308,9 @@ def read_style(page, rows: Sequence[StyleCheck], *, mutation: str | None = None,
     return tuple(sorted(found, key=place))
 
 
-def _shoot(browser, url: str, state: str, width: int, out: Path, *,
-           question: str = READ_QUESTION, canonical: bool = True, mutate: bool = False) -> Shot:
-    page = browser.new_page(viewport={"width": width, "height": HEIGHT})
+def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: str = READ_QUESTION,
+           canonical: bool = True, mutate: bool = False, now_s: float = shot_clock.READING) -> Shot:
+    page = shot_clock.open_page(browser, width, HEIGHT, now_s)
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
@@ -3397,6 +3382,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             page.click("button.tell-open")
             page.wait_for_selector(".tell-hint")
             tell = tuple(page.evaluate(TELL_READING))
+        if state == "sprint-fold-open":
+            open_end_fold(page)
         paneled = (state in ("ask-box", "ask-goal", "questions-open", "question-read",
                              *DEEPER_STATES)
                    and page.query_selector(READING_PANEL) is not None)
@@ -3475,9 +3462,10 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         jargon = page.evaluate(JARGON_COUNT)
         scroll_y = page.evaluate(SCROLL_Y)
         short = tuple(page.evaluate(SHORT_CONTROLS))
+        small = tuple(page.evaluate(SMALL_TARGETS))
         acts = tuple(page.evaluate(ACTS_ROW))
         path = out / f"{state}-{width}.png"
-        page.screenshot(path=str(path), full_page=True)
+        shot_clock.screenshot(page, path)
         style: tuple[str, ...] = ()
         checked: tuple[str, ...] = ()
         broke: tuple[str, ...] = ()
@@ -3512,7 +3500,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
                 card=card, activation=activation, register=register, style=style, checked=checked, broke=broke,
-                deeper=deeper)
+                deeper=deeper, small=small)
 
 
 def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
@@ -3557,6 +3545,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="also write <state>-sheet.png, the state's widths side by side")
     parser.add_argument("--states", help="a comma list of the states to shoot (default every state)")
     parser.add_argument("--composite", help="with --sheets, also write NAME, the shot states' sheets side by side")
+    shot_clock.add_flag(parser)
     parser.add_argument("--widths", help="a comma list of the viewport widths to shoot, in pixels "
                                          f"(default {','.join(map(str, WIDTHS))})")
     args = parser.parse_args(argv)
@@ -3577,6 +3566,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--composite goes with --sheets")
     if (args.question is None) != (args.answer_file is None):
         parser.error("--question and --answer-file go together")
+    now = shot_clock.parsed_reading(parser, args.now)
     real = args.question is not None
     if real:
         text = Path(args.answer_file).read_text(encoding="utf-8")
@@ -3585,9 +3575,10 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
             taken = (capture(Path(args.out), states=("question-read",), widths=widths,
-                             read=(args.question, text), sheets=args.sheets, composite=args.composite)
+                             read=(args.question, text), sheets=args.sheets, composite=args.composite,
+                             now=now)
                      if real else capture(Path(args.out), states=states, widths=widths, sheets=args.sheets,
-                                          composite=args.composite))
+                                          composite=args.composite, now=now))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
             return 2
@@ -3670,16 +3661,15 @@ def main(argv: list[str] | None = None) -> int:
     for shot in scrolled:
         print(f"console-screenshots: {shot.path.name} is not taken from the top of the page "
               f"(scrolled {shot.scroll_y:g} px)")
-    short = [shot for shot in taken if shot.short]
-    for shot in short:
-        print(f"console-screenshots: {shot.path.name} has a control under 32 px "
-              f"({', '.join(shot.short)})")
+    controlled = control_report(taken)
+    for line in controlled:
+        print(line)
     broken = [shot for shot in taken if shot.style]
     for shot in broken:
         print(f"console-screenshots: {shot.path.name} breaks a page style "
               f"({'; '.join(shot.style)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or undeep or unlined or proposals or uncarded or offrow or scrolled or short or broken) else 0
+                 or undeep or unlined or proposals or uncarded or offrow or scrolled or controlled or broken) else 0
 
 
 if __name__ == "__main__":
