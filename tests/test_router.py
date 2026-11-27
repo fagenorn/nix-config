@@ -261,7 +261,7 @@ class SinglePathTest(World):
         for name, size in (("dotnet", 100), ("dotnet-data", 200), ("dotnet-ai", 400)):
             write(self.platform, f"stacks/{name}.md", "x" * size)
         names = [name for name in REPO_FILES if name.startswith("docs/")]
-        files = {name: (self.repo / name).read_bytes() for name in names}
+        files = {name: REPO_FILES[name].encode() for name in names}
         files["data/Data.csproj"] = project_text("Npgsql").encode()
         project = routing.read_project(files)
         platform = routing.load_platform(self.platform)
