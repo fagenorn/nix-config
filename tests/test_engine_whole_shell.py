@@ -1,5 +1,5 @@
-"""Contract tests for the direct-lane implementer's whole shell: the session runs in its own worktree with
-`Bash`, `Edit` and `Write` preapproved, the lifecycle guard hook still judging every command.
+"""Contract tests for the direct-lane implementer: the session runs in its own worktree, every session
+with permissions skipped, the lifecycle guard hook judging every command.
 
 The helpers, fixtures and the stand-in launcher are the ones tests/test_engine_session.py defines; the
 stubbed delivery is tests/test_engine_stubbed_run.py's.
@@ -9,25 +9,24 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery import engine_guard, engine_session
 from tests.engine_fixture import AdoptedFixtures
+from tests.engine_guards import real_guard
 from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import StepCoverage
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_deliver import EngineProject
 from tests.test_engine_session import (
-    GIT_READ_ONLY, GIT_WRITING, NEVER, RESULT_NORMAL, SCHEMA, SESSION, SETTINGS_GUARDED,
-    SETTINGS_UNGUARDED, SYSTEM, copy_roles, install_stub, one_step,
+    RESULT_NORMAL, SCHEMA, SESSION, SETTINGS_GUARDED, SETTINGS_UNGUARDED, SYSTEM, after, copy_roles,
+    install_stub, one_step,
 )
 from tests.test_engine_stubbed_run import Scenario
 
@@ -48,154 +47,13 @@ def tearDownModule() -> None:
     STEPS.finish(sys.modules[__name__], Scenario)
 
 
-def _rule_matches(pattern: str, command: str) -> bool:
-    if pattern.endswith(":*"):  # the legacy prefix form: the prefix alone or followed by a space and anything
-        prefix = pattern[:-2]
-        return command == prefix or command.startswith(prefix + " ")
-    return re.fullmatch(".*".join(re.escape(part) for part in pattern.split("*")), command) is not None
-
-
-def client_admits(command: str, allowed: list[str], denied: list[str]) -> bool:
-    """Whether the client runs the single `command` under these `--allowedTools`/`--disallowedTools` words.
-
-    Models the wildcard forms of https://code.claude.com/docs/en/permissions (`*` matches any run of
-    characters, `:*` is the legacy prefix form, a deny rule is checked before an allow rule); CI runs no client."""
-    def bash_rules(rules: list[str]) -> list[str]:
-        return [rule[len("Bash("):-1] for rule in rules if rule.startswith("Bash(") and rule.endswith(")")]
-
-    if any(_rule_matches(pattern, command) for pattern in bash_rules(denied)):
-        return False
-    return "Bash" in allowed or any(_rule_matches(pattern, command) for pattern in bash_rules(allowed))
-
-
-def words_after(argv: tuple[str, ...] | list[str], flag: str) -> list[str]:
-    return argv[argv.index(flag) + 1].split(",")
-
-
-def whole_shell_argv() -> tuple[engine_session.Role, tuple[str, ...]]:
-    role = replace(engine_session.read_role(AGENTS, "implementer"), whole_shell=True)
-    return role, engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
-
-
-WHOLE_SHELL_DENIED = [
-    "Bash(git push)", "Bash(git push *)",
-    "Bash(git * push)", "Bash(git * push *)",
-    "Bash(git stash)", "Bash(git stash *)",
-    "Bash(git * stash)", "Bash(git * stash *)",
-    "Bash(git reset --hard)", "Bash(git reset --hard *)",
-    "Bash(git * reset --hard)", "Bash(git * reset --hard *)",
-    "Bash(git clean)", "Bash(git clean *)",
-    "Bash(git * clean)", "Bash(git * clean *)",
-    "Bash(git checkout --)", "Bash(git checkout -- *)",
-    "Bash(git * checkout --)", "Bash(git * checkout -- *)",
-    "Bash(git branch -D)", "Bash(git branch -D *)",
-    "Bash(git * branch -D)", "Bash(git * branch -D *)",
-    "Bash(git branch -d)", "Bash(git branch -d *)",
-    "Bash(git * branch -d)", "Bash(git * branch -d *)",
-    "Bash(gh pr create)", "Bash(gh pr create *)", "Bash(gh * pr create *)",
-    "Bash(gh pr merge)", "Bash(gh pr merge *)", "Bash(gh * pr merge *)",
-    "Bash(gh release create)", "Bash(gh release create *)", "Bash(gh * release create *)",
-]
-
-
-class WholeShellArgvTest(unittest.TestCase):
-    def test_the_recorded_1639_call_split_one_command_per_call_is_admitted(self):
-        role, argv = whole_shell_argv()
-        allowed, denied = words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")
-        w = "/srv/p/.worktrees/worktree-issue-1639"
-
-        commands = [
-            f"git -C {w} rev-parse HEAD",
-            f"git -C {w} status --short",
-            f"git -C {w} log --oneline -3",
-            f"sed -n 70,130p {w}/python/agent_tools/console/prompt_card.py",
-            f"PYTHONPATH={w}/python python3 -m unittest tests.test_x",
-            f"git -C {w} add {w}/python/agent_tools/console/prompt_card.py",
-            f"git -C {w} commit -m 'Read the card once'",
-        ]
-
-        for command in commands:
-            with self.subTest(command):
-                self.assertTrue(client_admits(command, allowed, denied))
-        self.assertEqual(allowed, ["Bash", "Edit", "Write"])
-
-    def test_the_rule_model_reads_the_documented_wildcard_forms(self):
-        cases = [
-            ("Bash(npm run build)", "npm run build", True),
-            ("Bash(npm run build)", "npm run build --watch", False),
-            ("Bash(npm run test *)", "npm run test unit", True),
-            ("Bash(git * main)", "git checkout main", True),
-            ("Bash(git * main)", "git checkout dev", False),
-            ("Bash(* --version)", "node --version", True),
-            ("Bash(npm run test:*)", "npm run test unit", True),
-            ("Bash(npm run test:*)", "npm run test", True),
-            ("Bash(ls *)", "lsof", False),
-        ]
-        for rule, command, expected in cases:
-            with self.subTest(rule=rule, command=command):
-                self.assertEqual(client_admits(command, [rule], []), expected)
-
-    def test_the_whole_shell_denies_each_lifecycle_verb_and_destructive_git_command_in_every_option_form(self):
-        role, argv = whole_shell_argv()
-        allowed, denied = words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")
-        refused = [
-            "git push origin b", "git -C /wt push origin b", "git --no-pager push origin b",
-            "git -c core.pager=cat push origin b", "git --git-dir=/wt/.git push", "git stash",
-            "git -C /wt stash pop", "git -C /wt reset --hard HEAD", "git --no-pager reset --hard",
-            "git clean -fd", "git -C /wt clean -fdx", "git -C /wt checkout -- f.py",
-            "git -C /wt branch -D b", "git -C /wt branch -d b",
-            "gh pr create --repo a/b --base main --head b --title t --body b",
-            "gh pr merge 5 --repo a/b --merge --delete-branch", "gh --repo a/b pr merge 5",
-            "gh release create v1",
-        ]
-        admitted = ["git -C /wt checkout --detach", "git -C /wt branch --show-current",
-                    "git -C /wt reset HEAD f.py"]
-
-        for command in refused:
-            with self.subTest(refused=command):
-                self.assertFalse(client_admits(command, allowed, denied))
-        for command in admitted:
-            with self.subTest(admitted=command):
-                self.assertTrue(client_admits(command, allowed, denied))
-        own = len(role.disallowed)
-        self.assertEqual(denied[:own], list(role.disallowed))
-        self.assertEqual(denied[own:], WHOLE_SHELL_DENIED)
-        self.assertEqual(len(WHOLE_SHELL_DENIED), 37)
-
-    def test_a_whole_shell_launch_keeps_the_hooks_and_dont_ask(self):
-        _, argv = whole_shell_argv()
-
-        self.assertTrue(NEVER.isdisjoint(argv))
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
-        self.assertNotIn("--tools", argv)
-        self.assertEqual(argv[-2], "--append-system-prompt-file")
-
-    def test_the_other_roles_keep_their_narrow_lists(self):
-        # Each role's baseline, written out here and not read from its role file: a tool added to a role
-        # file changes the launch and fails this table until the table is changed on purpose.
-        expected = {
-            "planner": ("Read,Glob,Grep,Bash,Write,Edit,Skill,Agent(Explore)",
-                        f"Read,Glob,Grep,{GIT_READ_ONLY},Write,Edit,Skill,Agent(Explore)", GIT_WRITING),
-            "reviewer": ("Read,Glob,Grep,Bash,Write,Skill",
-                         f"Read,Glob,Grep,{GIT_READ_ONLY},Write,Skill", GIT_WRITING),
-            "reviewer-lite": ("Read,Glob,Grep,Bash,Write",
-                              f"Read,Glob,Grep,{GIT_READ_ONLY},Write", GIT_WRITING),
-        }
-        for name, (tools, allowed, denied) in expected.items():
-            with self.subTest(name):
-                role = engine_session.read_role(AGENTS, name)
-                argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
-                self.assertEqual(argv[argv.index("--tools") + 1], tools)
-                self.assertEqual(argv[argv.index("--allowedTools") + 1], allowed)
-                self.assertEqual(argv[argv.index("--disallowedTools") + 1], denied)
-                with self.assertRaises(engine_session.RoleError):
-                    engine_session.launch_argv(replace(role, whole_shell=True), SCHEMA, SESSION, SYSTEM)
-
+class ImplementerLaunchTest(unittest.TestCase):
     def test_the_implementer_without_a_worktree_keeps_its_launch(self):
         role = engine_session.read_role(AGENTS, "implementer")
 
         argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
 
+        self.assertIn("--dangerously-skip-permissions", argv)
         self.assertNotIn("--tools", argv)
         self.assertNotIn("--allowedTools", argv)
         self.assertEqual(argv[argv.index("--disallowedTools") + 1], (
@@ -395,11 +253,12 @@ class WholeShellDeliverTest(Scenario):
 
         implement = self.launch(run, "implement")
         self.assertEqual(os.path.realpath(implement["cwd"]), os.path.realpath(run.worktree_path))
-        self.assertIn("--allowedTools", implement["argv"])
-        self.assertEqual(words_after(implement["argv"], "--allowedTools"), ["Bash", "Edit", "Write"])
+        self.assertIn("--dangerously-skip-permissions", implement["argv"])
+        self.assertNotIn("--allowedTools", implement["argv"])
         review = self.launch(run, "lite-review")
         self.assertEqual(os.path.realpath(review["cwd"]), os.path.realpath(run.fixture.root))
-        self.assertNotIn("Bash,Edit,Write", review["argv"])
+        self.assertIn("--dangerously-skip-permissions", review["argv"])
+        self.assertNotIn("--allowedTools", review["argv"])
 
     def test_a_whole_shell_step_on_a_host_without_the_guard_starts_no_run(self):
         run = self.stubbed()
@@ -411,6 +270,102 @@ class WholeShellDeliverTest(Scenario):
 
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
         self.assertEqual(run.launches(), [])
+
+
+class RealGuardTest(unittest.TestCase):
+    READ_TABLE = (
+        "git log origin/main --oneline -5 | head -3",
+        "git show --stat HEAD | head -20",
+        "git ls-tree -r HEAD --name-only | grep -i -E 'engine|guard' | head -30",
+        "git diff origin/main...HEAD --stat | tail -5",
+        "git log --oneline -3; git status --short",
+        "ls docs && cat README.md | wc -l",
+        "sed -n '1,40p' README.md",
+        "grep -rn 'tool-denied' python | head",
+        "tail -n 20 justfile",
+    )
+    REFUSED_TABLE = (
+        "git push origin HEAD",
+        "nohup git log",
+        "setsid git log",
+        "git log & disown",
+        "gh pr create --repo example/x --fill",
+        "gh pr merge 1 --repo example/x --merge",
+        "gh release create v1 --repo example/x",
+    )
+
+    def test_the_guard_admits_the_read_table_and_refuses_lifecycle_and_detaching_calls_in_every_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = real_guard(Path(tmp) / "guard")
+            fixture = ROOT / "tests/fixtures/engine-session/result-denied-1740.json"
+            recorded = json.loads(fixture.read_text(encoding="utf-8"))[
+                "permission_denials"][0]["tool_input"]["command"]
+            absent = {k: v for k, v in os.environ.items() if k != "CLAUDE_READ_ONLY_SHELL"}
+            environments = {"absent": absent, "set": {**absent, "CLAUDE_READ_ONLY_SHELL": "1"}}
+            commands = (recorded, *self.READ_TABLE, *self.REFUSED_TABLE)
+            seen: dict[str, dict[str, tuple[int, str]]] = {}
+            for name, env in environments.items():
+                for command in commands:
+                    with self.subTest(environment=name, command=command):
+                        done = subprocess.run(
+                            [str(wrapper)],
+                            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                            env=env, cwd=tmp, capture_output=True, text=True, timeout=60,
+                            check=False)
+                        seen.setdefault(name, {})[command] = (done.returncode, done.stderr)
+                        if command in self.REFUSED_TABLE:
+                            self.assertEqual(done.returncode, 2, done.stderr)
+                        else:
+                            self.assertEqual(done.returncode, 0, done.stderr)
+                        if command == "nohup git log":
+                            self.assertIn("detaching command `nohup` refused", done.stderr)
+                            self.assertIn("background mode", done.stderr)
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertEqual(seen["absent"].get(command), seen["set"].get(command))
+
+
+    def test_in_an_authorized_repository_the_guard_admits_only_a_topic_push_and_the_exact_pull_request_form(self):
+        topic_pr = "gh pr create --repo example/x --base main --head topic --title t --body b"
+        admitted = ("git push origin topic", topic_pr)
+        refused = ("git push origin main", "git push --force origin topic", "git push origin HEAD",
+                   "gh pr create --repo example/x --fill", "gh pr merge 1 --repo example/x --merge",
+                   "gh release create v1 --repo example/x", "nohup git log", "git log & disown")
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = real_guard(Path(tmp) / "guard")
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            for argv in (("init", "--quiet"), ("remote", "add", "origin", "git@github.com:example/x.git"),
+                         ("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")):
+                subprocess.run(["git", *argv], cwd=repo, check=True, capture_output=True)
+            absent = {k: v for k, v in os.environ.items() if k != "CLAUDE_READ_ONLY_SHELL"}
+            for name, env in {"absent": absent, "set": {**absent, "CLAUDE_READ_ONLY_SHELL": "1"}}.items():
+                for command in (*admitted, *refused):
+                    with self.subTest(environment=name, command=command):
+                        done = subprocess.run(
+                            [str(wrapper)], input=json.dumps({"tool_name": "Bash", "cwd": str(repo),
+                                                              "tool_input": {"command": command}}),
+                            env=env, cwd=repo, capture_output=True, text=True, timeout=60, check=False)
+                        self.assertEqual(done.returncode, 0 if command in admitted else 2, done.stderr)
+                        self.assertNotIn("outside standing authorization", done.stderr)  # the repository is known
+
+
+class ReadOnlyRoleToolsTest(unittest.TestCase):
+    def test_every_role_an_engine_procedure_runs_without_mutating_can_call_bash(self):
+        roles: set[str] = set()
+        for path in sorted((ROOT / "python/agent_tools/delivery/procedures").glob("*.json")):
+            for step in json.loads(path.read_text(encoding="utf-8")).get("steps", ()):
+                if step.get("kind") == "agent" and step.get("mutates") is not True:
+                    roles.add(step["role"])
+        self.assertLessEqual({"reviewer-lite", "reviewer"}, roles)
+        for name in sorted(roles):
+            with self.subTest(role=name):
+                argv = list(engine_session.launch_argv(
+                    engine_session.read_role(AGENTS, name), SCHEMA, SESSION, SYSTEM))
+                if "--tools" in argv:
+                    self.assertIn("Bash", after(argv, "--tools").split(","))
+                if "--disallowedTools" in argv:
+                    self.assertNotIn("Bash", after(argv, "--disallowedTools").split(","))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-Fix the review findings of issue {{run.issue}} in the worktree {{preflight.worktree_path}} on branch {{preflight.branch}} (origin/{{preflight.integration_branch}} is the base). Work only there: run git as git -C <worktree> and name every file by its absolute path. Your session runs in that worktree with the whole shell, and each command is checked on its own, so give one command per Bash call with the worktree's path written out in full, never by way of a shell variable or a compound line (no `;`, `&&`, `||`, pipe or substitution). For example, one call each:
+Fix the review findings of issue {{run.issue}} in the worktree {{preflight.worktree_path}} on branch {{preflight.branch}} (origin/{{preflight.integration_branch}} is the base). Work only there: run git as git -C <worktree> and name every file by its absolute path. Your session runs in that worktree. For example:
 
 ```
 git -C {{preflight.worktree_path}} status --short

@@ -9,8 +9,6 @@ import unittest
 from agent_tools.delivery import engine_core, engine_reply, engine_session, issue_setup
 from agent_tools.delivery.engine_core import RunGroup, Stop
 from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
-from tests.test_engine_session import SCHEMA, SESSION, SYSTEM
-from tests.test_engine_whole_shell import AGENTS, client_admits, whole_shell_argv, words_after
 
 TIER = "fast"
 
@@ -64,9 +62,7 @@ class DirectProcedureTest(unittest.TestCase):
                 steps = json.loads(path.read_text(encoding="utf-8")).get("steps", [])
                 self.assertEqual([s["id"] for s in steps if "worktree" in s], [])
 
-    def test_the_direct_implementer_prompts_show_single_commands_in_the_worktree(self):
-        _, argv = whole_shell_argv()
-        allowed, denied = words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")
+    def test_the_direct_implementer_prompts_show_commands_in_the_worktree(self):
         steps = {s["id"]: s for s in load(PROCEDURES, "direct")["steps"]}
         for name in ("implement", "lite-fix", "escalated-fix", "full-fix"):
             with self.subTest(name):
@@ -81,9 +77,6 @@ class DirectProcedureTest(unittest.TestCase):
                 self.assertLess(len(text.encode("utf-8")), 8192)
                 for line in lines:
                     self.assertIn("/srv/p/wt", line)
-                    for word in (";", "&&", "||", "|", "$", "`"):
-                        self.assertNotIn(word, line)
-                    self.assertTrue(client_admits(line, allowed, denied), line)
 
     def test_the_implementer_builds_an_approved_plan_and_applies_the_eligibility_check_to_no_planned_issue(self):
         text = (PROCEDURES / "direct-implement.md").read_text(encoding="utf-8")
@@ -106,7 +99,7 @@ class DirectProcedureTest(unittest.TestCase):
             self.assertIn(block, text)
         self.assertNotIn(issue_setup.PLAN_MARKER, template)
 
-    def test_the_planner_prompts_state_the_planners_read_only_shell_and_read_the_worktree_by_path(self):
+    def test_the_planner_prompts_ask_for_a_read_only_shell_and_read_the_worktree_by_path(self):
         steps = {s["id"]: s for s in load(PROCEDURES, "deliver")["steps"]}
         for name in ("plan", "plan-revise"):
             with self.subTest(name):
@@ -114,7 +107,7 @@ class DirectProcedureTest(unittest.TestCase):
                     (PROCEDURES / steps[name]["prompt"]).read_text(encoding="utf-8"),
                     tuple((path, "/srv/p/wt" if path == "plan-preflight.worktree_path" else f"<{path}>")
                           for path in steps[name]["in"]))
-                self.assertIn("read-only git", text)
+                self.assertIn("shell only to read", text)
                 self.assertNotIn("Bash or Read", text)
                 self.assertIn("project root", text)  # the session's directory is not the worktree
                 self.assertIn("by their absolute path under /srv/p/wt", text)
@@ -123,7 +116,7 @@ class DirectProcedureTest(unittest.TestCase):
                 self.assertIn("evidence an empty string", text)  # a blocked reply fills every required member
         plan = (PROCEDURES / steps["plan"]["prompt"]).read_text(encoding="utf-8")
         gate = next(line for line in plan.splitlines() if "grep or deny gate" in line)
-        self.assertIn("Grep tool", gate)  # no shell grep: the planner's Bash admits read-only git only
+        self.assertIn("Grep tool", gate)
 
     def test_the_plan_reply_schema_takes_a_blocked_reply_with_empty_members_and_requires_the_task_numbers(self):
         schema = json.loads((PROCEDURES / "plan.reply.json").read_text(encoding="utf-8"))
@@ -141,33 +134,6 @@ class DirectProcedureTest(unittest.TestCase):
             with self.subTest(severity):
                 reply = {"verdict": "findings", "findings": [dict(finding, severity=severity)]}
                 self.assertEqual(engine_reply.reply_problem(schema, reply) is None, admitted)
-
-    def test_every_git_command_the_planner_prompts_name_is_one_its_read_only_bash_admits(self):
-        role = engine_session.read_role(AGENTS, "planner")
-        argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
-        allowed, denied = words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")
-        steps = {s["id"]: s for s in load(PROCEDURES, "deliver")["steps"]}
-        named = 0
-        for name in ("plan", "plan-revise"):
-            with self.subTest(name):
-                text = engine_session.render_prompt(
-                    (PROCEDURES / steps[name]["prompt"]).read_text(encoding="utf-8"),
-                    tuple((path, "/srv/p/wt" if path == "plan-preflight.worktree_path" else f"<{path}>")
-                          for path in steps[name]["in"]))
-                commands = [c.rstrip(".:") for c in re.findall(
-                    r"\bgit (?:-C \S+ )?(?:diff|log|show|status|rev-parse|ls-files|blame|merge-base|fetch|grep)\b"
-                    r"\S*(?: [^\s,;()]+)*", text)]
-                named += len(commands)
-                for command in commands:
-                    self.assertTrue(client_admits(command, allowed, denied), command)
-        self.assertGreater(named, 0)
-
-    def test_a_git_command_with_a_directory_flag_is_not_admitted_to_the_planner(self):
-        # the form the planner prompt used to name: `git -C <worktree> diff` is no `git diff` prefix
-        role = engine_session.read_role(AGENTS, "planner")
-        argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
-        self.assertFalse(client_admits("git -C /srv/p/wt diff origin/main...HEAD",
-                                       words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")))
 
     def test_the_direct_review_roles(self):
         direct = load(PROCEDURES, "direct")
