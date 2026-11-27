@@ -25,6 +25,11 @@ run is the last. Each command prints one compact JSON line; a failure prints `{"
 - any other verdict than `failed` or `dirty` is `verify` (`deliver-standard.js:2937`).
 - any `fail` result with `no_slot` true is `verify`, before the dirty problem is looked at, so slot exhaustion
   never reaches a fix (`deliver-standard.js:2912`).
+- a run whose last transition is a narrowing that graded `findings` (a fix review with a blocking finding) is
+  `fix` while fewer than `FIX_ROUNDS` `fix` entries are over the verify runs, with each blocking finding of the
+  latest fix review added to `problems` as `{id: review, status: finding, summary, file, failing_input, kind,
+  reran: false}`, else `review-spent`; this is answered before the unreviewed-head rule, because the fix moved
+  the head the verification read (issue 1954, the project lead's order of 27 Nov 2026: at most two fix rounds).
 - `FIX_ROUNDS` or more `fix` entries over the verify runs is `spent` (`deliver-standard.js:2912`, `vRounds < 2`).
 - otherwise `fix`; `problems` is one entry per `fail` result (`reran` its `reran is True`), then the `?`
   problem when the tree is not `clean` (`DIRTY`) or the verdict is `dirty` on a clean tree (`MOVED`)
@@ -73,6 +78,8 @@ FIX = "fix"
 WS_CHECK = "ws-check"
 RETEST = "retest"
 RETESTED = "retested"
+REVIEWS = ("fix-review", "fix-review-again")
+NARROWINGS = ("narrowing", "narrowing-again")
 FIX_ROUNDS = 2
 DIRTY = "the worktree has uncommitted changes, so the verified tree is not the pushed head"
 MOVED = "the head moved while the verification ran, so no result speaks for one commit"
@@ -163,6 +170,19 @@ def _problems(read: Mapping) -> list[dict]:
     return problems
 
 
+def _findings(run: Path) -> list[dict] | None:
+    """The blocking findings of the fix review that the run's last transition carries to `round`: that
+    transition is a narrowing that graded `findings`. None when the run's last transition is any other."""
+    taken = [e for e in _events(run) if e["event"] == "transition_taken"]
+    if not taken or taken[-1]["step"] not in NARROWINGS or taken[-1]["outcome"] != "findings":
+        return None
+    review = land_tally.latest_result(run, REVIEWS) or {}
+    found = review.get("findings")
+    return [{"id": "review", "status": "finding", "summary": f.get("summary", ""), "file": f.get("file", ""),
+             "failing_input": f.get("failing_input", ""), "kind": f.get("kind", ""), "reran": False}
+            for f in found if isinstance(f, dict) and f.get("severity") != "minor"] if isinstance(found, list) else []
+
+
 def _guards(worktree: str) -> list[dict]:
     root = Path(worktree)
     try:
@@ -189,7 +209,11 @@ def answer(holder: str, worktree: str, root: Path | None = None) -> dict:
     results = read.get("results") if isinstance(read.get("results"), list) else []
     start = ""
     verdict = read.get("verdict")
-    if _unreviewed(runs[-1]):
+    findings = _findings(runs[-1])
+    if findings is not None:
+        verdict = "review-spent" if land_tally.entered(runs, FIX) >= FIX_ROUNDS else "fix"
+        problems += findings
+    elif _unreviewed(runs[-1]):
         verdict = "verify"
     elif verdict == "passed":
         found = untested_start(runs)

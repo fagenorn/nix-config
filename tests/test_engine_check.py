@@ -368,7 +368,7 @@ def _scope_reads_a_round(path: str) -> Callable[[dict], None]:
         scope = step(toy, "scope")
         scope.update(command="verify-rounds", subcommand="round",
                      on={"passed": "draft", "retest": "draft", "fix": "draft", "spent": "needs-owner",
-                         "verify": "needs-owner", "error": "needs-owner", "refused": "needs-owner"})
+                         "review-spent": "needs-owner", "verify": "needs-owner", "error": "needs-owner", "refused": "needs-owner"})
         _each_over(path)(toy)
     return change
 

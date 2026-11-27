@@ -39,6 +39,9 @@ def document(verdict: str, head: str = H, results: list | None = None, clean: bo
 
 
 FAILED = document("failed", results=[LINT_PASS, failing("s")])
+FINDING = {"severity": "important", "file": "fixture/greeting.json:2", "failing_input": "indent 2",
+           "summary": "the moved test dropped an assertion", "kind": "weak-test"}
+MINOR = dict(FINDING, severity="minor", summary="a style point")
 
 
 class Delivery(LedgerMaker):
@@ -230,6 +233,55 @@ class RoundTest(LedgerCase):
         self.ws_check(run, S, C)
         self.visit(run, "checks", 2, "passed", document("passed", head=C))
         self.assertEqual(self.round()["verdict"], "passed")
+
+    def reviewed(self, run: Path, fix_visit: int, step: str = "fix-review", narrowing: str = "narrowing") -> None:
+        """A fix, its review that returned `FINDING` and the narrowing that took those findings to `round`."""
+        self.fix(run, fix_visit, tests=["just test"])
+        self.visit(run, step, fix_visit, "findings", {"verdict": "findings", "findings": [FINDING, MINOR]})
+        self.visit(run, narrowing, fix_visit, "findings", {})
+
+    def test_findings_of_the_first_fix_review_answer_fix_with_the_check_problems_and_the_blocking_findings(self):
+        run = self.verified(FAILED)
+        self.reviewed(run, 1)
+        answer = self.round()
+        self.assertEqual(answer["verdict"], "fix")
+        self.assertEqual(answer["head"], H)
+        self.assertEqual(answer["problems"], [
+            {"id": "test", "status": "fail", "summary": "s", "reran": False},
+            {"id": "review", "status": "finding", "summary": FINDING["summary"], "file": FINDING["file"],
+             "failing_input": FINDING["failing_input"], "kind": FINDING["kind"], "reran": False}])
+
+    def test_findings_of_the_review_after_two_fixes_answer_review_spent(self):
+        run = self.verified(FAILED)
+        self.reviewed(run, 1)
+        self.reviewed(run, 2)
+        self.assertEqual(self.round()["verdict"], "review-spent")
+
+    def test_findings_of_the_second_ask_of_the_review_carry_that_replys_findings(self):
+        run = self.verified(FAILED)
+        self.fix(run, 1)
+        self.visit(run, "fix-review", 1, "findings", {"verdict": "findings", "findings": [dict(FINDING, summary="first")]})
+        self.visit(run, "narrowing", 1, "unusable", {})
+        self.visit(run, "fix-review-again", 1, "findings",
+                   {"verdict": "findings", "findings": [dict(FINDING, summary="again")]})
+        self.visit(run, "narrowing-again", 1, "findings", {})
+        self.assertEqual([p["summary"] for p in self.round()["problems"]], ["s", "again"])
+
+    def test_findings_of_a_fix_review_in_an_earlier_verify_run_count_toward_the_two_fixes(self):
+        first = self.verified(FAILED)
+        self.fix(first)
+        second = self.verify_run()
+        self.visit(second, "checks", 1, "failed", FAILED)
+        self.reviewed(second, 2)
+        self.assertEqual(self.round()["verdict"], "review-spent")
+
+    def test_a_verification_read_after_the_findings_is_answered_as_a_verification(self):
+        run = self.verified(FAILED)
+        self.reviewed(run, 1)
+        self.fix(run, 2)
+        self.visit(run, "checks", 2, "failed", FAILED)
+        answer = self.round()
+        self.assertEqual((answer["verdict"], [p["id"] for p in answer["problems"]]), ("spent", ["test"]))
 
     def test_the_answer_carries_the_digest_of_its_results(self):
         self.verified(FAILED)

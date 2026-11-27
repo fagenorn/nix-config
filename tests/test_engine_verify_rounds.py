@@ -56,6 +56,7 @@ UNRELATED = {"reply": {"status": "blocked", "notes": "n", "tests": [], "outside_
 NEW_FILE_FIX = {
     "fix.1": fixing("fixture/second.py", "SECOND = 1\n", tests=["checks/check_format.py"]),
     "fix.2": fixing("fixture/third.py", "THIRD = 1\n", tests=["checks/check_format.py"])}
+SECOND_FIX = fixing("fixture/second.py", "SECOND = 1\n", tests=["checks/check_format.py"])
 STOPS = ("verify", "verify-unrelated", "verify-fix", "verify-fix-review")
 VERIFY_STEPS = ("round", "fix", "fixed", "ws-check", "fix-review", "narrowing", "fix-review-again",
                 "narrowing-again", "rerun", "retest", "retested")
@@ -156,23 +157,43 @@ class RoundsTest(Scenario):
         self.assertIs(test["reran"], True)
         self.nothing_pushed(run)
 
-    def test_findings_on_a_fix_stop_verify_fix_review(self):
-        run = self.stubbed(extra_files=FORMAT, replies={"implement": FOUR, "fix": TWO, "fix-review": FOUND})
+    def test_findings_on_both_fix_reviews_stop_verify_fix_review_after_exactly_two_fix_sessions(self):
+        run = self.stubbed(extra_files=FORMAT, replies={
+            "implement": FOUR, "fix.1": TWO, "fix.2": SECOND_FIX, "fix-review": FOUND})
 
         self.finish(run, "verify-fix-review", "owner-decision")
 
-        self.assertIn(("narrowing", "findings"), self.walk(run))
+        self.assertEqual(self.walk(run)[-2:], [("narrowing", "findings"), ("round", "review-spent")])
+        self.assertEqual(self.count(run, "fix"), 2)
+        self.assertEqual(self.count(run, "fix-review"), 2)
         self.assertEqual(self.entered(run, "checks"), 1)
         self.assertEqual(self.entered(run, "rerun"), 0)
         self.nothing_pushed(run)
 
-    def test_a_passing_verdict_with_an_important_finding_stops_verify_fix_review(self):
+    def test_a_first_fix_review_finding_gets_a_second_fix_that_is_briefed_with_it_and_lands_when_the_next_review_passes(self):
+        found = dict(FOUND, findings=[dict(IMPORTANT, summary="the moved test dropped an assertion")])
         run = self.stubbed(extra_files=FORMAT, replies={
-            "implement": FOUR, "fix": TWO, "fix-review": dict(FOUND, verdict="pass")})
+            "implement": FOUR, "fix.1": TWO, "fix.2": SECOND_FIX, "fix-review.1": found, "fix-review.2": PASS_PLAIN})
+
+        self.finish(run, "done")
+
+        walk = self.walk(run)
+        self.assertEqual(walk[walk.index(("narrowing", "findings")):][:2], [("narrowing", "findings"), ("round", "fix")])
+        self.assertEqual(self.count(run, "fix"), 2)
+        first, second = [launch for launch in run.launches() if launch["key"] == "fix"]
+        self.assertNotIn("the moved test dropped an assertion", first["prompt"])
+        self.assertIn("the moved test dropped an assertion", second["prompt"])
+        self.assertIn(("narrowing", "rerun-all"), walk)
+        self.assertEqual(walk[-1], ("round", "passed"))
+        self.merged(run)
+
+    def test_a_passing_verdict_with_an_important_finding_gets_a_second_fix_and_then_stops_verify_fix_review(self):
+        run = self.stubbed(extra_files=FORMAT, replies={
+            "implement": FOUR, "fix.1": TWO, "fix.2": SECOND_FIX, "fix-review": dict(FOUND, verdict="pass")})
 
         self.finish(run, "verify-fix-review", "owner-decision")
 
-        self.assertIn(("narrowing", "findings"), self.walk(run))
+        self.assertEqual(self.count(run, "fix"), 2)
         self.assertEqual(self.entered(run, "rerun"), 0)
         self.nothing_pushed(run)
 
@@ -275,11 +296,9 @@ class RoundsTest(Scenario):
 
     def test_the_two_round_bound_holds_across_a_stop_and_a_continue(self):
         run = self.stubbed(extra_files=FORMAT, replies={
-            "implement": FOUR, "fix": NEW_FILE_FIX["fix.1"], "fix-review": FOUND})
+            "implement": FOUR, **NEW_FILE_FIX, "fix-review": FOUND})
         self.finish(run, "verify-fix-review", "owner-decision")
-        run.answer("implement", implementing("fixture/again.py", "AGAIN = 1\n"))
         run.answer("fix-review", PASS_PLAIN)
-        run.answer("fix", NEW_FILE_FIX["fix.2"])
 
         self.finish(run, "verify", "owner-decision")
 

@@ -1,5 +1,7 @@
 Review the fix of the failed verification in the worktree {{preflight.worktree_path}}: the commits git -C {{preflight.worktree_path}} diff {{round.head}}..HEAD shows, against the problems the verification reported: {{round.problems}} The implementer's notes: {{fix.notes}}
 
+A problem with status finding is a defect an earlier review of this fix reported; the range holds the fix made for it, so judge that it removes that defect and introduces no other.
+
 Work only there with read-only git, as git -C <worktree>, naming every file by its absolute path. Report only Important or Critical defects, above all a test or check the fix weakened, skipped or deleted to make a check pass, and a fix with no regression test that fails without it, each with a concrete failing input and a path:line file. Report no style point and no defect outside the fix.
 
 Each file of {{fix.outside_diff}} was edited outside the branch's diff for its stated cause. A cause the code or the failure does not bear out is an Important defect.
