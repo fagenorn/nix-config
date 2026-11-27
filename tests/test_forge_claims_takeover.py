@@ -15,6 +15,8 @@ from agent_tools.claims import forge_claim
 from agent_tools.claims import forge_markers as fm
 from agent_tools.console import service, sessions, sprints
 from agent_tools.delivery import issue_setup
+from agent_tools.system import forge_api
+from agent_tools.system.forge_api import ForgeError
 
 from .console_test_support import PROC_PID_DOMAIN, fake_proc
 from .forge_world import ForgeWorld
@@ -1019,6 +1021,332 @@ class TakeoverAcquireTest(TakeoverWorld):
             for argv in (["status", "--repo", SLUG], ["renew", "--repo", SLUG]):
                 code, out = run(*argv)
                 self.assertNotIn("takeover", out)
+
+
+class TakeoverRecoveryTest(TakeoverWorld):
+    def setUp(self):
+        super().setUp()
+        self.END = fm.end_body(5, "holder-gone", successor=TAKER_SESSION, sprint=SPRINT)
+        self.OTHER_END = fm.end_body(5, "holder-gone", successor="0f0f0f0f-other", sprint=SPRINT)
+        self.RELEASED_5 = claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT, released="holder-gone")
+        self.NEW_CLAIM = claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, took="5")
+        self.BATCH = f"{HOST}/{HOST}-20261127-1310"
+        self.PLAIN = claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT)
+        self.GONE_5 = claim_body(self.BATCH, branch=BRANCH, session=DEAD, sprint=SPRINT)
+        self.HANDED = claim_body(self.BATCH, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, took="5")
+        self.HANDED_REPORT = {**TAKEOVER, "holder": self.BATCH}
+
+    def acquire(self, holder=TAKER):
+        return run(*common("acquire", holder), "--branch", BRANCH)
+
+    def test_a_retried_takeover_still_reports_it(self):
+        for name, faults in (("edit fails once", {"fail_once": ["edit"]}),
+                             ("edit reply lost", {"lose_reply": ["edit"]})):
+            with self.subTest(name):
+                self.fresh_world()
+                self.slept.clear()
+                self.git_ready()
+                self.store(comment(5, DEAD_CLAIM, T0), **faults)
+
+                code, out = self.acquire()
+
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 41))
+                self.assertEqual(out["takeover"], TAKEOVER)
+                self.assertEqual(self.slept, [20])
+                self.assertEqual(self.mutations().count(post(self.END)), 1)
+                stored = {c["id"]: c["body"] for c in self.world.stored()}
+                self.assertEqual(stored[5], self.RELEASED_5)
+                self.assertEqual([m.fields["holder"] for m in self.live()], [TAKER])
+                self.assertEqual(stored[41], self.NEW_CLAIM)
+                self.assertEqual(self.world.argvs("git"), [ORIGIN, LIST_WT, STATUS])
+                if name == "edit reply lost":
+                    self.assertEqual(self.mutations().count(patch(5, self.RELEASED_5)), 1)
+
+    def test_a_retry_reports_the_worktree_read_before_the_end(self):
+        self.git_ready(status=" M a.py\0?? new.txt\0")
+        self.store(comment(5, DEAD_CLAIM, T0), lose_reply=["edit"])
+        interleave(self, 3, lambda: self.world.respond("git", STATUS, stdout="?? later.txt\0"))
+
+        code, out = self.acquire()
+
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 41))
+        self.assertEqual(self.slept, [20])
+        self.assertEqual(out["takeover"]["uncommitted"], ["a.py", "new.txt"])
+        self.assertEqual(self.world.argvs("git"), [ORIGIN, LIST_WT, STATUS])
+        calls = self.world.calls()
+        last_git = max(i for i, call in enumerate(calls) if call["tool"] == "git")
+        end_post = next(i for i, call in enumerate(calls) if call["tool"] == "gh" and call["argv"] == post(self.END))
+        self.assertLess(last_git, end_post)
+
+    def test_only_the_successor_finishes_an_interrupted_takeover(self):
+        expected = [patch(5, self.RELEASED_5), post(fm.end_body(30, "released")), OA_REMOVE,
+                    post(self.NEW_CLAIM), ENSURE, ADD]
+        for name, ends in (("the successor's end", [comment(39, self.END)]),
+                           ("two ends, the caller's first", [comment(38, self.END), comment(39, self.OTHER_END)])):
+            with self.subTest(name):
+                self.fresh_world()
+                self.git_ready()
+                self.store(comment(5, DEAD_CLAIM, OLD), comment(30, oa_body(5, DEAD_HOLDER)), *ends)
+
+                code, out = self.acquire()
+
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 41))
+                self.assertEqual(out["takeover"], TAKEOVER)
+                self.assertEqual(self.mutations(), expected)
+        no_session_claim = claim_body(TAKER, branch=BRANCH, sprint=SPRINT)
+        grants_nothing = (
+            ("another successor", [comment(39, self.OTHER_END)], self.PLAIN, False),
+            ("another sprint", [comment(39, fm.end_body(5, "holder-gone", successor=TAKER_SESSION,
+                                                        sprint="fedcba9876543210"))], self.PLAIN, False),
+            ("an ordinary release", [comment(39, fm.end_body(5, "holder-gone"))], self.PLAIN, False),
+            ("two ends, another successor first", [comment(38, self.OTHER_END), comment(39, self.END)],
+             self.PLAIN, False),
+            ("an ordinary release first", [comment(38, fm.end_body(5, "done")), comment(39, self.END)],
+             self.PLAIN, False),
+            ("caller without a session", [comment(39, self.END)], no_session_claim, True))
+        for name, ends, plain, without_session in grants_nothing:
+            with self.subTest(name), mock.patch.dict(os.environ):
+                self.fresh_world()
+                self.git_ready()
+                self.store(comment(5, DEAD_CLAIM, OLD), comment(30, oa_body(5, DEAD_HOLDER)), *ends)
+                if without_session:
+                    os.environ.pop("CLAUDE_CODE_SESSION_ID")
+
+                code, out = self.acquire()
+
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 40))
+                self.assertIsNone(out["takeover"])
+                self.assertEqual(self.world.argvs("git"), [])
+                self.assertEqual(self.mutations(), [post(plain), ENSURE, ADD])
+
+    def test_an_already_held_acquire_after_a_takeover_reports_it(self):
+        self.git_ready()
+        self.store(comment(5, self.RELEASED_5), comment(39, self.END), comment(41, self.NEW_CLAIM), next_id=50)
+
+        code, out = self.acquire()
+
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 41))
+        self.assertEqual(out["takeover"], TAKEOVER)
+        self.assertEqual(self.mutations(), [ENSURE, ADD])
+
+    def test_an_older_takeover_is_not_reported_again(self):
+        with self.subTest("a later claim was released"):
+            self.git_ready()
+            self.store(comment(5, self.RELEASED_5), comment(39, self.END),
+                       comment(41, claim_body(TAKER, released="done")), comment(42, fm.end_body(41, "done")),
+                       next_id=50)
+
+            code, out = self.acquire()
+
+            self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 50))
+            self.assertIsNone(out["takeover"])
+            self.assertEqual(self.world.argvs("git"), [])
+        with self.subTest("another holder holds it now"):
+            self.fresh_world()
+            self.git_ready()
+            self.store(comment(5, self.RELEASED_5), comment(39, self.END),
+                       comment(41, claim_body("anis-desktop/batch-x")), next_id=50)
+
+            code, out = self.acquire()
+
+            self.assertEqual((code, out["verdict"], out["by"]), (3, "held_by", "anis-desktop/batch-x"))
+            self.assertIsNone(out["takeover"])
+
+    def handoff_world(self, *extra, **options):
+        self.git_ready()
+        self.store(comment(5, self.GONE_5, T0), *extra, **options)
+
+    def test_a_new_session_of_the_same_holder_takes_over_a_gone_session(self):
+        for name, records in (("the old session left no record", None),
+                              ("the old session left a dead record", True)):
+            with self.subTest(name):
+                self.fresh_world()
+                self.handoff_world()
+                if records:
+                    self.registry_only(self.taker_record(), self.dead_record())
+
+                code, out = self.acquire(self.BATCH)
+
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+                self.assertEqual(out["takeover"], self.HANDED_REPORT)
+                self.assertEqual(self.mutations(), [patch(5, self.HANDED), ENSURE, ADD])
+
+    def test_the_same_session_of_the_same_holder_stays_already_held(self):
+        cases = (
+            ("same session", claim_body(self.BATCH, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT),
+             None, {}, None),
+            ("old session still runs", self.GONE_5, (lambda: self.registry_only(
+                self.taker_record(), self.running_record())), {}, None),
+            ("caller not in the registry", self.GONE_5, self.registry_only, {}, None),
+            ("after the handoff", self.HANDED, None, {}, self.HANDED_REPORT),
+            ("same session, another sprint", self.HANDED, None, {"CONSOLE_SPRINT_ID": "fedcba9876543210"}, None))
+        for name, claim, prepare, env, report in cases:
+            with self.subTest(name), mock.patch.dict(os.environ, env):
+                self.fresh_world()
+                self.git_ready()
+                self.store(comment(5, claim, T0))
+                if prepare is not None:
+                    prepare()
+
+                code, out = self.acquire(self.BATCH)
+
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+                self.assertEqual(out["takeover"], report)
+                self.assertEqual(self.mutations(), [ENSURE, ADD])
+                if report is None:
+                    self.assertEqual(self.world.argvs("git"), [])
+
+    def test_a_same_holder_claim_that_changed_is_not_refreshed(self):
+        self.handoff_world()
+        interleave(self, 1, lambda: self.rewrite(5, claim_body(self.BATCH, branch=BRANCH, session=DEAD,
+                                                               sprint=SPRINT, renewed="1")))
+
+        code, out = self.acquire(self.BATCH)
+
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+        self.assertIsNone(out["takeover"])
+        self.assertEqual(self.mutations(), [ENSURE, ADD])
+
+    def test_a_handoff_follows_the_claim_that_now_holds(self):
+        plain = claim_body(self.BATCH, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT)
+        with self.subTest("released before the fresh listing"):
+            self.handoff_world()
+            interleave(self, 1, lambda: self.world.append_comment(comment(39, fm.end_body(5, "done"))))
+
+            code, out = self.acquire(self.BATCH)
+
+            self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 40))
+            self.assertIsNone(out["takeover"])
+            self.assertEqual(self.mutations(), [post(plain), ENSURE, ADD])
+        with self.subTest("replaced by another holder"):
+            self.fresh_world()
+            self.handoff_world()
+
+            def replace():
+                self.world.append_comment(comment(38, fm.end_body(5, "done")))
+                self.world.append_comment(comment(39, claim_body("anis-desktop/batch-x")))
+            interleave(self, 1, replace)
+
+            code, out = self.acquire(self.BATCH)
+
+            self.assertEqual((code, out["verdict"], out["comment_id"], out["by"]),
+                             (3, "held_by", 39, "anis-desktop/batch-x"))
+            self.assertIsNone(out["takeover"])
+            self.assertEqual(self.mutations(), [])
+        with self.subTest("released after the edit"):
+            self.fresh_world()
+            self.handoff_world()
+            interleave(self, 2, lambda: self.world.append_comment(comment(39, fm.end_body(5, "done"))))
+
+            code, out = self.acquire(self.BATCH)
+
+            self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 40))
+            self.assertIsNone(out["takeover"])
+            self.assertEqual(self.mutations(), [patch(5, self.HANDED), post(plain), ENSURE, ADD])
+
+    def test_a_handoff_overwritten_by_another_session_reports_nothing(self):
+        self.git_ready()
+        self.store(comment(5, self.GONE_5, OLD), comment(30, oa_body(5, self.BATCH)))
+        real_edit = fm.edit
+
+        def edit(slug, comment_id, body):
+            real_edit(slug, comment_id, body)
+            self.rewrite(5, claim_body(self.BATCH, branch=BRANCH, session="0f0f0f0f-other", sprint=SPRINT,
+                                       took="5"))
+        patcher = mock.patch.object(fm, "edit", edit)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        code, out = self.acquire(self.BATCH)
+
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+        self.assertIsNone(out["takeover"])
+        self.assertEqual(self.mutations(), [patch(5, self.HANDED), ENSURE, ADD])
+        self.assertEqual([m.comment_id for m in self.live("owner-action")], [30])
+
+    def test_a_handoff_retires_only_the_prompts_it_found(self):
+        unrelated = fm.render("owner-action", {"issue": str(ISSUE), "reason": "conflict", "holder": self.BATCH},
+                              "Resolve the conflict.")
+        with self.subTest("the handoff"):
+            self.fresh_world()
+            self.slept.clear()
+            self.git_ready()
+            self.store(comment(5, self.GONE_5, OLD), comment(30, oa_body(5, self.BATCH)), comment(31, unrelated))
+
+            code, out = self.acquire(self.BATCH)
+
+            self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+            self.assertEqual(out["takeover"], self.HANDED_REPORT)
+            self.assertEqual(self.mutations(), [patch(5, self.HANDED), post(fm.end_body(30, "renewed")),
+                                                ENSURE, ADD])
+            self.assertEqual([m.comment_id for m in self.live("owner-action")], [31])
+        with self.subTest("a retry after a failed retirement"):
+            self.fresh_world()
+            self.slept.clear()
+            self.git_ready()
+            self.store(comment(5, self.GONE_5, OLD), comment(30, oa_body(5, self.BATCH)), fail_once=["post"])
+            interleave(self, 3, lambda: self.world.append_comment(comment(61, oa_body(5, self.BATCH))))
+
+            code, out = self.acquire(self.BATCH)
+
+            self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+            self.assertEqual(out["takeover"], self.HANDED_REPORT)
+            self.assertEqual(self.slept, [20])
+            self.assertEqual(self.mutations().count(patch(5, self.HANDED)), 1)
+            self.assertIn(post(fm.end_body(30, "renewed")), self.mutations())
+            self.assertNotIn(OA_REMOVE, self.mutations())
+            self.assertEqual([m.comment_id for m in self.live("owner-action")], [61])
+            self.assertEqual(self.world.argvs("git"), [ORIGIN, LIST_WT, STATUS])
+        with self.subTest("a retry after a failed label removal"):
+            self.fresh_world()
+            self.slept.clear()
+            self.git_ready()
+            self.store(comment(5, self.GONE_5, OLD), comment(30, oa_body(5, self.BATCH)))
+            real_remove, calls = forge_api.remove_label, []
+
+            def remove(slug, issue, name):
+                calls.append(name)
+                if len(calls) == 1:
+                    raise ForgeError("gh_failed", "HTTP 502", transient=True)
+                return real_remove(slug, issue, name)
+            patcher = mock.patch.object(forge_api, "remove_label", remove)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+            code, out = self.acquire(self.BATCH)
+
+            self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+            self.assertEqual(out["takeover"], self.HANDED_REPORT)
+            self.assertEqual(self.slept, [20])
+            self.assertEqual(self.mutations(), [patch(5, self.HANDED), post(fm.end_body(30, "renewed")),
+                                                OA_REMOVE, ENSURE, ADD])
+        with self.subTest("a later call"):
+            self.fresh_world()
+            self.slept.clear()
+            self.git_ready()
+            self.store(comment(5, self.HANDED), comment(60, oa_body(5, self.BATCH)))
+
+            code, out = self.acquire(self.BATCH)
+
+            self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+            self.assertEqual(out["takeover"], self.HANDED_REPORT)
+            self.assertEqual(self.mutations(), [ENSURE, ADD])
+            self.assertEqual([m.comment_id for m in self.live("owner-action")], [60])
+
+    def test_a_handoff_then_a_renewal_by_another_session_reports_nothing(self):
+        self.git_ready()
+        self.store(comment(5, self.HANDED))
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "0f0f0f0f-next"}):
+            self.registry_only(self.taker_record(), self.record("0f0f0f0f-next", 2166))
+
+            code, out = run(*common("renew", self.BATCH))
+            self.assertEqual((code, out["verdict"]), (0, "renewed"))
+
+            code, out = self.acquire(self.BATCH)
+
+            self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+            self.assertIsNone(out["takeover"])
+            self.assertEqual(self.world.argvs("git"), [])
 
 
 if __name__ == "__main__":
