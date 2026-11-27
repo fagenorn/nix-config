@@ -4,7 +4,8 @@
 
 At `planning` and `plan review` the change is its `--path` arguments; from `building` on it is the
 paths of `--diff <range>`. Prints one JSON line (`schema_version` 1) naming files, never pasting
-them: the bar, the stack shards the extensions choose, the project shards whose `governs` globs
+them: the bar, the stack shards the extensions choose (and, for a stack with package-specific
+files, the references of the governing project file), the project shards whose `governs` globs
 match, the stage's hint file, the records the changed files cite, a one-line index of the records
 of each matching context-map area, each shard's rule ids, the platform revision and the total
 size in bytes. A wide change is never cut. Exit 0 with that line, 2 with one `router: <reason>`
@@ -17,7 +18,7 @@ import argparse
 import json
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
 
 from agent_tools.delivery import hint_phases, routing
@@ -39,13 +40,23 @@ def regular_size(path: Path) -> int | None:
     return path.stat().st_size if path.is_file() else None
 
 
-def project_files(root: Path) -> dict[str, bytes]:
+def project_files(root: Path, paths: Iterable[str] = ()) -> dict[str, bytes]:
     found = {}
     patterns = (f"{routing.LAYER2_DIR}/*.md", routing.CONTEXT_MAP, "docs/areas/*/adr/*.md")
     for pattern in patterns:
         for path in sorted(root.glob(pattern)):
             relative = path.relative_to(root).as_posix()
             if path.is_file() and routing.is_input(relative):
+                found[relative] = path.read_bytes()
+    # The manifests of a package-routed stack sit in the ancestors of a changed path; they are
+    # listed directory by directory, never found by walking the tree.
+    for directory in dict.fromkeys(d for p in paths for d in routing.manifest_dirs(p)):
+        folder = root / directory
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.iterdir()):
+            relative = path.relative_to(root).as_posix()
+            if path.is_file() and routing.is_manifest(relative):
                 found[relative] = path.read_bytes()
     return found
 
@@ -105,8 +116,8 @@ def must_read(root: Path, project: routing.Project, paths: list[str]) -> list[di
 def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
     paths = change_paths(args, root)
     platform = routing.load_platform(platform_dir)
-    project = routing.read_project(project_files(root))
-    names = sorted({name for path in paths for name in routing.stack_shards(path)})
+    project = routing.read_project(project_files(root, paths))
+    names = sorted({name for path in paths for name in routing.routed_stacks(project, path)})
     shards = [{"layer": "bar", "path": str(platform_dir / routing.BAR),
                "bytes": len(platform.files[routing.BAR]), "rules": rules(platform.files[routing.BAR])}]
     for name in names:

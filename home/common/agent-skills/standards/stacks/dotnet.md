@@ -4,7 +4,7 @@ project on this stack, so nothing here may name a repo, a service, or a folder.
 Loaded only when the diff touches *.cs / *.csproj / *.slnx. Every entry is
 version-stamped, because a framework trap that got fixed is a trap no longer.
 The data-access traps are in dotnet-data.md and the AI-framework traps in
-dotnet-ai.md.
+dotnet-ai.md, each loaded only for a project that references its packages.
 -->
 
 # .NET
