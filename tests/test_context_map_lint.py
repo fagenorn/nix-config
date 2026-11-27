@@ -10,9 +10,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from unittest import mock
 
 from agent_tools.delivery import context_map_lint, never_rise, rule_ids
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from agent_tools.delivery.record_lint import (
     RECORD_ENFORCERS, RECORD_SIZE_ENFORCER, RECORD_FORM_RULE, RECORD_SIZE_RULE, find_record_form,
     find_record_size, is_record_migration, is_record_path, record_violations)
@@ -191,6 +193,110 @@ class ContextMapLintTest(unittest.TestCase):
             result = self.run_lint(root, context_map)
             self.assertEqual(result.returncode, 1)
             self.assertIn("number 001 is already", result.stderr)
+
+    def dotnet_tree(self, root, globs, files):
+        """A clean one-area map governing `globs`, with `files` (relative paths) planted empty."""
+        (root / "area.md").write_text("---\narea: example\nbudget: 200\n---\n\n**Thing**: a term\n")
+        context_map = root / "CONTEXT-MAP.md"
+        context_map.write_text(
+            "## Areas\n| Area | Context file | Gist | governs |\n|---|---|---|---|\n"
+            f"| Example | [area](area.md) | x | {globs} |\n\n"
+            "## Terms\n| Term | Area |\n|---|---|\n| Thing | Example |\n")
+        for relative in files:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+        return context_map
+
+    def test_a_dotnet_source_no_area_governs_is_a_finding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.dotnet_tree(
+                root, f"`*.py`, `{SOLUTION_ROOT}/Governed/**`",
+                ["main.py", f"{SOLUTION_ROOT}/Governed/A.cs", f"{SOLUTION_ROOT}/Stray/B.cs"])
+            result = self.run_lint(root, context_map)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(
+                f"{SOLUTION_ROOT}/Stray/B.cs: no area's governs glob matches this .NET source", result.stderr)
+            self.assertNotIn(f"{SOLUTION_ROOT}/Governed/A.cs", result.stderr)
+
+    def test_a_glob_ending_in_double_star_governs_every_depth(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.dotnet_tree(
+                root, f"`*.py`, `{SOLUTION_ROOT}/Governed/**`",
+                ["main.py", f"{SOLUTION_ROOT}/Governed/A.cs", f"{SOLUTION_ROOT}/Governed/Deep/Er/C.cs"])
+            self.assertEqual(self.run_lint(root, context_map).returncode, 0)
+
+    def test_the_glob_match_needs_no_python_313_pathlib(self):
+        absent = mock.patch.object(PurePosixPath, "full_match", create=True,
+                                   side_effect=AttributeError("full_match"))
+        cases = (
+            ("a/b.cs", ["a/**"], True), ("a/b/c.cs", ["a/**"], True),
+            ("a/b/c.cs", ["a/*"], False), ("a/b.cs", ["a/*"], True),
+            ("a/b/c.cs", ["a/**/c.cs"], True), ("a/c.cs", ["a/**/c.cs"], True),
+            ("b/c.cs", ["a/**"], False), ("x.py", ["*.py"], True), ("d/x.py", ["*.py"], False),
+            ("a/b.cs", ["a/?.cs"], True), ("a/B.cs", ["a/b.cs"], False),
+            ("a/b.cs", ["x/**", "a/**"], True), ("a/b.cs", [""], False))
+        with absent:
+            for path, globs, expected in cases:
+                with self.subTest(path=path, globs=globs):
+                    self.assertEqual(context_map_lint.governs(path, globs), expected)
+
+    def test_a_leading_dot_slash_glob_governs_what_it_names(self):
+        self.assertTrue(context_map_lint.governs(
+            f"{SOLUTION_ROOT}/Delivery/A.cs", [f"./{SOLUTION_ROOT}/Delivery/*.cs"]))
+        self.assertFalse(context_map_lint.governs(
+            f"{SOLUTION_ROOT}/Other/A.cs", [f"./{SOLUTION_ROOT}/Delivery/*.cs"]))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.dotnet_tree(
+                root, f"`*.py`, `./{SOLUTION_ROOT}/Delivery/*.cs`, `./{SOLUTION_ROOT}/Future/**`",
+                ["main.py", f"{SOLUTION_ROOT}/Delivery/A.cs"])
+            result = self.run_lint(root, context_map)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_top_level_star_governs_no_dotnet_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.dotnet_tree(root, "`*`", ["main.py", f"{SOLUTION_ROOT}/Stray/B.cs"])
+            result = self.run_lint(root, context_map)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(
+                f"{SOLUTION_ROOT}/Stray/B.cs: no area's governs glob matches this .NET source", result.stderr)
+
+    def test_sources_outside_the_solution_root_or_in_build_output_are_not_judged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.dotnet_tree(
+                root, "`*.py`",
+                ["main.py", "src/Other.cs", f"{SOLUTION_ROOT}/Governed/obj/Gen.cs",
+                 f"{SOLUTION_ROOT}/Governed/bin/Out.cs"])
+            result = self.run_lint(root, context_map)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn(".NET source", result.stderr)
+
+    def test_a_solution_root_glob_may_match_nothing_and_no_other_glob_may(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.dotnet_tree(
+                root, f"`*.py`, `{SOLUTION_ROOT}/Future/**`, `nothing/**`", ["main.py"])
+            result = self.run_lint(root, context_map)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("glob `nothing/**` matches no existing path", result.stderr)
+            self.assertNotIn(f"{SOLUTION_ROOT}/Future/**", result.stderr)
+
+    def test_an_unreadable_solution_root_is_a_finding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.dotnet_tree(
+                root, f"`*.py`, `{SOLUTION_ROOT}/Governed/**`",
+                ["main.py", f"{SOLUTION_ROOT}/Governed/A.cs"])
+            with mock.patch(
+                    "agent_tools.delivery.context_map_lint.sources",
+                    side_effect=PermissionError(13, "Permission denied")):
+                errors = context_map_lint.check(root, context_map)
+            self.assertIn("dotnet: cannot list the .NET sources (Permission denied)", errors)
 
     def test_source_has_no_policy_discovery(self):
         source = LINTER.read_text(encoding="utf-8")
@@ -373,6 +479,34 @@ class RecordFormTest(unittest.TestCase):
         for name, (new, expected) in rows.items():
             with self.subTest(name):
                 self.assertEqual(is_record_migration(old, new), expected)
+
+
+class LiveMapTest(unittest.TestCase):
+    PROJECTS = {
+        "Delivery": "Delivery", "Verification": "Verification", "Claims": "Claims",
+        "Release": "Release", "Project contract": "ProjectContract", "Guard": "Guard",
+        "Hosts": "Hosts", "Console": "Console", "System": "System"}
+
+    def test_each_area_governs_its_dotnet_project_and_test_project_and_no_other_does(self):
+        text = (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text()
+        globs = {
+            row[0]: context_map_lint.CODE_RE.findall(row[3])
+            for row in context_map_lint.table_rows(context_map_lint.section(text, "Areas"))}
+        for area, project in self.PROJECTS.items():
+            for path in (f"{SOLUTION_ROOT}/{project}/Widget.cs", f"{SOLUTION_ROOT}/{project}.Tests/WidgetTests.cs"):
+                with self.subTest(area=area, path=path):
+                    self.assertTrue(context_map_lint.governs(path, globs[area]))
+                    for other in self.PROJECTS:
+                        if other != area:
+                            self.assertFalse(context_map_lint.governs(path, globs[other]), other)
+
+    def test_the_live_map_is_clean(self):
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.context_map_lint",
+             "--repo-root", str(REPO_ROOT.resolve()),
+             "--context-map", str((REPO_ROOT / "docs/CONTEXT-MAP.md").resolve())],
+            text=True, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
 
 
 if __name__ == "__main__":

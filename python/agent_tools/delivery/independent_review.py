@@ -70,6 +70,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from agent_tools.delivery.codex_review_effort import EFFORT
 from agent_tools.delivery.issue_setup import REPOSITORY_ENV
 from agent_tools.project_contract import resolve_project
 from agent_tools.project_contract.agent_platform import PLATFORM_COMMANDS
@@ -77,7 +78,6 @@ from agent_tools.system.siblings import sibling_argv
 
 OPERATION = "diff-review"
 MODEL = "gpt-6.2-astra"
-EFFORT = "high"
 FILE_BUDGET = 20
 ATTEMPT_SECONDS = 1700
 GIT_TIMEOUT = 120

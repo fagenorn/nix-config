@@ -2,15 +2,15 @@
 ## Areas
 | Area | Context file | Gist | governs |
 |---|---|---|---|
-| Delivery | [CONTEXT](./areas/delivery/CONTEXT.md) | Carrying an issue to merge: lanes, skills, programs, plans, test suite | `home/common/agent-skills/skills/**`, `home/common/claude-code/skills/**`, `home/common/agent-skills/default.nix`, `lib/impeccable.nix`, `python/agent_tools/delivery/**`, `python/agent_tools/agent_model_matrix.py`, `python/agent_tools/instruction_load.py`, `python/agent_tools/skill_lint.py` |
-| Verification | [CONTEXT](./areas/verification/CONTEXT.md) | Post-merge checks of held issues and recorded verification passes | `python/agent_tools/verification/**`, `home/common/verify-pending/**`, `hosts/common/darwin-verify-pending.nix` |
-| Claims | [CONTEXT](./areas/claims/CONTEXT.md) | Who delivers an issue, landing locks, owner asks and issue links | `python/agent_tools/claims/**` |
-| Release | [CONTEXT](./areas/release/CONTEXT.md) | Releasing a project through profiles, adapters and the transaction core | `python/agent_tools/release/**` |
-| Project contract | [CONTEXT](./areas/project-contract/CONTEXT.md) | The authored project contract, its resolution, adoption and platform manifest | `python/agent_tools/project_contract/**`, `home/common/agent-skills/platform-manifest.json`, `.agents/project.json` |
-| Guard | [CONTEXT](./areas/guard/CONTEXT.md) | The lifecycle guard that adjudicates pushes, PRs, merges and releases | `home/common/claude-code/lifecycle_guard.py`, `python/agent_tools/guard/**` |
-| Hosts | [CONTEXT](./areas/hosts/CONTEXT.md) | Per-host agent runtime: Claude Code install, accounts, cache proxy, launchers | `home/common/claude-code/default.nix`, `home/common/claude-code/accounts/**`, `python/agent_tools/hosts/**`, `lib/agent-tools.nix`, `lib/agent-plugins.nix`, `home/common/agent-tools/**`, `patches/agent-plugins/**`, `home/linux/claude-local/**` |
-| Console | [CONTEXT](./areas/console/CONTEXT.md) | The local page and service saying whether the owner is needed | `python/agent_tools/console/**`, `home/common/console/**`, `hosts/common/darwin-console.nix`, `home/common/claude-code/console-session-start.sh` |
-| System | [CONTEXT](./areas/system/CONTEXT.md) | Decisions spanning areas | `*` |
+| Delivery | [CONTEXT](./areas/delivery/CONTEXT.md) | Carrying an issue to merge: lanes, skills, programs, plans, test suite | `home/common/agent-skills/skills/**`, `home/common/claude-code/skills/**`, `home/common/agent-skills/default.nix`, `lib/impeccable.nix`, `python/agent_tools/delivery/**`, `python/agent_tools/agent_model_matrix.py`, `python/agent_tools/instruction_load.py`, `python/agent_tools/skill_lint.py`, `dotnet/Delivery/**`, `dotnet/Delivery.Tests/**` |
+| Verification | [CONTEXT](./areas/verification/CONTEXT.md) | Post-merge checks of held issues and recorded verification passes | `python/agent_tools/verification/**`, `home/common/verify-pending/**`, `hosts/common/darwin-verify-pending.nix`, `dotnet/Verification/**`, `dotnet/Verification.Tests/**` |
+| Claims | [CONTEXT](./areas/claims/CONTEXT.md) | Who delivers an issue, landing locks, owner asks and issue links | `python/agent_tools/claims/**`, `dotnet/Claims/**`, `dotnet/Claims.Tests/**` |
+| Release | [CONTEXT](./areas/release/CONTEXT.md) | Releasing a project through profiles, adapters and the transaction core | `python/agent_tools/release/**`, `dotnet/Release/**`, `dotnet/Release.Tests/**` |
+| Project contract | [CONTEXT](./areas/project-contract/CONTEXT.md) | The authored project contract, its resolution, adoption and platform manifest | `python/agent_tools/project_contract/**`, `home/common/agent-skills/platform-manifest.json`, `.agents/project.json`, `dotnet/ProjectContract/**`, `dotnet/ProjectContract.Tests/**` |
+| Guard | [CONTEXT](./areas/guard/CONTEXT.md) | The lifecycle guard that adjudicates pushes, PRs, merges and releases | `home/common/claude-code/lifecycle_guard.py`, `python/agent_tools/guard/**`, `dotnet/Guard/**`, `dotnet/Guard.Tests/**` |
+| Hosts | [CONTEXT](./areas/hosts/CONTEXT.md) | Per-host agent runtime: Claude Code install, accounts, cache proxy, launchers | `home/common/claude-code/default.nix`, `home/common/claude-code/accounts/**`, `python/agent_tools/hosts/**`, `lib/agent-tools.nix`, `lib/agent-plugins.nix`, `home/common/agent-tools/**`, `patches/agent-plugins/**`, `home/linux/claude-local/**`, `dotnet/Hosts/**`, `dotnet/Hosts.Tests/**` |
+| Console | [CONTEXT](./areas/console/CONTEXT.md) | The local page and service saying whether the owner is needed | `python/agent_tools/console/**`, `home/common/console/**`, `hosts/common/darwin-console.nix`, `home/common/claude-code/console-session-start.sh`, `dotnet/Console/**`, `dotnet/Console.Tests/**` |
+| System | [CONTEXT](./areas/system/CONTEXT.md) | Decisions spanning areas | `*`, `dotnet/System/**`, `dotnet/System.Tests/**` |
 ## Terms
 | Term | Area |
 |---|---|
