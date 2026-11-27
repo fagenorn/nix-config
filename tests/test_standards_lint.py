@@ -7,9 +7,10 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest import mock
 
-from agent_tools.delivery import hint_phases, never_rise, procedure_check, rule_ids, standards_lint
+from agent_tools.delivery import hint_phases, never_rise, procedure_check, routing, rule_ids, standards_lint
 from agent_tools.delivery.never_rise import Rise, Snapshot, Violation
 from agent_tools.project_contract import conformance_checks
+from tests import never_rise_world as world
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TIER = "fast"
@@ -409,6 +410,52 @@ class RoutedSetBudgetTest(unittest.TestCase):
         empty = self.snapshot({"a.md": (10, "big/**")})._replace(paths=frozenset())
         self.assertEqual(standards_lint.routed_set_violations(empty), [])
 
+    def test_two_csharp_paths_in_different_projects_are_sized_by_their_own_references(self):
+        write_files(self.root / "standards", {
+            "stacks/dotnet.md": "d" * 4096, "stacks/dotnet-data.md": "e" * 16385})
+        project = ('<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>{}</ItemGroup></Project>')
+        reference = '<PackageReference Include="Microsoft.EntityFrameworkCore" Version="1" />'
+        contents = {
+            "docs/standards/README.md": b"# P\n\n| Shard | governs | Gist |\n|---|---|---|\n",
+            "a/A.csproj": project.format("").encode(),
+            "b/B.csproj": project.format(reference).encode()}
+        snap = Snapshot("a" * 40, {}, contents=MappingProxyType(contents),
+                        paths=frozenset(contents) | {"a/X.cs", "b/Y.cs"})
+
+        self.assertEqual(standards_lint.routed_set_violations(snap),
+                         [Violation("B26", "b/B.csproj", 24577, 1),
+                          Violation("B26", "b/Y.cs", 24577, 1)])
+
+    def committed_snapshot(self, manifest: bytes):
+        write_files(self.root / "standards", {
+            "stacks/dotnet.md": "d" * 4096, "stacks/dotnet-data.md": "e" * 16385})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = world.repo(tmp)
+            world.write(root, "docs/standards/README.md",
+                        "# P\n\n| Shard | governs | Gist |\n|---|---|---|\n")
+            world.write(root, "app/App.csproj", manifest)
+            world.write(root, "app/X.cs", "class X {}\n")
+            world.commit_all(root)
+            head = never_rise.resolve_commit(root, "HEAD", 60)
+            return never_rise.read_snapshot(root, head, 60, standards_lint.ROUTED_SET_ENFORCER.reads)
+
+    def test_a_utf16_project_file_still_routes_its_package_shard_under_the_budget(self):
+        text = ('<?xml version="1.0" encoding="utf-16"?><Project><ItemGroup>'
+                '<PackageReference Include="Npgsql" Version="1" /></ItemGroup></Project>')
+        snapshot = self.committed_snapshot(text.encode("utf-16"))
+
+        self.assertEqual(standards_lint.routed_set_violations(snapshot),
+                         [Violation("B26", "app/App.csproj", 24577, 1),
+                          Violation("B26", "app/X.cs", 24577, 1)])
+
+    def test_an_empty_project_file_fails_the_enforcer_naming_it(self):
+        snapshot = self.committed_snapshot(b"")
+
+        with self.assertRaises(never_rise.EnforcerFailed) as failed:
+            standards_lint.routed_set_violations(snapshot)
+
+        self.assertIn("app/App.csproj", str(failed.exception))
+
     def test_the_enforcer_is_registered_with_the_never_rise_check(self):
         self.assertIn(standards_lint.ROUTED_SET_ENFORCER,
                       conformance_checks.never_rise_enforcers({"bindings": {}}))
@@ -433,6 +480,20 @@ class LiveTreeTest(unittest.TestCase):
         self.assertIn(".agents/knowledge/hints/", text)
         self.assertNotIn(".claude/hints/", text)
         self.assertNotIn("REVIEW-CONTRACT.md", text)
+
+    def test_a_package_routed_stack_file_header_names_its_packages_and_no_extension(self):
+        stacks = REPO_ROOT / "home/common/agent-skills/standards/stacks"
+        for base, route in routing.PACKAGE_ROUTES.items():
+            triggers = [key for key, names in routing.STACK_SHARDS.items() if base in names]
+            for shard, packages in route.shards.items():
+                with self.subTest(shard=shard):
+                    text = (stacks / shard).read_text(encoding="utf-8")
+                    header = text[:text.index("-->")]
+                    self.assertTrue(text.startswith("<!--"))
+                    for trigger in triggers:
+                        self.assertNotIn(f"*{trigger}" if trigger.startswith(".") else trigger, header)
+                    for package in packages:
+                        self.assertIn(package, header)
 
 
 if __name__ == "__main__":

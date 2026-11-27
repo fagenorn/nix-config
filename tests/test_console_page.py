@@ -11266,18 +11266,9 @@ class RegisterApplyPageTest(unittest.TestCase):
         self.assertEqual(post["url"], "/api/plan-defer")
         self.assertEqual(posted(post), {"plan_id": PLAN_A})
 
-    def test_turn_signed_commits_off_posts_the_draft_change(self) -> None:
-        item = {**APPLY_ITEM, "questions": [{**APPLY_ITEM["questions"][0], "options": [
-            "Apply it again", "Turn signing off", "Not now"]}],
-            "values": ["apply", "signing_off", "not_now"]}
-        (snap,) = render([START, {"frame": cards([item], READY_SHOWN)},
-                          {"respond": {"status": 204, "text": ""}}, {"key": "2"},
-                          {"key": "Enter"}, {"clock": 5000}, {"snapshot": True}])
-        (post,) = snap["posts"]
-        self.assertEqual(post["url"], "/api/plan-answer")
-        self.assertEqual(posted(post), {"plan_id": item["plan_id"], "id": "contract-draft",
-                                        "subject": "commit-signed", "value": "no"})
-        self.assertIn("Answered, turning signing off", full(snap["inbox"]))
+    def test_the_apply_card_has_no_turn_signing_off_path(self) -> None:
+        self.assertNotIn("signing_off", PAGE_TEXT)
+        self.assertNotIn("turning signing off", PAGE_TEXT)
 
     def test_a_failed_step_card_offers_try_again(self) -> None:
         (snap,) = render([START, {"frame": cards([TRY_ITEM], FAILED_SHOWN)}, {"snapshot": True}])

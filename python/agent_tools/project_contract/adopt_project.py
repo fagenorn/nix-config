@@ -73,8 +73,9 @@ its parent is proved again once the commit exists, and a failure there refuses
 commit that fails is refused `adopt.commit.failed`, except that when the
 contract asked for a signature and a `git commit-tree -S` probe of the
 worktree's `HEAD` tree (no ref moved, no hook run) also fails, it is refused
-`adopt.commit.signing_unavailable`; either way the worktree is retained and
-the commit is never retried unsigned. A contract that asks for no signature
+`adopt.commit.signing_unavailable` (pointing at `/bindings/vcs/commit/signed` when
+the base revision's schema-2 contract authors it, never a draft); either way the worktree is retained
+and the commit is never retried unsigned. A contract that asks for no signature
 commits with `--no-gpg-sign`, so a host whose `commit.gpgsign` is on never
 reaches its signer for it. A failed commit's error object and failure
 record carry `commit_output` `{hook, exit, lines}`: git's merged output (the
@@ -1222,7 +1223,9 @@ def apply_stored_plan(args: argparse.Namespace, manifest: dict, digest: str,
         adopt_apply.retain_failure(digest, document, worktree, branch,
                                    gates, cause, commit_output=output)
         raise adopt_inspection.refuse(
-            "verification_failed", cause, "",
+            "verification_failed", cause,
+            adopt_apply.committed_signing_pointer(root, base_revision)
+            if unsigned else "",
             "the contract asks for a signed commit and this host could not "
             "sign one" if unsigned
             else "the adoption commit could not be created",

@@ -74,7 +74,8 @@ characters, over 100`, and `no planning rule` when the section holds none.
    project shards and its areas' decision index) is over 24,576 bytes is a violation
    `B26 <path>:<bytes>` of measure 1, so a path already over on the merge base does not rise
    when it grows. A snapshot with no path reads nothing; a platform standards directory with
-   no bar, or a routed stack shard it lacks, raises `EnforcerFailed`.
+   no bar, or a routed stack shard it lacks, raises `EnforcerFailed`, as does a project or
+   build file that is not well-formed XML.
 
 With `--index` the problems still print and set exit status 1, and the rule index
 follows them on stdout, computed on the run and written to no file: for each rule
@@ -300,12 +301,17 @@ def routed_set_violations(snapshot: Snapshot) -> list[Violation]:
         return []
     try:
         platform = routing.load_platform(agent_platform.standards_dir())
-        project = routing.read_project(
-            {path: content for path, content in snapshot.contents.items() if routing.is_input(path)})
+        # A manifest is read from the raw blobs: `contents` drops a UTF-16 file (it holds a NUL)
+        # and an empty one, which the router reads and judges.
+        inputs = {path: content for path, content in snapshot.contents.items()
+                  if routing.is_input(path)}
+        inputs.update({path: content for path, content in snapshot.blobs.items()
+                       if routing.is_manifest(path)})
+        project = routing.read_project(inputs)
         sizes: dict[tuple, int] = {}
         found = []
         for path in sorted(snapshot.paths):
-            key = (routing.stack_shards(path),
+            key = (routing.routed_stacks(project, path),
                    tuple(s.path for s in project.shards
                          if any(routing.glob_matches(g, path) for g in s.globs)),
                    tuple(a.name for a in project.areas
@@ -319,7 +325,8 @@ def routed_set_violations(snapshot: Snapshot) -> list[Violation]:
     return found
 
 
-ROUTED_SET_ENFORCER = Enforcer(ROUTED_SET_RULE, routed_set_violations, per_file=True)
+ROUTED_SET_ENFORCER = Enforcer(
+    ROUTED_SET_RULE, routed_set_violations, per_file=True, reads=routing.is_manifest)
 
 
 def main(argv: list[str] | None = None) -> int:

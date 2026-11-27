@@ -4313,10 +4313,6 @@ function start(item, state) {
     const value = item.values[state.picks[0]];
     if (value === "apply") return begin(item, state, { adopt: true, body, words: "Answered, applying" });
     if (value === "retry") return begin(item, state, { adopt: true, body, words: "Answered, trying again" });
-    if (value === "signing_off") {
-      const change = { plan_id: item.plan_id, id: "contract-draft", subject: "commit-signed", value: "no" };
-      return begin(item, state, { plan: true, body: change, words: "Answered, turning signing off" });
-    }
     return begin(item, state, { defer: true, body, words: "Set aside until the plan changes" });
   }
   if (isConfirm(item)) {
