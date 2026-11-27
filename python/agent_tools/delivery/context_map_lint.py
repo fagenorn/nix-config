@@ -37,6 +37,7 @@ cannot be started exits 2 and one ended by a signal exits 1.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import subprocess
@@ -86,14 +87,18 @@ def table_rows(block: str | None) -> list[list[str]]:
 
 def governs(path: str, globs: Iterable[str]) -> bool:
     """True when `path` (POSIX, relative to the root) matches some glob; `*` stays in one level, `**` spans many."""
-    posix = PurePosixPath(path)
-    for pattern in globs:
-        try:
-            if posix.full_match(pattern):
-                return True
-        except ValueError:
-            continue
-    return False
+    parts = PurePosixPath(path).parts
+    return any(pattern and _segments_match(parts, tuple(pattern.split("/"))) for pattern in globs)
+
+
+def _segments_match(parts: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
+    """Segment-wise match, so it needs no `PurePath.full_match` (Python 3.13)."""
+    if not pattern:
+        return not parts
+    head, rest = pattern[0], pattern[1:]
+    if head == "**":
+        return any(_segments_match(parts[skip:], rest) for skip in range(len(parts) + 1))
+    return bool(parts) and fnmatch.fnmatchcase(parts[0], head) and _segments_match(parts[1:], rest)
 
 
 def budget_of(text: str) -> int | None:

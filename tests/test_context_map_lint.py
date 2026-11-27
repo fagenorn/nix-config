@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 from agent_tools.delivery import context_map_lint, never_rise, rule_ids
@@ -227,6 +227,21 @@ class ContextMapLintTest(unittest.TestCase):
                 root, f"`*.py`, `{SOLUTION_ROOT}/Governed/**`",
                 ["main.py", f"{SOLUTION_ROOT}/Governed/A.cs", f"{SOLUTION_ROOT}/Governed/Deep/Er/C.cs"])
             self.assertEqual(self.run_lint(root, context_map).returncode, 0)
+
+    def test_the_glob_match_needs_no_python_313_pathlib(self):
+        absent = mock.patch.object(PurePosixPath, "full_match", create=True,
+                                   side_effect=AttributeError("full_match"))
+        cases = (
+            ("a/b.cs", ["a/**"], True), ("a/b/c.cs", ["a/**"], True),
+            ("a/b/c.cs", ["a/*"], False), ("a/b.cs", ["a/*"], True),
+            ("a/b/c.cs", ["a/**/c.cs"], True), ("a/c.cs", ["a/**/c.cs"], True),
+            ("b/c.cs", ["a/**"], False), ("x.py", ["*.py"], True), ("d/x.py", ["*.py"], False),
+            ("a/b.cs", ["a/?.cs"], True), ("a/B.cs", ["a/b.cs"], False),
+            ("a/b.cs", ["x/**", "a/**"], True), ("a/b.cs", [""], False))
+        with absent:
+            for path, globs, expected in cases:
+                with self.subTest(path=path, globs=globs):
+                    self.assertEqual(context_map_lint.governs(path, globs), expected)
 
     def test_a_top_level_star_governs_no_dotnet_source(self):
         with tempfile.TemporaryDirectory() as temp:

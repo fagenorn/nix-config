@@ -10,7 +10,8 @@ source roots, the pairs, the covers, the globs and the build command are all fla
 are those of the `agent-workflow-tests` recipe in `<root>/<suite file>` (`--suite-file`, default
 `justfile`), read with
 `agent_tools.delivery.suite_runner.suite_members`. The changed paths are the lines of
-`git diff --no-renames --name-only <base>...HEAD`, read from `<root>`.
+`git diff --no-renames --name-only -z <base>...HEAD`, read from `<root>`, so a non-ASCII path
+arrives unquoted.
 
 Selection rules, in member order, then the pair tests in flag order, with no duplicates.
 Apart from the pairs, only members are selected, so a nightly or unregistered test never is.
@@ -61,7 +62,7 @@ without the variable.
 
 .NET rule: `--dotnet-tests` also runs the .NET tests a change touches, and without it none of
 this happens (no `sources`, no tools, no `dotnet` key). Only changed paths under the solution
-root (`SOLUTION_ROOT`) count, and the projects are every `.csproj` that
+root (`SOLUTION_ROOT`) count, and with none the projects are never listed. Otherwise they are every `.csproj` that
 `agent_tools.delivery.dotnet_format_lint.sources` lists there (an `OSError` prints
 `test-touched: cannot list the .NET projects: <error>` and returns 2 before anything runs).
 A changed file named in `SHARED_BUILD_FILES` selects the whole set. A changed `.cs` or
@@ -73,7 +74,7 @@ whole set is the one solution file (a `Refusal` from `solution` prints `test-tou
 <reason>` and returns 1 before anything runs); otherwise the targets are the sorted test
 projects. The selection file gains `dotnet`, the targets, only when there are some. The
 Python selection runs first; then, when targets exist, `dotnet test <target>` runs per target
-in order through the tools directory, with the tools' environment (a `Refusal` from the tools
+in order through the tools directory, with exactly `child_env(tools)` and none of the caller's environment (a `Refusal` from the tools
 prints `test-touched: .NET tools unavailable (<reason>)` and counts as exit 2), and the result
 is the first non-zero of all runs. Nothing is "touched" only when no suite member and no
 target is selected.
@@ -164,11 +165,12 @@ class GitError(RuntimeError):
 
 def changed_paths(root: Path, base: str) -> list[str]:
     result = subprocess.run(
-        ["git", "-C", str(root), "diff", "--no-renames", "--name-only", f"{base}...HEAD"],
-        capture_output=True, text=True)
+        ["git", "-C", str(root), "diff", "--no-renames", "--name-only", "-z", f"{base}...HEAD"],
+        capture_output=True)
     if result.returncode != 0:
-        raise GitError(result.stderr.rstrip("\n"))
-    return result.stdout.splitlines()
+        raise GitError(result.stderr.decode("utf-8", errors="replace").rstrip("\n"))
+    return [name.decode("utf-8", errors="replace")
+            for name in result.stdout.split(b"\0") if name]
 
 
 def build_trigger(changed: Sequence[str], globs: Sequence[str]) -> str | None:
@@ -272,7 +274,13 @@ def parse_covers(parser: argparse.ArgumentParser, values: Sequence[str]) -> dict
     return _parse_mapping(parser, "--cover", "SOURCE_GLOB=MEMBER_GLOB", values)
 
 
+class ExactEnv(dict):
+    """An environment a launch gets whole, in place of the caller's plus an overlay."""
+
+
 def default_execute(argv: list[str], cwd: Path, extra: Mapping[str, str] | None = None) -> int:
+    if isinstance(extra, ExactEnv):
+        return subprocess.run(argv, cwd=cwd, env=dict(extra)).returncode
     env = {k: v for k, v in os.environ.items() if k != SELECTION_ENV}
     env.update(extra or {})
     return subprocess.run(argv, cwd=cwd, env=env).returncode
@@ -362,7 +370,7 @@ def main(argv: Sequence[str] | None = None, *,
     chosen = selection(changed, members, read, source_roots=args.source_root, pairs=pairs,
                        covers=covers, build_globs=args.build_when)
     dotnet_targets: list[str] = []
-    if args.dotnet_tests:
+    if args.dotnet_tests and any(p.startswith(f"{SOLUTION_ROOT}/") for p in changed):
         try:
             projects = [p.relative_to(root).as_posix() for p in sources(root)
                         if p.name.endswith(".csproj")]
@@ -453,7 +461,7 @@ def main(argv: Sequence[str] | None = None, *,
             for dotnet_target in dotnet_targets:
                 _say(sys.stderr, f"test-touched: dotnet test {dotnet_target}")
                 results.append(run([f"{tools}/dotnet", "test", dotnet_target], root,
-                                   child_env(tools)))
+                                   ExactEnv(child_env(tools))))
     return next((code for code in results if code != 0), 0)
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -193,8 +194,20 @@ class LiveTreeTest(unittest.TestCase):
         self.assertIn("dotnet.md", routing.stack_shards(path))
         self.assertEqual([a.name for a in areas], ["Delivery", "System"])
         shards = ("the-bar.md", "stacks/dotnet-ai.md", "stacks/dotnet-data.md", "stacks/dotnet.md")
-        self.assertEqual(
-            loaded, sum(len(platform.files[k]) for k in shards) + routing.index_bytes(areas))
+        # The records on disk, counted by file name: every one is indexed, and each index line
+        # holds at least its id and a newline.
+        on_disk = {
+            area: sorted(name for name in os.listdir(REPO_ROOT / "docs/areas" / area / "adr")
+                         if re.fullmatch(r"\d{3}-[a-z0-9-]+\.md", name))
+            for area in ("delivery", "system")}
+        self.assertGreater(len(on_disk["delivery"]), 0)
+        self.assertEqual([len(a.records) for a in areas],
+                         [len(on_disk["delivery"]), len(on_disk["system"])])
+        floor = sum(len(f"ADR-{area}-{name[:3]}") + 1
+                    for area, names in on_disk.items() for name in names)
+        index = routing.index_bytes(areas)
+        self.assertGreater(index, floor)
+        self.assertEqual(loaded, sum(len(platform.files[k]) for k in shards) + index)
 
 
 if __name__ == "__main__":

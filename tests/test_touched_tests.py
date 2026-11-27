@@ -27,7 +27,7 @@ from agent_tools.delivery.suite_runner import REPORT_ENV, suite_members
 from agent_tools.delivery.touched_tests import (
     SELECTION_ENV, build_trigger, default_capture, default_execute, main, parse_assignments,
     select, selection)
-from agent_tools.delivery.dotnet_format_lint import Refusal
+from agent_tools.delivery.dotnet_format_lint import Refusal, child_env
 from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from agent_tools.delivery.touched_tests import DotnetSelection, dotnet_selection
 
@@ -534,9 +534,46 @@ class DotnetMainTest(unittest.TestCase):
         code, _, _ = self.run_main("--dotnet-tests")
         self.assertEqual(self.calls, [(["/tools/bin/dotnet", "test",
                                         f"{s}/Planted.Tests/Planted.Tests.csproj"], self.root)])
-        self.assertEqual(self.environments[0]["PATH"], "/tools/bin")
-        self.assertEqual(self.environments[0]["DOTNET_CLI_TELEMETRY_OPTOUT"], "1")
+        self.assertEqual(self.environments, [child_env("/tools/bin")])
         self.assertEqual(code, 0)
+
+    def test_dotnet_test_gets_exactly_the_tools_environment_not_the_callers(self):
+        probe = ("import os, sys; "
+                 "sys.exit(3 if 'NUGET_PACKAGES' in os.environ or 'DOTNET_ROOT' in os.environ "
+                 "else 0)")
+        ambient = {"NUGET_PACKAGES": "/elsewhere", "DOTNET_ROOT": "/usr/local/share/dotnet"}
+        with mock.patch.dict(os.environ, ambient):
+            self.assertEqual(default_execute([sys.executable, "-c", probe], self.root), 3)
+            self.change(f"{SOLUTION_ROOT}/Planted/Widget.cs")
+            self.run_main("--dotnet-tests")
+            exact = self.environments[0]
+            self.assertEqual(default_execute([sys.executable, "-c", probe], self.root, exact), 0)
+
+    def test_a_non_ascii_changed_path_still_selects_its_test_project(self):
+        s = SOLUTION_ROOT
+        self.change(f"{s}/Planted/Café.cs")
+        code, _, _ = self.run_main("--dotnet-tests")
+        self.assertEqual(self.calls, [(["/tools/bin/dotnet", "test",
+                                        f"{s}/Planted.Tests/Planted.Tests.csproj"], self.root)])
+        self.assertEqual(code, 0)
+
+    def test_a_python_only_diff_never_lists_the_dotnet_projects(self):
+        self.change("python/pkg/alpha.py")
+        with mock.patch("agent_tools.delivery.touched_tests.sources",
+                        side_effect=PermissionError(13, "Permission denied")):
+            code, _, err = self.run_main("--dotnet-tests")
+        self.assertEqual(self.calls, [([*RUNNER, "tests/test_alpha.py"], self.root)])
+        self.assertNotIn("cannot list the .NET projects", err)
+        self.assertEqual(code, 0)
+
+    def test_a_dotnet_diff_with_unreadable_projects_still_exits_2(self):
+        self.change(f"{SOLUTION_ROOT}/Planted/Widget.cs")
+        with mock.patch("agent_tools.delivery.touched_tests.sources",
+                        side_effect=PermissionError(13, "Permission denied")):
+            code, _, err = self.run_main("--dotnet-tests")
+        self.assertEqual(code, 2)
+        self.assertIn("test-touched: cannot list the .NET projects:", err)
+        self.assertEqual(self.calls, [])
 
     def test_a_shared_build_file_runs_the_whole_dotnet_test_set(self):
         s = SOLUTION_ROOT
