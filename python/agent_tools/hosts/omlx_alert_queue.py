@@ -3,9 +3,10 @@
 A pending entry is `{kind, text, logged}`, plus `at` (when it was queued, ISO 8601), `count` (the alerts
 it stands for, default 1) and `held` (it was kept because the host has no alert settings file).
 
-`compact(pending, now)` answers `(kept, expired)` for the entries already tried once (`logged` true; an
-entry not yet tried passes through whole and last, so several alerts of one sample all go out):
-- an entry older than `MAX_AGE` (24 hours, strictly), or with no readable `at`, is expired;
+`compact(pending, now)` answers `(kept, expired)` for the `held` entries alone (tried, and kept for want of a
+settings file). Every other entry passes through whole, in order, the untried last, so several alerts of one
+sample all go out and an alert lost to a Telegram outage or a refused settings file is retried without end:
+- a held entry older than `MAX_AGE` (24 hours, strictly), or with no readable `at`, is expired;
 - of the rest, the newest of each kind per calendar day of its `at` is kept, with the `count` of the entries
   it replaced added to its own.
 `expiry_line(expired)` is the one summary line for the log: how many were dropped and per kind.
@@ -40,9 +41,10 @@ def _per_kind(entries: list[dict]) -> str:
 
 
 def compact(pending: list[dict], now: datetime) -> tuple[list[dict], list[dict]]:
-    fresh = [entry for entry in pending if not entry["logged"]]
-    expired, newest = [], {}
-    for entry in (entry for entry in pending if entry["logged"]):
+    held, others, expired, newest = [], [], [], {}
+    for entry in pending:
+        (held if entry["logged"] and entry.get("held") else others).append(entry)
+    for entry in held:
         at = _at(entry)
         try:
             old = at is None or now - at > MAX_AGE
@@ -57,10 +59,11 @@ def compact(pending: list[dict], now: datetime) -> tuple[list[dict], list[dict]]
             newest[key] = entry
         else:
             kept, other = (entry, earlier) if at >= _at(earlier) else (earlier, entry)
-            newest[key] = {**kept, "count": _count(kept) + _count(other),
-                           "held": bool(kept.get("held")) or bool(other.get("held"))}
+            newest[key] = {**kept, "count": _count(kept) + _count(other)}
     kept = sorted(newest.values(), key=lambda entry: _at(entry))
-    return kept + fresh, expired
+    # Entries tried and refused or lost to an outage are neither bounded nor expired; an untried one goes last.
+    tried = [entry for entry in others if entry["logged"]]
+    return kept + tried + [entry for entry in others if not entry["logged"]], expired
 
 
 def expiry_line(expired: list[dict]) -> str:

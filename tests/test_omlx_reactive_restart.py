@@ -246,14 +246,35 @@ class ReactiveRestartTest(RecordsCase):
         self.assertEqual(len(self.calls()), 1)
         self.assertEqual([record["at"] for record in self.records()], [at("12:05")])
 
-    def test_a_host_with_no_alert_settings_restarts_and_keeps_the_alert_without_failing(self):
+    def test_a_host_with_no_alert_settings_restarts_and_holds_the_alert_without_failing(self):
         self.settings.unlink()
         self.over_at(at("12:00"), at("12:01"), at("12:02"), at("12:03"))
         self.assertEqual(self.calls(), ["--reactive"])
-        [outbox] = json.loads(self.restart_state.read_text())["outbox"]
-        self.assertIs(outbox["logged"], True)
-        self.assertIsNotNone(outbox["alert"])
+        self.assertEqual(json.loads(self.restart_state.read_text())["outbox"], [])
+        [held] = self.held_restarts()
+        self.assertEqual((held["kind"], held["logged"], held["held"]), ("omlx_restarted", True, True))
+        self.assertIn("oMLX was restarted", held["text"])
         self.assertEqual(self.bot.requests, [])
+
+    def test_restart_alerts_held_without_settings_become_one_summary_when_they_appear(self):
+        self.settings.unlink()
+        self.over_at(at("12:00"), at("12:01"), at("12:02"))
+        self.over_at(at("12:03"), unowned=UNDER)
+        self.over_at(at("12:33"), at("12:34"), at("12:35"))
+        self.assertEqual(len(self.calls()), 2)
+        [held] = self.held_restarts()
+        self.assertEqual(held["count"], 2)
+        self.settings_on()
+        self.over_at(at("12:36"), unowned=UNDER)
+        [request] = self.bot.requests
+        self.assertIn("alerts were held while host alerts were not configured", request["body"]["text"])
+        self.assertIn("omlx_restarted x2", request["body"]["text"])
+        self.assertEqual(self.held_restarts(), [])
+        self.assertEqual(json.loads((self.state_dir / "memory-watch.json").read_text())["pending"], [])
+
+    def held_restarts(self):
+        pending = json.loads((self.state_dir / "memory-watch.json").read_text())["pending"]
+        return [entry for entry in pending if entry["kind"] == "omlx_restarted"]
 
     def test_an_unreadable_restart_state_makes_no_attempt(self):
         self.state_dir.mkdir(mode=0o700)

@@ -62,6 +62,7 @@ class Settings:
 class Outcome:
     status: str
     error: str | None
+    missing: bool = False
 
 
 class SettingsError(Exception):
@@ -96,7 +97,8 @@ def read_settings(path: Path | None = None, *, uid: int | None = None) -> Settin
     path = path if path is not None else settings_path()
     uid = uid if uid is not None else os.geteuid()
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK: a FIFO with no writer must open (and be refused below), not block the caller.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         raise SettingsMissing(f"settings file {path} is missing") from None
     except OSError as error:
@@ -208,7 +210,7 @@ def deliver(
     try:
         loaded = read_settings(settings)
     except SettingsError as error:
-        outcome = Outcome("failed", str(error))
+        outcome = Outcome("failed", str(error), isinstance(error, SettingsMissing))
     else:
         if not loaded.enabled:
             _record(log, f"{stamp} {kind} recorded only, alerts disabled: {text}\n")
