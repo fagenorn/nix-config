@@ -218,6 +218,12 @@ class RoleTest(unittest.TestCase):
             ("tools", {"tools": "Read, Bash(git status:*)"}),
             ("disallowedTools", {"disallowedTools": "Write, Bash(rm:*)"}),
             ("tools", {"tools": "Read, Edit(/srv/**)"}),
+            ("tools", {"tools": "Read, Bash(git log:*, git show:*)"}),
+            ("disallowedTools", {"disallowedTools": "Write, Bash(rm -rf:*, git push:*)"}),
+            ("tools", {"tools": "Read, Edit(/srv/a/**, /srv/b/**)"}),
+            ("tools", {"tools": "Read, Bash(git log:*"}),
+            ("tools", {"tools": "Read, git show:*)"}),
+            ("tools", {"tools": "Read, Agent(Explore)Bash(x)"}),
         )
         for field, fields in cases:
             with self.subTest(fields=fields):
@@ -228,6 +234,9 @@ class RoleTest(unittest.TestCase):
                 self.assertIn("planner", str(caught.exception))
         self.put("planner", role_text(tools="Read, Agent(Explore)"))
         self.assertEqual(read_role(self.directory, "planner").tools, ("Read", "Agent(Explore)"))
+        self.put("planner", role_text(tools="Read, Agent(Explore, Plan), Grep"))
+        self.assertEqual(read_role(self.directory, "planner").tools,
+                         ("Read", "Agent(Explore, Plan)", "Grep"))
 
 
 class PromptTest(unittest.TestCase):

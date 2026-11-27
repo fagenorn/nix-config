@@ -123,7 +123,7 @@ from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES, TOOL_DEN
 from agent_tools.skill_lint import parse_frontmatter
 
 FORBIDDEN_WORDS: tuple[str, ...] = ("--agent", "--bare", "--setting-sources")
-SCOPED_RULE_RE = re.compile(r"\A(?P<tool>[^()\s]+)\(.*\)\Z")
+SCOPED_RULE_RE = re.compile(r"\A(?P<tool>[^()\s]+)\([^()]*\)\Z")
 SELECTOR_TOOLS: tuple[str, ...] = ("Agent",)
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
@@ -220,12 +220,25 @@ def roles_dir(environ: Mapping[str, str]) -> Path:
 def _names(role: str, field: str, text: str | None) -> tuple[str, ...] | None:
     if text is None:
         return None
-    names = tuple(part.strip() for part in text.split(",") if part.strip())
+    parts, depth, start = [], 0, 0
+    for at, char in enumerate(text):
+        depth += (char == "(") - (char == ")")
+        if depth < 0:
+            break
+        if char == "," and depth == 0:
+            parts.append(text[start:at])
+            start = at + 1
+    parts.append(text[start:])
+    if depth != 0:
+        raise RoleError(f"role {role}: {field} {text!r} has unbalanced brackets")
+    names = tuple(part.strip() for part in parts if part.strip())
     if not names:
         raise RoleError(f"role {role}: {field} holds no tool name")
     for name in names:
         refuse_value(role, field, name)
         scoped = SCOPED_RULE_RE.match(name)
+        if scoped is None and ("(" in name or ")" in name):
+            raise RoleError(f"role {role}: {field} {name!r} is not a tool name the engine passes")
         if scoped is not None and scoped.group("tool") not in SELECTOR_TOOLS:
             raise RoleError(f"role {role}: {field} {name!r} is a scoped rule the engine does not pass")
     return names
