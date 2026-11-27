@@ -9,6 +9,7 @@ pull-request workflows, so a workflow lint that is not a member fails here.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -310,16 +311,40 @@ class LintEntryPointTest(JustCase):
         shutil.copy(fixtures / "Planted.csproj.fixture", project / "Planted" / "Planted.csproj")
         source = project / "Planted" / "Sample.cs"
         shutil.copy(fixtures / "Unformatted.cs.fixture", source)
-        env = child_env(HOME=str(self.tmp()), TMPDIR=str(self.tmp()))
+        # Stub `nix` hands the lint a tools directory whose stub `dotnet` exits as the
+        # formatter does, so no SDK is built and no real `dotnet format` runs.
+        stubs = self.tmp()
+        log = stubs / "dotnet.log"
+        tools = {}
+        for name, code in (("changed", 2), ("clean", 0)):
+            (stubs / name / "bin").mkdir(parents=True)
+            dotnet = stubs / name / "bin" / "dotnet"
+            dotnet.write_text(
+                f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(log))}\nexit {code}\n",
+                "utf-8")
+            dotnet.chmod(0o755)
+            tools[name] = stubs / name
+        selected = stubs / "selected"
+        selected.write_text(f"{tools['changed']}\n", "utf-8")
+        nix = stubs / "bin" / "nix"
+        nix.parent.mkdir()
+        nix.write_text("#!/bin/sh\ncat \"$STUB_SELECTED\"\n", "utf-8")
+        nix.chmod(0o755)
+        env = child_env(
+            PATH=f"{nix.parent}{os.pathsep}{os.environ['PATH']}",
+            STUB_SELECTED=str(selected), HOME=str(self.tmp()), TMPDIR=str(self.tmp()))
         result = self.run_just(["lint"], scratch, env)
         stderr = module_stderr(result)
         self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(log.read_text("utf-8").splitlines(),
+                         [f"format {project / 'Planted.slnx'} --verify-no-changes"])
         self.assertIn("dotnet-format-lint: dotnet format would change files", stderr)
         self.assertIn("lint: dotnet-format failed (exit 1)", stderr)
         self.assertTrue(stderr[-1].startswith("lint: failed:"), stderr[-1])
         self.assertIn("dotnet-format", stderr[-1].removeprefix("lint: failed:").replace(
             " ", "").split(","))
         shutil.copy(fixtures / "Formatted.cs.fixture", source)
+        selected.write_text(f"{tools['clean']}\n", "utf-8")
         result = self.run_just(["lint"], scratch, env)
         self.assertIn("dotnet-format-lint: passed", result.stdout.splitlines(), result.stderr)
         self.assertFalse([l for l in module_stderr(result)
