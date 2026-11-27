@@ -1,0 +1,43 @@
+using Xunit;
+
+namespace Planted;
+
+public sealed class SkippedTests
+{
+    [Fact(Skip = "planted")]
+    public void FactSkipped() => Assert.Equal(1, 1);
+
+    [Theory(Skip = "planted")]
+    [InlineData(2)]
+    public void TheorySkipped(int n) => Assert.Equal(2, n);
+
+    [Fact(Explicit = true)]
+    public void FactExplicit() => Assert.Equal(3, 3);
+
+    [Theory]
+    [InlineData(4, Explicit = true)]
+    public void RowExplicit(int n) => Assert.Equal(4, n);
+
+    [Theory]
+    [MemberData(nameof(Rows), Skip = "planted")]
+    public void MemberRowSkipped(int n) => Assert.Equal(1, n);
+
+    [Theory]
+    [MemberData(nameof(Rows), Explicit = true)]
+    public void MemberRowExplicit(int n) => Assert.Equal(7, n);
+
+    [Theory]
+    [ClassData(typeof(SkippedRows), Skip = "planted")]
+    public void ClassRowSkipped(int n) => Assert.Equal(8, n);
+
+    [Theory]
+    [ClassData(typeof(SkippedRows), Explicit = true)]
+    public void ClassRowExplicit(int n) => Assert.Equal(5, n);
+
+    [Theory]
+    [InlineData(9, Skip = "planted")]
+    public void RowSkipped(int n) => Assert.Equal(9, n);
+
+    [Fact]
+    public void Runs() => Assert.Equal(6, 6);
+}

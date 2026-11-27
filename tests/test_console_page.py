@@ -751,7 +751,7 @@ class ActivationPageTest(unittest.TestCase):
 
     def test_a_running_line_has_no_activate(self) -> None:
         running = dict(ACTIVATION, state="running", activate=False,
-                       text="Activating this host at 0123456789ab. The console may restart before it reports.")
+                       text="Switching this computer to the new version (0123456789ab). The console may restart before it reports.")
         frame = dict(view([project(0, [], quiet=True)]), activation=running)
         (snap,) = render([{"frame": frame}, {"snapshot": True}])
         self.assertFalse([n for n in nodes(snap["projects"]) if has_class(n, "activate")])
@@ -964,7 +964,7 @@ def times(tree: dict) -> dict:
 
 CLAIM_W = {
     "id": 3, "sprint_id": "a" * 16, "poster": "Fix the settings page", "kind": "claim",
-    "kind_text": "Claim", "text": "the page fold",
+    "kind_text": "Files in use", "text": "the page fold",
     "what": "python/agent_tools/console/page.html", "until_text": "until the board fold lands",
     "to_text": None, "at": utc(12 * 60000),
 }
@@ -1063,7 +1063,7 @@ class PageNoticeTest(unittest.TestCase):
             "Heads-up, from Keep the importer fast",
             "Hand-off for Fix the settings page, from Keep the importer fast",
             "Hand-off for you, from Fix the settings page",
-            "Claim, from Fix the settings page"])
+            "Files in use, from Fix the settings page"])
         self.assertEqual([head["children"][1]["text"] for head in heads],
                          ["1 min ago", "2 min ago", "3 min ago", "12 min ago"])
         self.assertEqual([full(b["children"][1]) for b in blocks], [
@@ -3765,7 +3765,7 @@ class PageCheckAnswerTest(unittest.TestCase):
     def test_each_kind_renders_its_answers(self) -> None:
         cases = {
             "manual-check": {"ans-passed": "Passed", "ans-failed": "Failed", "ans-note": "Send note"},
-            "verdict": {"ans-passed": "Accept as passed", "ans-failed": "Close as not verified"},
+            "verdict": {"ans-passed": "Accept as passed", "ans-failed": "Close without proof it works"},
             "approval": {"ans-approve": "Approve"},
             "paid-approval": {"ans-approve": "Approve"},
             "stale-check": {"ans-keep": "Keep waiting", "ans-drop": "Accept without the host"},
@@ -5349,8 +5349,8 @@ class PageFailedStartTest(unittest.TestCase):
         self.assertIs(drop["disabled"], False)
 
 
-MOVED_LINE = ("Nothing was recorded: the pull request is now at bbbbbbb, not at aaaaaaa, "
-              "the head these pictures show. The manager will send the new pictures.")
+MOVED_LINE = ("Nothing was recorded: the proposed change is now at bbbbbbb, not at aaaaaaa, "
+              "the version these pictures show. The manager will send the new pictures.")
 FAILED_LINE = "GitHub had a problem and did not take the answer. Try again in a moment."
 
 
@@ -5852,7 +5852,7 @@ class PageSprintReportTest(unittest.TestCase):
             fold = detail(opened)
             self.assertTrue(fold["open"])
             for expected in ("#12", "building task 2 of 4", "#13", "landed",
-                             "Next: start the resume slice", "Milestone: Importer resumes"):
+                             "Next: start the resume slice", "Task list: Importer resumes"):
                 self.assertIn(expected, full(fold))
             last = fold["children"][-2]
             self.assertEqual((last["tag"], last["cls"], full(last)), ("a", "tracker", "Open on the tracker"))
@@ -6476,7 +6476,7 @@ class PageSprintEndTest(unittest.TestCase):
         self.assertEqual(
             [(full(n), n["cls"]) for n in of_class(row, "p", "closing-landed")
              + of_class(row, "p", "closing-held") + of_class(row, "p", "closing-dropped")],
-            [("Landed: #12, #14", "closing-landed"), ("Held: #15", "closing-held"),
+            [("Went in: #12, #14", "closing-landed"), ("Merged, not yet proven: #15", "closing-held"),
              ("Dropped: #13", "closing-dropped")])
         (link,) = of_class(row, "a", "tracker")
         self.assertEqual(link["href"], "https://github.com/o/p/milestone/3")
@@ -6543,7 +6543,7 @@ class PageSprintEndTest(unittest.TestCase):
         (fold,) = of_class(line, "details", "sprint-detail")
         shown = visible_text(fold)
         for expected in (CLOSING["summary"], "Next time: cut smaller slices",
-                         "1 landed, 1 dropped", "Landed: #12, #14", "Held: #15"):
+                         "1 landed, 1 dropped", "Went in: #12, #14", "Merged, not yet proven: #15"):
             self.assertIn(expected, shown)
         self.assertEqual(len(of_class(fold, "a", "tracker")), 1)
         (label,) = [c for c in fold["children"] if c["tag"] == "summary"]
@@ -6608,7 +6608,7 @@ class PageSprintGlanceTest(unittest.TestCase):
                   "issues": [
                       {"issue": 11, "stage": "landed", "stage_text": "landed"},
                       {"issue": 12, "stage": "building", "stage_text": "building task 2 of 4"},
-                      {"issue": 13, "stage": "held", "stage_text": "held"},
+                      {"issue": 13, "stage": "held", "stage_text": "merged, not yet proven"},
                       {"issue": 14, "stage": "queued", "stage_text": "queued"},
                       {"issue": 15, "stage": "closed out", "stage_text": "closed out"}]}
         empty = {**REPORTED,
@@ -7003,7 +7003,7 @@ KEY_B = "brief:" + "b" * 16
 APPROVING_TEXT = "Approving in five seconds."
 APPROVED_TEXT = "Approved, the sprint is starting"
 REPLIED_TEXT = "Reply sent, waiting for a new brief"
-LABELS = ("What done looks like", "Excluded", "Slices", "Risks", "What I expect to ask")
+LABELS = ("What done looks like", "Excluded", "Steps", "Risks", "What I expect to ask")
 
 
 def approvals(snap: dict) -> list:
@@ -7081,7 +7081,7 @@ class PageBriefTest(unittest.TestCase):
                 following = after(label)
                 self.assertEqual(following["tag"], "p")
                 self.assertEqual(full(following), "None")
-        slices = after("Slices")
+        slices = after("Steps")
         self.assertEqual(slices["tag"], "ul")
         self.assertEqual([full(li) for li in slices["children"]], ["checkpoint", "resume"])
         self.assertEqual([n for n in nodes(card) if n["tag"] == "ul" and n["children"] == []], [])
@@ -8609,7 +8609,7 @@ class SigninPageTest(unittest.TestCase):
         (headline,) = of_class(card, "p", "q")
         self.assertEqual(full(headline), ADOPTION_ITEM["headline"])
         (link,) = of_class(card, "a", "pr-link")
-        self.assertEqual(full(link), "Open the pull request")
+        self.assertEqual(full(link), "Open the proposed change on GitHub")
         self.assertEqual(link["href"], ADOPTION_ITEM["url"])
 
     def test_a_ready_adoption_card_offers_merge_and_posts_its_card(self) -> None:
@@ -10011,7 +10011,7 @@ CONFIRM_ITEM = {
     "values": ["register", "not_now"], "items": [], "answers": [], "answered": False,
     "waiting_since": "2026-11-15T08:00:00+00:00"}
 
-BEHIND_HEADLINE = "r is 1 commit behind its remote, which already has a project contract."
+BEHIND_HEADLINE = "r is 1 change behind its remote, which already has a project contract."
 BEHIND_WHY = "Choose Update it to bring the checkout up to its remote; the console then plans from it."
 BEHIND_ITEM = {
     **CONFIRM_ITEM, "reason": "register_behind",
@@ -10178,8 +10178,8 @@ class RegisterControlTest(unittest.TestCase):
         self.assertNotIn("adopt-project apply", shown)
 
     def test_an_open_or_ready_adoption_is_one_sentence_with_no_lines_link_or_close(self) -> None:
-        for sentence in ("The pull request of r is not ready to merge yet.",
-                         "The pull request of r is ready to merge."):
+        for sentence in ("The proposed change of r is not ready to merge yet.",
+                         "The proposed change of r is ready to merge."):
             with self.subTest(sentence=sentence):
                 (snap,) = render([
                     START, {"frame": {**frame([]), "registration": {
@@ -10194,7 +10194,7 @@ class RegisterControlTest(unittest.TestCase):
                 self.assertTrue(has_class(drawn[0], "register-line"))
 
     def test_an_adoption_with_a_drafted_contract_draws_no_draft_rows(self) -> None:
-        sentence = "The pull request of r is not ready to merge yet."
+        sentence = "The proposed change of r is not ready to merge yet."
         (snap,) = render([
             START, {"frame": {**frame([]), "registration": {
                 **READY_SHOWN, "approve": None, "lines": [], "draft": None, "draft_more": None,
@@ -11268,7 +11268,7 @@ class RegisterApplyPageTest(unittest.TestCase):
 
     def test_turn_signed_commits_off_posts_the_draft_change(self) -> None:
         item = {**APPLY_ITEM, "questions": [{**APPLY_ITEM["questions"][0], "options": [
-            "Apply it again", "Turn signed commits off", "Not now"]}],
+            "Apply it again", "Turn signing off", "Not now"]}],
             "values": ["apply", "signing_off", "not_now"]}
         (snap,) = render([START, {"frame": cards([item], READY_SHOWN)},
                           {"respond": {"status": 204, "text": ""}}, {"key": "2"},
@@ -11277,7 +11277,7 @@ class RegisterApplyPageTest(unittest.TestCase):
         self.assertEqual(post["url"], "/api/plan-answer")
         self.assertEqual(posted(post), {"plan_id": item["plan_id"], "id": "contract-draft",
                                         "subject": "commit-signed", "value": "no"})
-        self.assertIn("Answered, turning signed commits off", full(snap["inbox"]))
+        self.assertIn("Answered, turning signing off", full(snap["inbox"]))
 
     def test_a_failed_step_card_offers_try_again(self) -> None:
         (snap,) = render([START, {"frame": cards([TRY_ITEM], FAILED_SHOWN)}, {"snapshot": True}])
@@ -11559,16 +11559,16 @@ class PageSpendFigureTest(unittest.TestCase):
         found = figures(snap["projects"])
         self.assertEqual(len(found), 3)
         (sprint,) = figures(of_class(snap["projects"], "li", "sprint")[0])
-        self.assertEqual(full(sprint), "1.2M tokens, about $3.40")
+        self.assertEqual(full(sprint), "about $3.40")
         self.assertEqual(sprint["href"], "/spend#sprint=" + "a" * 16)
         self.assertEqual(sprint["title"], "Estimated at API list prices")
         (parent,) = [n for n, above in with_ancestors(snap["projects"]) if sprint in n["children"]]
         self.assertEqual((parent["tag"], parent["cls"]), ("p", "sp-spend"))
         (run,) = figures(of_class(snap["projects"], "li", "run")[0])
-        self.assertEqual(full(run), "12.3k tokens, about $0.07")
+        self.assertEqual(full(run), "about $0.07")
         self.assertEqual(run["href"], "/spend#run=wf_a")
         (ended,) = figures(of_class(snap["projects"], "li", "finished-line")[0])
-        self.assertEqual(full(ended), "2.5M tokens, about $1,234.50")
+        self.assertEqual(full(ended), "about $1,234.50")
         self.assertEqual(ended["href"], "/spend#sprint=" + "d" * 16)
 
     def test_an_approximate_figure_says_so_in_its_title(self) -> None:
@@ -11662,7 +11662,7 @@ class PageSpendFigureTest(unittest.TestCase):
         self.assertEqual(role(snap["active"]), "tell")
         self.assertEqual(snap["field"]["value"], "keep the schema")
         (sprint,) = figures(of_class(snap["projects"], "li", "sprint")[0])
-        self.assertEqual(full(sprint), "1.3M tokens, about $5.15")
+        self.assertEqual(full(sprint), "about $5.15")
 
 
 SPEND_FRAME_WITHOUT = {k: v for k, v in SPEND_FRAME.items() if k != "spend"}
@@ -11721,7 +11721,7 @@ class WaitingLinePageTest(unittest.TestCase):
 
 
 class PageOverlapTest(unittest.TestCase):
-    TEXT = ("Fix a and Fix b both fix a live fault in python/agent_tools/console/page.html; "
+    TEXT = ("Fix a and Fix b both fix a fault users meet now in production in python/agent_tools/console/page.html; "
             "the rule could not decide which lands first")
 
     def ov(self, x: str, y: str) -> dict:
@@ -11907,7 +11907,7 @@ FAULT_ENTRY = {
     "id": 41, "issue": 12, "observed": "saving the settings form drops the billing address",
     "when": "12:10 UTC today", "proven": "a saved form read back from the production database",
     "at": "2026-11-12T10:00:00+00:00",
-    "text": "Live fault in production on #12: saving the settings form drops the billing address, "
+    "text": "Fault users meet now in production on #12: saving the settings form drops the billing address, "
             "seen 12:10 UTC today, proven by a saved form read back from the production database",
 }
 
@@ -11943,7 +11943,7 @@ class PageLiveFaultTest(unittest.TestCase):
     def test_withdraw_posts_the_fault_and_a_refusal_says_why(self) -> None:
         (snap,) = render([
             START, {"frame": fault_frame([FAULT_ENTRY])},
-            {"respond": {"status": 409, "text": "this live fault is already withdrawn\n"}},
+            {"respond": {"status": 409, "text": "this fault was already withdrawn\n"}},
             {"click": "live-fault-withdraw"}, {"snapshot": True},
         ])
         (post,) = snap["posts"]
@@ -11953,7 +11953,7 @@ class PageLiveFaultTest(unittest.TestCase):
         self.assertIn("X-Console-Token", post["headers"])
         (line,) = of_class(snap["projects"], "li", "live-fault")
         (fail,) = of_class(line, "span", "fail")
-        self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
+        self.assertEqual(full(fail), "Could not withdraw: this fault was already withdrawn")
 
     def test_a_refused_withdraw_of_a_finished_sprint_shows_its_reason_on_the_row_a_frame_replaced(self) -> None:
         ended = {**ended_sprint("b", 60_000), "live_faults": [FAULT_ENTRY]}
@@ -11961,13 +11961,13 @@ class PageLiveFaultTest(unittest.TestCase):
             START, {"frame": with_sprints([ended])}, {"hold": True},
             {"click": "live-fault-withdraw"},
             {"frame": with_sprints([{**ended, "title": "Sprint b again"}])},
-            {"release": {"status": 409, "text": "this live fault is already withdrawn\n"}},
+            {"release": {"status": 409, "text": "this fault was already withdrawn\n"}},
             {"snapshot": True},
         ])
         (row,) = of_class(snap["projects"], "li", "finished-line")
         (fault,) = of_class(row, "li", "live-fault")
         (fail,) = of_class(fault, "span", "fail")
-        self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
+        self.assertEqual(full(fail), "Could not withdraw: this fault was already withdrawn")
         (button,) = [n for n in nodes(fault) if n["tag"] == "button"]
         self.assertIs(button["disabled"], False)
 

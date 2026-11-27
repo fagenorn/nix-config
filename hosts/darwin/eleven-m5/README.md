@@ -119,6 +119,7 @@ owner's capacity number: whether it holds is a question for the lead.
 | `omlxJetsamPriority` | 190 | oMLX's jetsam priority; the kernel ends the lowest band first. 180 is its default band (`JETSAM_PRIORITY_DEFAULT`), where unmanaged processes such as the agents' test workers run. `memory-floor` raises the running pid to 190 and never lowers a higher value. | The xnu `kern_memorystatus.h` and `kern_memorystatus.c` sources linked in "The memory floor", and the 24 Nov `jetsam_priority ... from=180` line of `/var/log/memory-floor.log`. |
 | `fseventsdRestartMinutes` | 60 | The shortest time between two `fseventsd-trim` restarts. | See "What makes fseventsd grow". |
 | `unownedAlertGiB` | 5 | Unowned memory over which the watcher sends `unowned_memory`, once per episode. | The lead's 25 Nov reading: 35 GiB unowned before an oMLX restart, about 0 after. |
+| `verifyAlertGiB` | 2.5 | The whole-tree footprint of one verification run over which the watcher sends `verify_tree`, once per run (provisional). | Under `verifyRunGiB`, so the lead hears of a run before it passes its allowance. |
 | `omlxRestartTriggerGiB` | 25 | Unowned plus compressor memory over which a sample counts toward a reactive oMLX restart. | The lead's choice; unowned memory grew about 3 GiB an hour on 26 Nov. |
 | `omlxRestartSamples` | 3 | Consecutive samples over the trigger before the watcher asks for the restart. | The lead's choice. |
 | `omlxRestartRoomGiB` | 16 | Available memory the watcher needs before it asks for a restart (provisional). | Estimate: on 26 Nov 138 of 160 samples over the trigger had at least 16 GiB free. |
@@ -190,11 +191,19 @@ used, available, wired, anonymous and compressed bytes, and, from a census no
 older than 150 s, the system and process footprints, the unowned bytes and the
 top owners. The files of the last 14 days are kept. The day's line in
 `memory-peaks.jsonl` gains a `peak_<figure>_gib` and a `peak_<figure>_at` for
-`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous` and
-`compressions` (for example `peak_unowned_gib` and `peak_unowned_at`), the
-`peak_owners` of the day, `census_samples` (how many samples had a census) and
+`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous`,
+`compressions` and `verify` (for example `peak_unowned_gib` and `peak_unowned_at`),
+the `peak_owners` of the day, `census_samples` (how many samples had a census) and
 `records_since`, the day the records began, so an earlier line without them is
-not a day with no peak.
+not a day with no peak. `peak_verify_gib` is the day's largest single verify-run
+tree and `peak_verify_at` its time, and `verify_runs` is the verify runs read that day, except a run
+whose peak is dated on another day. A run with no peak (no `tree_peak_bytes` or no `tree_peak_at`) is
+counted in the day that reads it, so a nonzero `verify_runs` does not mean the day has a dated peak.
+A run whose peak was before midnight and that the first sample after midnight reads
+(a run that peaks at 23:58, ends at 00:03 and is first read by the 00:04 sample) is counted in the
+finished day's line, not the new day's. A run whose peak is dated on another day and that is read later,
+or that the first sample after midnight reads with a peak from neither day, is counted in no `verify_runs`:
+it is in its `verify_run` event and its alert only.
 
 ### When you add a workload
 
@@ -327,8 +336,11 @@ that pid is a live process: other Virtualization processes are not Colima's. `ci
 `ci_job_ended` come from the `Runner.Worker` pids of `ps -axwwo pid=,args=`, and `floor_kill` from the new
 entries of the floor record. `verify_started` and `verify_ended` come from the live `verify-slot run`
 local processes of that listing (not a remote run through `ssh`), and `verify_run` (when the slot was
-held, from `held_from` to `held_until`) from
-the lines the verify-slot history gains. The first sample of a source records a baseline and no event, and a
+held, from `held_from` to `held_until`, with `tree_peak_bytes` and `tree_peak_at`) from
+the lines the verify-slot history gains. `verify-slot run` measures its command's tree every 2 s while the
+command runs and writes the largest reading into its history line, so a verify run is never missed between
+two samples (a peak shorter than one read interval can be). A peak before midnight read after it stays out
+of both days. The first sample of a source records a baseline and no event, and a
 source that could not be read changes nothing. A CI job or a RAM disk that starts and ends between two samples
 is not recorded, because those are read as a snapshot each minute.
 
@@ -339,7 +351,8 @@ growth is real and the server is idle.
 
 - Trigger: the fresh census's unowned memory plus the compressor is over
   `omlxRestartTriggerGiB`. A sample over it adds one to the streak, a sample at or under it ends the
-  episode, and a sample without a fresh census zeroes the streak and keeps the episode.
+  episode, and a sample without a fresh census holds the streak and keeps the episode. A streak whose
+  last fresh over sample is more than 15 minutes old is zeroed, so a stale reading never restarts oMLX.
 - Episode: one restart per episode. The attempt is due once the streak reaches
   `omlxRestartSamples` and the episode has not restarted oMLX yet.
 - Room: available memory under `omlxRestartRoomGiB` defers the attempt.
@@ -369,11 +382,20 @@ Alerts go to the owner's Telegram bot. The owner sets it up on the console page,
 which writes `~/.config/host-alerts/telegram.json` (mode `0600`, owned by the
 owner) with `enabled`, `bot_token` and `chat_id`.
 
-When the file is missing, unreadable, too open or incomplete, or when Telegram
-does not accept the post, the alert goes to `~/.local/state/host-alerts/alerts.log`,
-the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
-on every sample until the alert is sent. With `enabled` false, alerts are
-recorded in the alerts log only.
+When the file is unreadable, too open or incomplete, or when Telegram does not
+accept the post, the alert goes to `~/.local/state/host-alerts/alerts.log`, the
+error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3 on
+every sample until the alert is sent. With `enabled` false, alerts are recorded
+in the alerts log only.
+
+When the file does not exist, alerts are not configured: the watcher holds its
+alerts, logs `host alerts are not configured` once a day and exits 0, with or
+without an alert to send. A held alert older than 24 hours is dropped with one
+line in the alerts log, and the queue keeps the newest held alert of each kind
+per day. A restart alert is held the same way. When the file appears, the
+watcher sends one summary of the held alerts (counts per kind since the oldest
+kept), not the backlog. An alert that failed while the file existed (Telegram
+down, or the file refused) is never dropped or merged: it is retried until sent.
 
 The kinds:
 
@@ -391,6 +413,9 @@ The kinds:
 - `jetsam_priority_unset`: `memory-floor` could not set oMLX's kernel jetsam
   priority, or the value did not hold after a set (once per episode).
 - `unowned_memory`: unowned memory passed `unownedAlertGiB` (once per episode).
+- `verify_tree`: a verify run's whole process tree passed `verifyAlertGiB`; one
+  alert per run, sent once its history line is read, naming its command
+  (assignment values redacted), repository and peak.
 - `omlx_restarted`: the watcher restarted oMLX, or a restart it began was interrupted
   (once per episode).
 

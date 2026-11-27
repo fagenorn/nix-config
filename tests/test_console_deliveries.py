@@ -197,8 +197,12 @@ def fold(records, pattern=PATTERN):
     return run
 
 
+def wire_text(item):
+    return item.stage if item.stage in deliveries.STAGE_WORDS else deliveries.stage_text(item)
+
+
 def shown(records):
-    return {item.issue: deliveries.stage_text(item) for item in fold(records).issues()}
+    return {item.issue: wire_text(item) for item in fold(records).issues()}
 
 
 CHILD = "▸ deliver-standard"
@@ -242,7 +246,7 @@ class RunFoldTest(unittest.TestCase):
         for name, k, expected in rows:
             with self.subTest(fixture=name, k=k):
                 run = fold(journal(name)[:k])
-                self.assertEqual({item.issue: deliveries.stage_text(item) for item in run.issues()}, expected)
+                self.assertEqual({item.issue: wire_text(item) for item in run.issues()}, expected)
                 self.assertTrue(all(isinstance(item, deliveries.IssueStage) for item in run.issues()))
                 issues = [item.issue for item in run.issues()]
                 self.assertEqual(issues, sorted(issues))
@@ -420,14 +424,14 @@ class RunFoldTest(unittest.TestCase):
             S("a2", "impl-1", "Tasks"),
         ]
         self.assertEqual(shown(records), {})
-        self.assertEqual({i.issue: deliveries.stage_text(i)
+        self.assertEqual({i.issue: wire_text(i)
                           for i in fold(records, "<slug>-<num>").issues()}, {858: "building task 1"})
         child = [
             S("b1", "facts-858", "Intake"),
             S("c1", "setup", CHILD), R("c1", {"ok": True, "branch": "console-stage-858"}),
             S("c2", "impl-2", CHILD),
         ]
-        self.assertEqual({i.issue: deliveries.stage_text(i)
+        self.assertEqual({i.issue: wire_text(i)
                           for i in fold(child, "<slug>-<num>").issues()}, {858: "building task 2"})
 
     def test_train_counters_name_no_issue(self):

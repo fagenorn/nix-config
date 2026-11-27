@@ -9,6 +9,7 @@ pull-request workflows, so a workflow lint that is not a member fails here.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -83,7 +84,7 @@ class JustCase(unittest.TestCase):
 
 
 class MembersTest(unittest.TestCase):
-    def test_lint_members_are_the_repositorys_three_lints_in_order(self):
+    def test_lint_members_are_the_repositorys_four_lints_in_order(self):
         root = Path("/r")
         self.assertEqual(members("lint", root), (
             Member("agnostic-lint",
@@ -93,6 +94,8 @@ class MembersTest(unittest.TestCase):
                     "--context-map", str(root / "docs" / "CONTEXT-MAP.md"))),
             Member("skill-lint",
                    (*sibling_argv("skill_lint"), "check", "--root", str(root))),
+            Member("dotnet-format",
+                   (*sibling_argv("delivery.dotnet_format_lint"), "--root", str(root))),
         ))
 
     def test_test_members_are_the_build_then_the_suite(self):
@@ -289,7 +292,65 @@ class LintEntryPointTest(JustCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[-1],
-            "lint: passed: agnostic-lint, context-map-lint, skill-lint")
+            "lint: passed: agnostic-lint, context-map-lint, skill-lint, dotnet-format")
+
+    def test_an_unformatted_csharp_file_fails_lint_naming_dotnet_format(self):
+        fixtures = REPO_ROOT / "tests" / "fixtures" / "dotnet-format"
+        shared = self.scratch / "dotnet"
+        if not shared.exists():
+            shared.mkdir()
+            (shared / "AgentTools.slnx").write_text("<Solution />\n", "utf-8")
+            self.addCleanup(shutil.rmtree, shared, ignore_errors=True)
+        before = {p.relative_to(shared): p.read_bytes() for p in shared.rglob("*") if p.is_file()}
+        scratch = scratch_checkout()
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        shutil.rmtree(scratch / "dotnet", ignore_errors=True)
+        project = scratch / "dotnet"
+        (project / "Planted").mkdir(parents=True)
+        shutil.copy(fixtures / "Planted.slnx.fixture", project / "Planted.slnx")
+        shutil.copy(fixtures / "Planted.csproj.fixture", project / "Planted" / "Planted.csproj")
+        source = project / "Planted" / "Sample.cs"
+        shutil.copy(fixtures / "Unformatted.cs.fixture", source)
+        # Stub `nix` hands the lint a tools directory whose stub `dotnet` exits as the
+        # formatter does, so no SDK is built and no real `dotnet format` runs.
+        stubs = self.tmp()
+        log = stubs / "dotnet.log"
+        tools = {}
+        for name, code in (("changed", 2), ("clean", 0)):
+            (stubs / name / "bin").mkdir(parents=True)
+            dotnet = stubs / name / "bin" / "dotnet"
+            dotnet.write_text(
+                f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(log))}\nexit {code}\n",
+                "utf-8")
+            dotnet.chmod(0o755)
+            tools[name] = stubs / name
+        selected = stubs / "selected"
+        selected.write_text(f"{tools['changed']}\n", "utf-8")
+        nix = stubs / "bin" / "nix"
+        nix.parent.mkdir()
+        nix.write_text("#!/bin/sh\ncat \"$STUB_SELECTED\"\n", "utf-8")
+        nix.chmod(0o755)
+        env = child_env(
+            PATH=f"{nix.parent}{os.pathsep}{os.environ['PATH']}",
+            STUB_SELECTED=str(selected), HOME=str(self.tmp()), TMPDIR=str(self.tmp()))
+        result = self.run_just(["lint"], scratch, env)
+        stderr = module_stderr(result)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(log.read_text("utf-8").splitlines(),
+                         [f"format {project / 'Planted.slnx'} --verify-no-changes"])
+        self.assertIn("dotnet-format-lint: dotnet format would change files", stderr)
+        self.assertIn("lint: dotnet-format failed (exit 1)", stderr)
+        self.assertTrue(stderr[-1].startswith("lint: failed:"), stderr[-1])
+        self.assertIn("dotnet-format", stderr[-1].removeprefix("lint: failed:").replace(
+            " ", "").split(","))
+        shutil.copy(fixtures / "Formatted.cs.fixture", source)
+        selected.write_text(f"{tools['clean']}\n", "utf-8")
+        result = self.run_just(["lint"], scratch, env)
+        self.assertIn("dotnet-format-lint: passed", result.stdout.splitlines(), result.stderr)
+        self.assertFalse([l for l in module_stderr(result)
+                          if l.startswith("lint: dotnet-format failed")])
+        after = {p.relative_to(shared): p.read_bytes() for p in shared.rglob("*") if p.is_file()}
+        self.assertEqual(after, before)
 
     def test_a_context_map_violation_fails_lint_naming_context_map_lint(self):
         map_path = self.scratch / "docs" / "CONTEXT-MAP.md"

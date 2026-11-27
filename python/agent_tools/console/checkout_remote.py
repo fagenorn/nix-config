@@ -60,8 +60,8 @@ SKIPPED = "skipped"
 
 UNREAD_REASON = "its remote could not be read"
 NOT_ON_BRANCH = "another branch is checked out"
-HAS_CHANGES = "it has changes that are not committed"
-DIVERGED = "it has commits that are not on its remote"
+HAS_CHANGES = "it has changes that are not saved in the repository"
+DIVERGED = "it has changes that are not on its remote"
 NOT_MOVED = "git could not move it forward"
 
 _SAFE_BRANCH = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._/-]*")

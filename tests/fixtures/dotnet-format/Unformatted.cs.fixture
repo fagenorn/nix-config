@@ -1,0 +1,6 @@
+namespace Planted;
+
+public static class Sample
+{
+      public static int One()   =>   1;
+}

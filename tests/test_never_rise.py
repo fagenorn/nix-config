@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery import never_rise, record_lint, rule_ids, size_lint
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from agent_tools.delivery.never_rise import (
     Enforcer, Rise, Snapshot, Violation)
 
@@ -706,6 +707,17 @@ class SizeRuleTest(unittest.TestCase):
         self.assertEqual(
             rises[0].new,
             (Violation("B17", "src/new.dat", 1501), Violation("B17", "src/new.py", 1501)))
+
+    def test_a_planted_csharp_file_under_the_solution_root_counts_until_it_holds_the_budget(self):
+        for path in (f"{SOLUTION_ROOT}/Planted/Oversize.cs",
+                     f"{SOLUTION_ROOT}/Planted/Planted.csproj",
+                     f"{SOLUTION_ROOT}/Planted.slnx"):
+            with self.subTest(path=path):
+                over = self.branch_over({}, lambda root: write(root, path, numbered(1501)))
+                self.assertEqual(
+                    over, (Rise("B17", 0, 1, (Violation("B17", path, 1501),)),))
+                self.assertEqual(
+                    self.branch_over({}, lambda root: write(root, path, numbered(1500))), ())
 
     def test_a_long_document_or_data_file_is_not_judged(self):
         for path in ("docs/long.md", "data/table.json", "LICENSE"):

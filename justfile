@@ -258,6 +258,8 @@ agent-workflow-tests *args:
     tests/test_omlx_reactive_restart.py \
     tests/test_omlx_memory_events.py \
     tests/test_omlx_memory_census_day.py \
+    tests/test_omlx_memory_verify_trees.py \
+    tests/test_omlx_memory_verify_day.py \
     tests/test_omlx_reactive_restart_day.py \
     tests/test_memory_floor.py \
     tests/test_memory_floor_priority.py \
@@ -345,6 +347,7 @@ agent-workflow-tests *args:
     tests/test_suite_source.py \
     tests/test_skipped_test_lint.py \
     tests/test_copied_test_lint.py \
+    tests/test_dotnet_format_lint.py \
     tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
@@ -353,13 +356,16 @@ agent-workflow-tests *args:
     tests/test_claude_account_routing.py \
     tests/test_branch_protection.py \
     tests/test_devenv_cache_ignored.py \
+    tests/test_suite_part.py \
     tests/test_suite_runner.py \
+    tests/test_suite_runner_split.py \
     tests/test_suite_tiers.py \
     tests/test_suite_timing.py \
     tests/test_verify_slot.py \
     tests/test_verify_slot_short_lane.py \
     tests/test_verify_slot_timeouts.py \
     tests/test_verify_queue.py \
+    tests/test_verify_tree.py \
     tests/test_verification_command.py \
     tests/test_touched_tests.py \
     tests/test_console_event_log.py \
@@ -454,6 +460,7 @@ agent-workflow-tests *args:
     tests/test_console_sprints.py \
     tests/test_console_manager_identity.py \
     tests/test_console_contract_plain_words.py \
+    tests/test_console_owner_words.py \
     tests/test_console_action_card.py \
     tests/test_console_revive.py \
     tests/test_console_idle.py \
@@ -472,6 +479,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_command.py \
     tests/test_console_manager_contract_held.py \
     tests/test_console_sprint_action.py \
+    tests/test_console_sprint_warnings.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
     tests/test_console_launch_short_id.py \

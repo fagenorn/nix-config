@@ -1,0 +1,10 @@
+namespace Planted;
+
+public static class Placeholder
+{
+    // TODO: return the real value
+    public static int One() => 1;
+
+    /* FIXME: two is hard-coded */
+    public static int Two() => 2;
+}

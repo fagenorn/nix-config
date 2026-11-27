@@ -163,6 +163,13 @@ class WatcherDeclarationTest(unittest.TestCase):
         self.assertEqual(self.budget["unownedAlertGiB"], 5)
         self.assertIn(f"--unowned-alert-gib {self.budget['unownedAlertGiB']} ", self.watch["command"])
 
+    def test_the_watcher_passes_the_verify_alert_line(self):
+        self.assertEqual(self.budget["verifyAlertGiB"], 2.5)
+        self.assertLess(self.budget["verifyAlertGiB"], self.budget["verifyRunGiB"])
+        match = re.search(r"--verify-alert-gib (\S+) ", self.watch["command"])
+        self.assertIsNotNone(match)
+        self.assertEqual(float(match.group(1)), self.budget["verifyAlertGiB"])
+
     def test_the_watcher_passes_the_reactive_restart_numbers(self):
         budget, command = self.budget, self.watch["command"]
         numbers = tuple(
@@ -293,7 +300,7 @@ class GuideTest(unittest.TestCase):
                 self.assertIn(needle, self.section)
 
     def test_the_guide_marks_the_unmeasured_allowances_provisional(self):
-        for key in ("verifyRunGiB", "ciJobGiB", "macosGiB"):
+        for key in ("verifyRunGiB", "ciJobGiB", "macosGiB", "verifyAlertGiB"):
             with self.subTest(key=key):
                 lines = [line for line in self.section.splitlines() if line.startswith(f"| `{key}` |")]
                 self.assertTrue(lines)
@@ -306,15 +313,19 @@ class GuideTest(unittest.TestCase):
     def test_the_guide_names_the_sample_records(self):
         for needle in (
             "~/.omlx/memory/samples/<day>.jsonl", "peak_unowned_gib", "peak_unowned_at", "census_samples",
-            "records_since", "14 days",
+            "records_since", "14 days", "peak_verify_gib", "peak_verify_at", "verify_runs",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
 
+    def test_the_guide_says_a_run_peaked_on_another_day_is_not_counted(self):
+        self.assertIn("whose peak is dated on another day", self.section)
+        self.assertIn("counted in no `verify_runs`", self.section)
+
     def test_the_guide_names_the_recorded_events(self):
         for needle in (
             "ram_disk_attached", "vm_started", "floor_kill", "verify_run", "verify_started", "ci_job_started",
-            "hdiutil info", "vz.pid", "between two samples",
+            "hdiutil info", "vz.pid", "between two samples", "tree_peak_bytes",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
@@ -335,7 +346,8 @@ class GuideTest(unittest.TestCase):
         kinds = re.findall(r"^- `([a-z_]+)`:", self.alerts, re.MULTILINE)
         self.assertEqual(kinds, [
             "jetsam", "low_memory", "fseventsd_restarted", "fseventsd_held", "fseventsd_restart_failed",
-            "memory_kill", "floor_unmet", "jetsam_priority_unset", "unowned_memory", "omlx_restarted"])
+            "memory_kill", "floor_unmet", "jetsam_priority_unset", "unowned_memory", "verify_tree",
+            "omlx_restarted"])
 
     def test_the_guide_states_the_reactive_restart(self):
         restart = self.between(self.section, "### Reactive restart", "\n### ")

@@ -47,6 +47,11 @@ def setUpModule() -> None:
 def tearDownModule() -> None:
     STEPS.finish(sys.modules[__name__], Scenario)
 
+
+def part_finished() -> None:
+    STEPS.finish_part(sys.modules[__name__], Scenario)
+
+
 STEPS = StepCoverage(PROCEDURES)
 LOOK_BODY = ("Add a greet() function.\n\n## Acceptance criteria\n\n"
              "- [ ] [human] before merge: the greeting text — measured: the owner, on the pull request\n")

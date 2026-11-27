@@ -84,8 +84,9 @@ absolute path) finds any in it: a child's raw message is shown only through it, 
 `could not be made.` or `was not registered.`. `next_step(root, error, verb)` reads the
 error's `repair_id`: `adopt.manifest.*` with the not-found message says to run `just switch` on this computer to
 install the agent platform's files and to choose Try again (`MANIFEST_STEP`, which does not repeat the
-cause the headline gave; `LEGACY_NOTES` shows a stored note in the earlier words as it is today and `latest`
-applies it, never rewriting the log); `adopt.registration.no_remote`
+cause the headline gave; `LEGACY_NOTES` shows a stored note in the earlier words as it is today, and
+`current_headline` a stored behind headline that counts commits as one that counts changes, and `latest`
+applies both, never rewriting the log); `adopt.registration.no_remote`
 says to add the origin remote; `remote_default_unknown` (an origin that exists but advertises no
 default branch) says the origin needs a published default branch, not another origin;
 `adopt.git.remote_unreachable` and
@@ -117,8 +118,8 @@ the row's headline, `why` its note, options `TRY_OPTION` then `LATER_OPTION`, va
 a confirmation for a root that is not the waiting one.
 
 Behind row (#1233, ADR-console-070). `RESULTS` ends with `behind`. `behind(root, count, contract)` is
-the row of a checkout that is `count` commits behind its remote: `result` `behind`, `plan_id` None,
-`lines` and `questions` empty, `note` `BEHIND_NOTE`, `headline` `<name> is <N> commit(s) behind its
+the row of a checkout that is `count` changes behind its remote: `result` `behind`, `plan_id` None,
+`lines` and `questions` empty, `note` `BEHIND_NOTE`, `headline` `<name> is <N> change(s) behind its
 remote, which already has a project contract.` or `... which has no project contract yet.` by `contract`.
 `behind_waiting(latest)` is true when the latest row's `result` is `behind` and its note is `BEHIND_NOTE`
 (`dismissed` sets `LATER_NOTE`, so `Not now` ends it). A behind row is neither `waiting` nor `failing`:
@@ -230,7 +231,7 @@ OUTCOME_TEXT = {
     "reconcile": "it has agent files or a contract to bring up to date",
 }
 HOOKS_LINE = "installs its git hooks on this host (not installed now)"
-HOOKS_LEFT_LINE = "leaves its git hooks uninstalled on this host (no commit environment to install them in)"
+HOOKS_LEFT_LINE = "leaves its git hooks uninstalled on this host (no environment for saving changes to install them in)"
 NOTED_LINES: tuple[str, ...] = (contract_draft.DRAFTED_ENVIRONMENT_LINE, HOOKS_LINE, HOOKS_LEFT_LINE)
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
 EXTRA = {"plan_id", "state", "questions", "answered"}
@@ -255,6 +256,8 @@ LEGACY_NOTES = {
     "Switch this computer to its current configuration to install them, then choose Try again.":
         MANIFEST_STEP,
 }
+# The earlier count of a checkout behind its remote, which a stored behind row still says.
+LEGACY_BEHIND = re.compile(r"\b(\d+) commits? behind its remote\b")
 DISCARD_STEP = ("Choose Try again to remove the copy the last attempt left on this computer and "
                 "plan again.")
 VERB_WORDS = {"plan": "plan the adoption of", "register": "register",
@@ -392,6 +395,13 @@ def refusal(path: str, entries: Iterable[Mapping], *, home: str,
 
 def _count(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def current_headline(headline: object) -> object:
+    """A stored headline in the words of today: a behind row counts changes, not commits."""
+    if not isinstance(headline, str):
+        return headline
+    return LEGACY_BEHIND.sub(lambda m: f"{_count(int(m.group(1)), 'change')} behind its remote", headline)
 
 
 def _named(paths: Sequence[str]) -> str:
@@ -612,7 +622,7 @@ def failed(root: str, kind: str, verb: str = "plan") -> dict:
 
 def behind(root: str, count: int, contract: bool) -> dict:
     """The row of a checkout behind its remote: the one Update card asks before the console updates it."""
-    headline = (f"{name_of(root)} is {_count(count, 'commit')} behind its remote, which "
+    headline = (f"{name_of(root)} is {_count(count, 'change')} behind its remote, which "
                 + ("already has a project contract." if contract else "has no project contract yet."))
     return _row(root, None, "behind", None, headline, [], BEHIND_NOTE)
 
@@ -682,6 +692,7 @@ def _row_of(event: event_log.Event) -> tuple[dict | None, dict | None]:
     found = {**DEFAULTS, **payload, "at": event.at}
     if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
         found["note"] = LEGACY_NOTES[found["note"]]
+    found["headline"] = current_headline(found["headline"])
     if isinstance(found["draft"], list) and isinstance(found["root"], str):
         stale = contract_draft.retired_in_use(found["draft"])
         refreshed = contract_draft.refresh(found["root"], found["draft"])

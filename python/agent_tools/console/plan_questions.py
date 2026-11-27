@@ -22,7 +22,7 @@ page sets that answer as the card's action (ADR-console-033).
 Wording. `candidate-class` asks what should happen to the subject; `archive-history` reads `Archive
 it under .agents/knowledge/archive/adopted/` and `retain-product` reads `Keep it where it is`. A
 null value says the subject looks like a secret (`adopt_inspection.is_secret_path`) or points outside
-the repository, and asks for its removal in its own commit. `path-reference` is worded from the first
+the repository, and asks for its removal as a change saved on its own. `path-reference` is worded from the first
 `path_references` row with the question's subject (`extend`: `Also name <additions>`, `rewrite`:
 `Change it to <replacement>`, `retain`: `Leave it as it is`), and without a row from the subject
 alone. `reference-policy` is worded from the first `reference_policies` row with the subject (a class
@@ -62,7 +62,7 @@ NO_ANSWER = (
 )
 MEMBERS = {"plan_id", "id", "subject", "value"}
 REMOVE_THEN_REGISTER = (
-    "remove it from the repository in its own commit, then register the repository again."
+    "remove it from the repository and save that change on its own, then register the repository again."
 )
 FOLLOW = "Should it follow the move?"
 POLICY_MOVES = "name paths this plan moves. Should they follow the move?"

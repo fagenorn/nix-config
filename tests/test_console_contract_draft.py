@@ -509,7 +509,7 @@ class ContractDraftTest(unittest.TestCase):
         self.assertEqual(reading["environments"], [])
 
     def test_a_refusal_of_the_commit_environment_reopens_its_field(self):
-        wanted = ("commit-environment", "The plan refused the commits run in its development shell: m")
+        wanted = ("commit-environment", "The plan refused the changes are saved in its development shell: m")
         for pointer in ("/bindings/commands/commit-environment/argv/0",
                         "/bindings/vcs/commit/environment"):
             error = {"repair_id": "adopt.draft.invalid",
@@ -546,7 +546,7 @@ class ContractDraftTest(unittest.TestCase):
         error = {"code": "adopt_failure", "repair_id": "adopt.draft.invalid",
                  "violations": [{"pointer": "/bindings/commands/lint/argv", "message": message}]}
         refused = cd.refused_field(error)
-        text = f"The plan refused the lint command: {message}"
+        text = f"The plan refused the house-rule checks command: {message}"
         self.assertEqual(refused, ("lint-command", text))
         wider = {"repair_id": "adopt.draft.invalid",
                  "violations": [{"pointer": "/production/none", "message": "m  x"}]}
@@ -580,6 +580,11 @@ class ContractDraftTest(unittest.TestCase):
         self.assertFalse(cd.fact_refused({"repair_id": "adopt.other", "violations": [
             {"pointer": "/platform", "message": "m"}]}))
 
+    def test_the_branch_label_names_no_version_and_the_replan_sentence_follows_it(self):
+        self.assertEqual(cd.LABELS["integration-branch"], "finished work merges into")
+        self.assertNotIn("main version", cd.PLAN_AGAIN)
+        self.assertIn(f"choose what {cd.LABELS['integration-branch']} to go on.", cd.PLAN_AGAIN)
+
     def test_every_settled_value_is_shown_with_its_source(self):
         root, fields = self.remote_fields()
         lines = cd.shown(fields)
@@ -592,7 +597,7 @@ class ContractDraftTest(unittest.TestCase):
                              {"field", "line", "value", "options", "text", "more", "fact", "placeholder"})
         texts = [entry["line"] for entry in lines]
         for line in (
-            "branch finished work merges into: trunk (read from its remote)",
+            "finished work merges into: trunk (read from its remote)",
             f"project id and issue tracker: GitHub, as {ID} (read from its remote)",
             "it makes no releases",
             "it declares no production rules",
@@ -632,7 +637,7 @@ class ContractDraftTest(unittest.TestCase):
             else:
                 self.assertIsNone(cd.placeholder(field))
         self.assertEqual([f for f in cd.FIELDS if cd.placeholder(f) is None], [])
-        self.assertEqual(cd.placeholder("lint-command"), "the lint command")
+        self.assertEqual(cd.placeholder("lint-command"), "the house-rule checks command")
         self.assertEqual(cd.placeholder("test-command"), "the test command")
         for entry in cd.shown(fields):
             self.assertEqual(entry["placeholder"], cd.placeholder(entry["field"]))
@@ -904,7 +909,7 @@ class ContractDraftTest(unittest.TestCase):
         self.assertIs(cd.carried(none, {"plan": {}}), none)
         self.assertIs(cd.carried(full, {"plan": {}}), full)
         self.assertIsNone(cd.carried(None, {"plan": {}}))
-        line = "commits run in its development shell: devenv shell (found in its files)"
+        line = "changes are saved in its development shell: devenv shell (found in its files)"
         entries = cd.shown(fields)
         self.assertEqual([(e["line"], e["more"]) for e in entries], [(line, False)])
         self.assertIsNone(cd.more_line(fields))
@@ -995,7 +1000,7 @@ class ContractDraftTest(unittest.TestCase):
         facts = cd.facts(bare, cd.read(bare))
         self.assertEqual([f["field"] for f in facts], list(cd.FACTS))
         self.assertEqual([f["label"] for f in facts], [
-            "project id and issue tracker", "checks a pull request must pass",
+            "project id and issue tracker", "checks a proposed change must pass",
             "platform versions it runs on", "minutes per delivery attempt",
             "agent knowledge files it holds"])
         for record in facts:
@@ -1083,11 +1088,11 @@ class ContractDraftTest(unittest.TestCase):
         reopened = cd.refresh(root, earlier(**{"test-command": ("none", "files")}))
         self.assertEqual(pair(reopened, "test-command"), (None, None))
         self.assertIn("test-command", [f["field"] for f in cd.open_fields(reopened)])
-        refused = (None, "Every project has a test command: type the command that runs it.")
+        refused = (None, "Every project has a command that runs the tests: type that command.")
         for value in ("none", " NONE "):
             self.assertEqual(cd.set_value(settled, "test-command", value), refused)
         self.assertEqual(cd.set_value(settled, "lint-command", "None"),
-                         (None, "Every project has a lint command: type the command that runs it."))
+                         (None, "Every project has a command that runs the house-rule checks: type that command."))
         self.assertNotIn(["none"], [c["argv"] for c in cd.contract(settled)["bindings"]["commands"].values()])
 
 
