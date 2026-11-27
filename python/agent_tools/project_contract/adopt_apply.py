@@ -1086,9 +1086,8 @@ SIGNING_POINTER = "/bindings/vcs/commit/signed"
 def committed_signing_pointer(root: Path, revision: str) -> str:
     """`signing_pointer` of the contract the base `revision` commits.
 
-    Read from the immutable base, never the worktree: a failing hook can rewrite or remove the
-    worktree's copy, and a drafted contract is written there though the repository's settings never
-    held it (a draft is planned only over a base that has no contract, so it gives "").
+    Read from the immutable base, never the worktree: a failing hook can rewrite or remove its copy,
+    and a drafted contract is written there though the settings never held it (a draft gives "").
     """
     return signing_pointer(blob_at(root, revision, CONTRACT_FILENAME))
 
