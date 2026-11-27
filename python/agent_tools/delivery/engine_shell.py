@@ -1368,7 +1368,7 @@ def _launch_until_answered(
     `API_RETRY_SECONDS`), a first miss (`REASK_PROMPT`) or a first denial (`denial_prompt`), once each; return the
     first launch that is none of these, its record stored and the wait ended (earlier launches summed in), the
     `quota-wait` stop (wait open; unrecorded with `defer`) and whether the outcome is `no-reply`. With `resumed` a
-    miss on the first launch is `no-reply` and a denial on it is asked again only if the visit has not (`asked_calls`)."""
+    miss on the first launch is `no-reply`, a denial on it is asked again only if the visit has not (`asked_calls`)."""
     name, visit, session = visit_of
     role, schema, system = launch_of
     attempt, limited, waiting, released, retried, no_reply = (
