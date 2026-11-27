@@ -47,13 +47,12 @@ PACKAGE_REFERENCE_ELEMENTS = frozenset({"PackageReference", "GlobalPackageRefere
 def msbuild_references(path: str, content: bytes) -> frozenset[str]:
     """The lower-cased package ids an MSBuild file references.
 
-    Counts the `Include` of a `PackageReference` or `GlobalPackageReference` element in any
-    namespace, each entry of a `;` list. Raises `ValueError` naming `path` when the bytes are not
-    well-formed XML.
+    Counts each `;` entry of the `Include` of a `PackageReference` or `GlobalPackageReference`
+    element in any namespace. Raises `ValueError` naming `path` for bytes that are not readable XML.
     """
     try:
         root = ElementTree.fromstring(content)
-    except ElementTree.ParseError as error:
+    except (ElementTree.ParseError, LookupError, ValueError) as error:
         raise ValueError(f"{path}: not well-formed XML: {error}") from error
     found = set()
     for element in root.iter():
@@ -120,8 +119,13 @@ def stack_shards(path: str) -> tuple[str, ...]:
 def is_manifest(path: str) -> bool:
     """True for a project file or inherited build file of some `PACKAGE_ROUTES` row."""
     name = PurePosixPath(path).name
-    return any(name.endswith(route.project_suffixes) or name in route.inherited
+    return any(is_project_file(name, route) or name in route.inherited
                for route in PACKAGE_ROUTES.values())
+
+
+def is_project_file(path: str, route: PackageRoute) -> bool:
+    """True when `path` ends in a project suffix of `route`, whatever the case of the extension."""
+    return path.lower().endswith(route.project_suffixes)
 
 
 def manifest_dirs(path: str) -> tuple[str, ...]:
@@ -135,9 +139,8 @@ def manifest_dirs(path: str) -> tuple[str, ...]:
 def routed_stacks(project: Project, path: str) -> tuple[str, ...]:
     """The stack shards of a path: its extension's, plus the package shards its project references.
 
-    The governing project is every project file in the nearest ancestor directory holding one; the
-    inherited build files of that directory and of each ancestor count too. Raises `ValueError`
-    naming a governing file that is not well-formed.
+    The governing project is the nearest ancestor directory's project files plus the inherited build
+    files from there up. Raises `ValueError` naming a governing file that is not well-formed.
     """
     names = set(stack_shards(path))
     dirs = manifest_dirs(path)
@@ -147,7 +150,7 @@ def routed_stacks(project: Project, path: str) -> tuple[str, ...]:
             continue
         for index, directory in enumerate(dirs):
             projects = [key for key in project.files if posixpath.dirname(key) == directory
-                        and key.endswith(route.project_suffixes)]
+                        and is_project_file(key, route)]
             if not projects:
                 continue
             files = projects + [

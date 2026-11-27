@@ -235,6 +235,20 @@ class PackageRoutingTest(unittest.TestCase):
             routing.routed_stacks(project, "bad/X.cs")
         self.assertIn("bad/Bad.csproj", str(failed.exception))
 
+    def test_a_project_file_extension_is_matched_ignoring_case(self):
+        files = {"up/App.CSPROJ": project_text("Npgsql"), "mixed/App.CsProj": project_text("Npgsql")}
+        self.assertTrue(routing.is_manifest("up/App.CSPROJ"))
+        self.assertEqual(self.stacks(files, "up/X.cs"), ("dotnet-data.md", "dotnet.md"))
+        self.assertEqual(self.stacks(files, "mixed/X.cs"), ("dotnet-data.md", "dotnet.md"))
+
+    def test_an_unreadable_xml_encoding_is_a_value_error_naming_the_governing_file(self):
+        for number, encoding in enumerate(("x-unknown", "shift_jis")):
+            text = f'<?xml version="1.0" encoding="{encoding}"?><Project />'.encode()
+            project = routing.read_project({f"enc{number}/E.csproj": text})
+            with self.assertRaises(ValueError) as failed:
+                routing.routed_stacks(project, f"enc{number}/X.cs")
+            self.assertIn(f"enc{number}/E.csproj", str(failed.exception), encoding)
+
     def test_non_dotnet_paths_have_no_manifest_dirs_and_route_by_extension(self):
         self.assertEqual(routing.manifest_dirs("tools/run.py"), ())
         self.assertEqual(routing.manifest_dirs("a/b/C.cs"), ("a/b", "a", ""))

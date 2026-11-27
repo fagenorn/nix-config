@@ -10,6 +10,7 @@ from unittest import mock
 from agent_tools.delivery import hint_phases, never_rise, procedure_check, routing, rule_ids, standards_lint
 from agent_tools.delivery.never_rise import Rise, Snapshot, Violation
 from agent_tools.project_contract import conformance_checks
+from tests import never_rise_world as world
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TIER = "fast"
@@ -424,6 +425,36 @@ class RoutedSetBudgetTest(unittest.TestCase):
         self.assertEqual(standards_lint.routed_set_violations(snap),
                          [Violation("B26", "b/B.csproj", 24577, 1),
                           Violation("B26", "b/Y.cs", 24577, 1)])
+
+    def committed_snapshot(self, manifest: bytes):
+        write_files(self.root / "standards", {
+            "stacks/dotnet.md": "d" * 4096, "stacks/dotnet-data.md": "e" * 16385})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = world.repo(tmp)
+            world.write(root, "docs/standards/README.md",
+                        "# P\n\n| Shard | governs | Gist |\n|---|---|---|\n")
+            world.write(root, "app/App.csproj", manifest)
+            world.write(root, "app/X.cs", "class X {}\n")
+            world.commit_all(root)
+            head = never_rise.resolve_commit(root, "HEAD", 60)
+            return never_rise.read_snapshot(root, head, 60, standards_lint.ROUTED_SET_ENFORCER.reads)
+
+    def test_a_utf16_project_file_still_routes_its_package_shard_under_the_budget(self):
+        text = ('<?xml version="1.0" encoding="utf-16"?><Project><ItemGroup>'
+                '<PackageReference Include="Npgsql" Version="1" /></ItemGroup></Project>')
+        snapshot = self.committed_snapshot(text.encode("utf-16"))
+
+        self.assertEqual(standards_lint.routed_set_violations(snapshot),
+                         [Violation("B26", "app/App.csproj", 24577, 1),
+                          Violation("B26", "app/X.cs", 24577, 1)])
+
+    def test_an_empty_project_file_fails_the_enforcer_naming_it(self):
+        snapshot = self.committed_snapshot(b"")
+
+        with self.assertRaises(never_rise.EnforcerFailed) as failed:
+            standards_lint.routed_set_violations(snapshot)
+
+        self.assertIn("app/App.csproj", str(failed.exception))
 
     def test_the_enforcer_is_registered_with_the_never_rise_check(self):
         self.assertIn(standards_lint.ROUTED_SET_ENFORCER,
