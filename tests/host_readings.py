@@ -291,6 +291,7 @@ PARTS: dict[str, Part] = {
   restart = o.restart;
   killReactive = o.killReactive;
   kill = o.kill;
+  serverUser = c.launchd.daemons.omlx.serviceConfig.UserName;
   launchd = c.system.activationScripts.launchd.text;
   hold = o.hold;
   unhold = o.unhold;

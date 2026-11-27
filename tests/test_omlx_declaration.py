@@ -147,8 +147,8 @@ class OmlxDeclarationTest(unittest.TestCase):
                 self.assertEqual(subprocess.run(["sh", str(script), "4242"]).returncode, code)
                 self.assertEqual((root / "args").read_text().split(), ["-U", "4242", "-x", "omlx-server"])
         gated = self.got["restart"].split("\nfi\n", 1)[1]
-        self.assertRegex(gated, r"--server-user [a-z][a-z0-9_-]* \\")
-        self.assertNotIn("--server-user root ", gated)
+        self.assertIn(f"--server-user {self.got['serverUser']} \\", gated)
+        self.assertNotEqual(self.got["serverUser"], "root")
 
     def test_the_host_guide_says_a_restart_after_a_formula_upgrade_must_not_stay_pending(self):
         guide = (Path(__file__).resolve().parents[1] / "hosts/darwin/eleven-m5/README.md").read_text()

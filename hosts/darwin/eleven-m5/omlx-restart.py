@@ -12,7 +12,9 @@ of the job) instead of a kill, because a kill only relaunches the job definition
 The kill is given the uid of `--server-user`, the user the server runs as, never the caller's, so
 root through sudo signals the server's processes. Its exit 1 means it matched no server process: that
 is reported as nothing restarted and keeps the marker, and exits 1 unless `/health` found the server
-down (a stopped server has nothing to end, and launchd starts it on the new code).
+down (a stopped server has nothing to end, and launchd starts it on the new code). A caller that
+cannot read the server's private state directory (another account without sudo) is refused with a
+message naming the server's user, before any kill.
 
 `--reactive` is the gate for a restart nobody scheduled: it needs no marker, reads the API key from the
 first line of stdin and asks the authenticated `/api/status` for the requests in flight. It restarts only
@@ -119,11 +121,8 @@ def restart(restart_bin, reload_bin, server_user, down, marker, reasons):
             return 1
         returncode = subprocess.run([restart_bin, str(uid)]).returncode
         if returncode == NOTHING_MATCHED:
-            print(
-                f"oMLX: nothing was restarted (no omlx-server process of user {server_user}); "
-                ".restart-needed retained for the next activation",
-                file=sys.stderr,
-            )
+            kept = "; .restart-needed retained for the next activation" if marker.exists() else ""
+            print(f"oMLX: nothing was restarted (no omlx-server process of user {server_user}){kept}", file=sys.stderr)
             return 0 if down else 1
     if returncode != 0:
         print(
@@ -275,6 +274,12 @@ def main(argv=None):
 
     if args.server_user is None:
         parser.error("--server-user is required without --reactive")
+    if not os.access(args.state_dir, os.R_OK | os.X_OK):
+        print(
+            f"oMLX: cannot read {args.state_dir}; run omlx-restart as {args.server_user} or with sudo",
+            file=sys.stderr,
+        )
+        return 1
     marker = args.state_dir / ".restart-needed"
     if not marker.exists() and not args.now:
         return 0

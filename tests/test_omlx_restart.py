@@ -576,6 +576,29 @@ class RestartGateTest(unittest.TestCase):
         self.assertEqual(self.kill_arguments(), [str(other.pw_uid)])
         self.assertFalse(self.marker.exists())
 
+    def test_a_markerless_now_whose_kill_matched_nothing_promises_no_retry(self):
+        self.marker.unlink()
+        self.rc.write_text("1")
+        self.extra = ["--now"]
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("oMLX: nothing was restarted", result.stderr)
+        self.assertNotIn("retained", result.stderr)
+        self.assertFalse(self.marker.exists())
+
+    def test_a_caller_that_cannot_read_the_state_directory_is_refused_by_the_servers_user(self):
+        if os.getuid() == 0:
+            self.skipTest("root reads every directory")
+        self.server_user = "root"
+        self.extra = ["--now"]
+        self.state.chmod(0)
+        self.addCleanup(self.state.chmod, 0o700)
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertIn("run omlx-restart as root or with sudo", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_a_server_user_that_does_not_exist_kills_nothing_and_keeps_the_marker(self):
         self.server_user = "omlx-no-such-user-1718"
         self.extra = ["--now"]
