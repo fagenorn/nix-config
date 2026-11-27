@@ -438,7 +438,7 @@ class StoredWordsTest(unittest.TestCase):
 
     OLD = "the project asks for signed commits and this computer could not sign the adoption commit"
 
-    def test_an_old_signing_failure_still_offers_turning_signing_off(self):
+    def test_an_old_signing_failure_reads_in_todays_words_and_offers_apply_it_again(self):
         from .test_console_approve import KEPT, PID, step_payload
         events = [Event(1, "t", approve.STEP, None, step_payload(
             "apply_failed", reason=self.OLD, note=approve.SIGNING_NOTE, kept=KEPT, branch=None, commit=None))]
@@ -451,8 +451,8 @@ class StoredWordsTest(unittest.TestCase):
         items = approve.apply_items(latest, adoption, entry, "approve")
         self.assertEqual(adoption["reason"], approve.SIGNING_REASON)
         self.assertNotEqual(approve.SIGNING_REASON, self.OLD)
-        self.assertEqual(items[0]["values"], ["apply", "signing_off", "not_now"])
-        self.assertEqual(items[0]["questions"][0]["options"], ["Apply it again", "Turn signing off", "Not now"])
+        self.assertEqual(items[0]["values"], ["apply", "not_now"])
+        self.assertEqual(items[0]["questions"][0]["options"], ["Apply it again", "Not now"])
         self.assertEqual(entry["headline"], "The adoption of r was not applied: " + approve.SIGNING_REASON + ".")
 
 
