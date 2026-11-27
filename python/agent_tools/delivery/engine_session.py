@@ -54,10 +54,9 @@ forms, any `>` (even `2>/dev/null`) and, by `HOST_WRITING`, each write the host 
 strips `nohup` before matching), and `shell_rules` gives a role's Bash rules. A role that
 needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
 one that is denied a tool call anyway ends the run at the engine's own stop
-`tool-denied` (`engine_shell`), never a graded reply. `denial_prompt` tells a denied session which calls
-were refused: a read-only role gets the refusal sentence the guard prints (`READ_ONLY_REFUSAL`), any other
-role its own launch's shell rules (`shell_guidance`: the host settings' allowances of a plain role, the
-whole shell of a whole-shell one).
+`tool-denied` (`engine_shell`), never a graded reply. `denial_prompt` asks a denied session once more,
+unless a bound or an API failure ended it: it names the refused calls and the session's tools
+(`session_tools`) and asks it to respect each refusal.
 
 The recorded exception: under the engine only, a step that names its own `worktree` gives a
 `WHOLE_SHELL_ROLES` role the whole `Bash`, `Edit` and `Write` (`Role.whole_shell`, launched in that
@@ -151,6 +150,10 @@ MISS_SUBTYPES: tuple[str, ...] = ("success", STRUCTURED_OUTPUT_EXHAUSTED)
 REASK_REQUEST = (
     "Reply again with only the structured answer, a single call of the StructuredOutput tool whose "
     "members follow the schema, and no other text.")
+DENIAL_GUIDANCE = (
+    "Claude Code refused them. Respect each refusal: do not repeat a refused call or look for another way "
+    "to make it. Finish what you can with this session's tools ({tools}), and say in your reply what a "
+    "refusal kept you from doing. ")
 REASK_PROMPT = f"Your last answer was not a valid structured answer. {REASK_REQUEST}"
 CONTINUE_PROMPT = (
     "Your session was interrupted. Finish the task you were given, then give only the structured "
@@ -381,13 +384,17 @@ def shell_guidance(role: Role) -> str:
     return f"{head}{refusing}{' '.join(notes)}\n\n"
 
 
+def session_tools(role: Role) -> str:
+    """The tools `role`'s launch gives: its `tools` names, or every tool less its `disallowed` names."""
+    tools = ", ".join(role.tools) if role.tools is not None else "every tool"
+    return f"{tools} except {', '.join(role.disallowed)}" if role.disallowed else tools
+
+
 def denial_prompt(role: Role, calls: Sequence[str]) -> str:
-    """The prompt that asks a denied session again: the refused calls, `role`'s shell rules, the shapes."""
+    """The prompt that asks a denied session again: the refused calls, a request to respect them, its tools."""
     refused = "\n".join(f"- {call!r}" for call in calls)
-    redo = ("Redo the checks the refused calls were for, each with one plain allowed command per call or "
-            "with the Read and Grep tools. " if read_only_shell(role) else
-            "Redo the checks the refused calls were for with what the shell rules allow or the file tools. ")
-    return f"These tool calls were refused:\n{refused}\n\n{shell_guidance(role)}{redo}{REASK_REQUEST}"
+    guidance = DENIAL_GUIDANCE.format(tools=session_tools(role))
+    return f"These tool calls were refused:\n{refused}\n\n{guidance}{REASK_REQUEST}"
 
 
 def asked_calls(sessions: Path, name: str, visit: int) -> tuple[str, ...] | None:

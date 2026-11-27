@@ -963,6 +963,32 @@ class DeliverSessionTest(unittest.TestCase):
                     self.fail(f"process {pid} outlived the wall-time ending")
                 time.sleep(0.05)
 
+    def test_a_session_denied_and_past_its_wall_bound_stops_at_tool_denied_without_a_reask(self):
+        project = self.project
+        log = project.tmp / "denying.log"
+        document = json.loads(RESULT_NORMAL.read_text(encoding="utf-8"))
+        document["permission_denials"] = [{"tool_name": "Bash", "tool_use_id": "toolu_04",
+                                           "tool_input": {"command": "make build"}}]
+        script = project.tmp / "denying_claude.py"
+        script.write_text(
+            "import sys, time\n"
+            "sys.stdin.read()\n"
+            f"open({str(log)!r}, 'a').write('launch\\n')\n"
+            f"sys.stdout.write({json.dumps(document)!r})\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(60)\n", encoding="utf-8")
+        launcher = project.bin / "claude-account"
+        launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {script}\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        bounds = {**engine_session.ROLE_BOUNDS, "implementer": engine_session.Bounds(3, 300, 20.0)}
+        with project.inside(), mock.patch.object(engine_session, "ROLE_BOUNDS", bounds):
+            code, line = engine_shell.deliver(1520, self.capped_procedures())
+        self.assertEqual(code, 3, line)
+        self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"))
+        self.assertIn(repr("make build"), line["detail"])
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["launch"])
+        self.assertEqual(list(self.run_dir().glob("sessions/*.denied.prompt.md")), [])
+
     @staticmethod
     def kill_quietly(pid: int) -> None:
         try:

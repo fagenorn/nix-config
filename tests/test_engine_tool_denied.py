@@ -33,6 +33,7 @@ TIER = "integration"  # every case runs the engine as a child process or in proc
 FIXTURES = AdoptedFixtures()
 STEPS = StepCoverage(PROCEDURES, ())
 RESULT_DENIED = REPO_ROOT / "tests/fixtures/engine-session/result-denied-1639.json"
+RESULT_DENIED_1740 = REPO_ROOT / "tests/fixtures/engine-session/result-denied-1740.json"
 
 
 def setUpModule() -> None:
@@ -205,9 +206,11 @@ class DeniedReaskTest(DeniedRun, unittest.TestCase):
     def sessions(self, name: str) -> Path:
         return self.run_dir() / "sessions" / name
 
-    def test_a_session_denied_once_then_answering_in_an_allowed_shape_continues_the_run(self):
-        command = "git log | head; git ls-tree -r HEAD | grep x"
-        denial = bash(command)
+    def test_the_recorded_1740_denial_is_asked_again_once_with_the_call_and_the_sessions_tools(self):
+        denial = json.loads(RESULT_DENIED_1740.read_text(encoding="utf-8"))["permission_denials"][0]
+        listed = next(line for line in (REPO_ROOT / "home/common/claude-code/agents/reviewer.md")
+                      .read_text(encoding="utf-8").splitlines() if line.startswith("tools:"))
+        tools = [name.strip() for name in listed.removeprefix("tools:").split(",")]
         log = self.answers(
             canned_result(structured_output=self.verdict("revise"), duration_ms=1000, num_turns=3,
                           total_cost_usd=0.1, usage=self.USAGE, permission_denials=[denial]),
@@ -223,13 +226,11 @@ class DeniedReaskTest(DeniedRun, unittest.TestCase):
         self.assertEqual(after(second["argv"], "--resume"), after(first["argv"], "--session-id"))
         prompt = self.sessions("review.1.denied.prompt.md").read_text(encoding="utf-8")
         self.assertEqual(second["stdin"], prompt)
-        self.assertIn(repr(command), prompt)
-        self.assertIn(engine_session.READ_ONLY_REFUSAL, prompt)
-        self.assertIn("one plain command per Bash call", prompt)
-        self.assertIn("split a pipeline or command list into separate calls", prompt)
-        self.assertIn("Read and Grep tools", prompt)
-        self.assertNotIn("Shell rules allowing a command", prompt)
-        self.assertNotIn("split at `|`", prompt)
+        self.assertIn(repr(denial["tool_input"]["command"]), prompt)
+        for name in tools:
+            with self.subTest(tool=name):
+                self.assertIn(name, prompt)
+        self.assertTrue(prompt.endswith(engine_session.REASK_REQUEST))
         for name, denials in (("review.1.json", [denial]), ("review.1.denied.json", [])):
             record = json.loads(self.sessions(name).read_text(encoding="utf-8"))
             self.assertEqual(record["denials"], denials, name)
@@ -306,6 +307,19 @@ class DeniedReaskTest(DeniedRun, unittest.TestCase):
         self.assertTrue(self.sessions("review.1.denied.json").exists())
         self.assertEqual([e["outcome"] for e in self.events() if e["event"] == "outcome_graded"],
                          ["no-reply"])
+
+
+class DenialPromptTest(unittest.TestCase):
+    def test_the_prompt_names_each_call_in_order_and_each_tool_a_role_leaves_out(self):
+        limited = engine_session.Role("implementer", "opus", "high", None, ("Workflow", "SendFeedback"), "")
+        calls = ["git status --short", "rm -rf build"]
+
+        prompt = engine_session.denial_prompt(limited, calls)
+
+        self.assertLess(prompt.index(repr(calls[0])), prompt.index(repr(calls[1])))
+        self.assertIn("Workflow", prompt)
+        self.assertIn("SendFeedback", prompt)
+        self.assertTrue(prompt.endswith(engine_session.REASK_REQUEST))
 
 
 class FanOutDeniedTest(unittest.TestCase):
