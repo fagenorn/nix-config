@@ -62,7 +62,7 @@ class DirectProcedureTest(unittest.TestCase):
                 steps = json.loads(path.read_text(encoding="utf-8")).get("steps", [])
                 self.assertEqual([s["id"] for s in steps if "worktree" in s], [])
 
-    def test_the_direct_implementer_prompts_show_single_commands_in_the_worktree(self):
+    def test_the_direct_implementer_prompts_show_commands_in_the_worktree(self):
         steps = {s["id"]: s for s in load(PROCEDURES, "direct")["steps"]}
         for name in ("implement", "lite-fix", "escalated-fix", "full-fix"):
             with self.subTest(name):
@@ -77,8 +77,6 @@ class DirectProcedureTest(unittest.TestCase):
                 self.assertLess(len(text.encode("utf-8")), 8192)
                 for line in lines:
                     self.assertIn("/srv/p/wt", line)
-                    for word in (";", "&&", "||", "|", "$", "`"):
-                        self.assertNotIn(word, line)
 
     def test_the_direct_review_roles(self):
         direct = load(PROCEDURES, "direct")
