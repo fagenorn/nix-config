@@ -1,0 +1,38 @@
+name: .NET Linux proof
+
+on:
+  push:
+    branches:
+      - issue-1841-a-net-solution-with-an-architecture
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-linux-proof:
+    name: .NET Linux proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v4
+      - name: Record the sandbox setting
+        run: nix config show sandbox
+      - name: Build the .NET package
+        run: nix build --no-link --print-build-logs '.#packages.x86_64-linux.agent-tools-dotnet'
+      - name: Build and run the .NET tests check
+        run: nix build --no-link --print-build-logs '.#checks.x86_64-linux.agent-tools-dotnet-tests'
+      - name: List the command table
+        run: nix run '.#packages.x86_64-linux.agent-tools-dotnet' -- commands --json
+      - name: Write the NuGet lock this runner restores
+        if: ${{ !cancelled() }}
+        run: |
+          nix build --out-link "$RUNNER_TEMP/fetch-deps" '.#checks.x86_64-linux.agent-tools-dotnet-tests.fetch-deps'
+          "$RUNNER_TEMP/fetch-deps" "$RUNNER_TEMP/deps-linux.json"
+      - name: Upload the lock
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deps-linux
+          path: ${{ runner.temp }}/deps-linux.json
+          if-no-files-found: error
