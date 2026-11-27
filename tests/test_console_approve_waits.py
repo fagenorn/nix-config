@@ -317,11 +317,23 @@ POINTED = {"error": {**approve_service.SIGNING["error"], "violations": [
     {"pointer": approve.SIGNING_POINTER, "message": "the contract asks for a signed commit"}]}}
 
 
+class Retaining(Fake):
+    """A `Fake` whose apply keeps the adoption's branch in the checkout, as a failed real apply does."""
+
+    repo = None
+
+    def apply(self, plan_id, *args, **kwargs):
+        result = super().apply(plan_id, *args, **kwargs)
+        git(self.repo, "branch", f"adopt-{plan_id.split(':', 1)[1][:12]}")
+        return result
+
+
 class CommittedSigningTest(ApproveCase):
     def signed_checkout(self, result):
         """A registered checkout whose saved contract (schema 2) asks for signing, and an apply that fails on it."""
-        self.start(Fake(plan=READY, apply_result=result))
-        self.repo = reconciled(self.parent, contract=True)
+        adopter = Retaining(plan=READY, apply_result=result)
+        self.start(adopter)
+        self.repo = adopter.repo = reconciled(self.parent, contract=True)
         (self.repo / "scratch.ignored").write_text("untracked\n")
         (self.repo / ".git/info/exclude").write_text("scratch.ignored\n")
         contract = self.repo / ".agents/project.json"
@@ -333,10 +345,13 @@ class CommittedSigningTest(ApproveCase):
         self.settled_row(self.repo)
 
     def snapshot(self):
-        """Every ref, the checked-out revision, the status with ignored files, and every file outside .git."""
+        """Every ref but the adoption's own retained branch, the checked-out revision, the status with ignored
+        files, and every file outside .git."""
         files = {str(path.relative_to(self.repo)): path.read_bytes() for path in sorted(self.repo.rglob("*"))
                  if path.is_file() and ".git" not in path.relative_to(self.repo).parts}
-        return (git(self.repo, "for-each-ref"), git(self.repo, "rev-parse", "HEAD"),
+        refs = [line for line in git(self.repo, "for-each-ref").splitlines()
+                if not line.split()[-1].startswith("refs/heads/adopt-")]
+        return (refs, git(self.repo, "rev-parse", "HEAD"),
                 git(self.repo, "status", "--porcelain", "--ignored"), files)
 
     def test_a_signing_failure_from_a_committed_schema_two_contract_names_its_settings_and_edits_nothing(self):
@@ -350,6 +365,7 @@ class CommittedSigningTest(ApproveCase):
         self.assertEqual(card["values"], ["apply", "not_now"])
         self.assertIn("signed changes", card["headline"])
         self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(git(self.repo, "for-each-ref", "refs/heads/adopt-*").splitlines()), 1)
 
     def test_the_note_follows_the_apply_error_and_not_the_checkout(self):
         self.signed_checkout(approve_service.SIGNING)

@@ -1083,13 +1083,22 @@ def signing_requested(payload: object) -> bool | None:
 SIGNING_POINTER = "/bindings/vcs/commit/signed"
 
 
-def signing_pointer(worktree: Path) -> str:
-    """`SIGNING_POINTER` when the worktree's contract is schema 2 and authors `signed` as true, else "".
+def committed_signing_pointer(root: Path, revision: str) -> str:
+    """`signing_pointer` of the contract the base `revision` commits.
+
+    Read from the immutable base, never the worktree: a failing hook can rewrite or remove the
+    worktree's copy, and a drafted contract is written there though the repository's settings never
+    held it (a draft is planned only over a base that has no contract, so it gives "").
+    """
+    return signing_pointer(blob_at(root, revision, CONTRACT_FILENAME))
+
+
+def signing_pointer(raw: bytes | None) -> str:
+    """`SIGNING_POINTER` when the contract `raw` is schema 2 and authors `signed` as true, else "".
 
     A refused signature carries it as its pointer, so a caller tells a repository setting from the
     platform's own (schema 3 authors none) without reading the checkout, which may be on another branch.
     """
-    raw = read_bytes_bounded(worktree / CONTRACT_FILENAME)
     try:
         contract = json.loads(raw) if raw is not None else None
     except (ValueError, RecursionError):
