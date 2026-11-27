@@ -67,9 +67,58 @@ public sealed class SelfStartTests
     [InlineData("var self = Environment.ProcessPath!; Process.Start(Path.Combine(\"bin\", self));")]
     [InlineData("var self = Assembly.GetEntryAssembly()!.Location; var line = $\"{self} commands\"; Process.Start(\"dotnet\", line);")]
     [InlineData("var self = Environment.ProcessPath!; var info = new ProcessStartInfo { FileName = $\"{self}\" }; Process.Start(info);")]
+    [InlineData("if (Environment.ProcessPath is not { } exe) { return; } Process.Start(exe);")]
+    [InlineData("if (Environment.ProcessPath is not string exe) { return; } Process.Start(exe);")]
+    [InlineData("if (Environment.ProcessPath is string { Length: > 0 } exe) { Process.Start(exe); }")]
+    [InlineData("if (Environment.ProcessPath is { Length: > 0 } and var exe) { Process.Start(exe); }")]
+    [InlineData("class C { static string Exe => Environment.ProcessPath!; void Run() { Process.Start(Exe); } }")]
+    [InlineData("class C { static string Self() => Environment.ProcessPath!; void Run() { Process.Start(Self()); } }")]
+    [InlineData("class C { void Run() { Process.Start(Exe); } static readonly string Exe = Environment.ProcessPath!; }")]
+    [InlineData("class C { void Run() { Process.Start(Self()); } static string Self() => Environment.ProcessPath!; }")]
+    [InlineData("var self = Environment.ProcessPath!; Process.Start($$\"\"\"{{self}}\"\"\");")]
+    [InlineData("var self = Environment.ProcessPath!; Process.Start($$$\"\"\"{{{self}}}\"\"\");")]
+    [InlineData("using static System.Environment; Process.Start(ProcessPath!);")]
+    [InlineData("using E = System.Environment; Process.Start(E.ProcessPath!);")]
+    [InlineData("var (exe, _) = (Environment.ProcessPath!, 1); Process.Start(exe);")]
+    [InlineData("var (n, exe) = (1, Environment.ProcessPath!); Process.Start(exe);")]
+    [InlineData("foreach (var exe in new[] { Environment.ProcessPath! }) { Process.Start(exe); }")]
     public void StartingTheToolsOwnBinaryIsAViolation(string source)
     {
         Assert.Equal(new[] { OwnBinary }, ViolationsOfHostsSource(source));
+    }
+
+    [Theory]
+    [InlineData("if (Environment.ProcessPath is not null && Lookup() is { } git) { Process.Start(git); }")]
+    [InlineData("if (Environment.ProcessPath is string { Length: > 0 } self && Lookup() is not { } git) { Process.Start(git); }")]
+    [InlineData("var (exe, other) = (\"git\", Environment.ProcessPath!); Process.Start(exe);")]
+    [InlineData("var self = Environment.ProcessPath!; Process.Start(\"git\", $$\"\"\"{self}\"\"\");")]
+    [InlineData("var ProcessPath = \"git\"; Process.Start(ProcessPath);")]
+    [InlineData("class C { void Run() { Process.Start(Git); } static string Self = Environment.ProcessPath!; static string Git = \"git\"; }")]
+    [InlineData("class C { void Run() { Process.Start(Git()); } static string Self() => Environment.ProcessPath!; static string Git() => \"git\"; }")]
+    [InlineData("foreach (var git in new[] { \"git\" }) { Process.Start(git); } var self = Environment.ProcessPath!;")]
+    public void AnotherProgramBesideAnOwnPathBindingIsNoViolation(string source)
+    {
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void ASourceWithAnUpperCaseExtensionIsScanned()
+    {
+        using var planted = new PlantedSolution();
+        planted.Project("Hosts");
+        planted.Source("Hosts/Spawn.CS", "Process.Start(Environment.ProcessPath!);");
+
+        Assert.Equal(new[] { "Hosts/Spawn.CS: starts the tool's own binary" }, SelfStart.Violations(planted.Root));
+    }
+
+    [Fact]
+    public void AProjectWithAnUpperCaseExtensionIsScanned()
+    {
+        using var planted = new PlantedSolution();
+        planted.Source("Hosts/Hosts.CSPROJ", "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>");
+        planted.Source("Hosts/Spawn.cs", "Process.Start(Environment.ProcessPath!);");
+
+        Assert.Equal(new[] { OwnBinary }, SelfStart.Violations(planted.Root));
     }
 
     [Theory]

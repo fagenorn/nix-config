@@ -14,6 +14,22 @@ public static class SelfStart
         "\"agent-tools\"",
     ];
 
+    // The own-path members of the types above, for a file that reaches them through `using static`
+    // or an alias without the type name.
+    private static readonly (string Type, string[] Members)[] MarkerTypes =
+    [
+        ("Environment", ["ProcessPath", "GetCommandLineArgs"]),
+        ("Process", ["GetCurrentProcess"]),
+        ("Assembly", ["GetEntryAssembly"]),
+    ];
+
+    // Words that can sit where a pattern's designation does and are never one.
+    private static readonly HashSet<string> NotDesignations = new(StringComparer.Ordinal)
+    {
+        "not", "and", "or", "var", "null", "true", "false", "string", "object", "int", "long", "bool", "char", "byte",
+        "double", "float", "decimal", "uint", "ulong", "short", "ushort", "sbyte", "nint", "nuint", "dynamic",
+    };
+
     private const string DotnetHost = "\"dotnet\"";
     private const string StartInfoType = "ProcessStartInfo";
 
@@ -32,13 +48,15 @@ public static class SelfStart
     {
         var files = SolutionTree.Files(solutionRoot);
         var directories = files
-            .Where(file => file.EndsWith(".csproj", StringComparison.Ordinal))
+            .Where(file => file.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
             .Where(file => !Path.GetFileNameWithoutExtension(file).EndsWith(".Tests", StringComparison.Ordinal))
             .Select(file => Path.GetDirectoryName(file)! + Path.DirectorySeparatorChar)
             .ToList();
 
+        // File extensions are matched without regard to case: MSBuild compiles Spawn.CS on a
+        // case-insensitive file system.
         return files
-            .Where(file => file.EndsWith(".cs", StringComparison.Ordinal))
+            .Where(file => file.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             .Where(file => directories.Any(directory => file.StartsWith(directory, StringComparison.Ordinal)))
             .Where(file => StartsTheTool(WithoutComments(File.ReadAllText(file))))
             .Select(file => $"{SolutionTree.Relative(solutionRoot, file)}: starts the tool's own binary")
@@ -48,12 +66,13 @@ public static class SelfStart
 
     private static bool StartsTheTool(string text)
     {
+        var hasMarker = MarkerTest(text);
         foreach (var launch in Launches(text))
         {
             var executables = launch.Executables;
-            var runsTheTool = executables.Any(HasMarker);
+            var runsTheTool = executables.Any(hasMarker);
             var runsTheHost = executables.Any(value => value.Contains(DotnetHost, StringComparison.Ordinal));
-            if (runsTheTool || (runsTheHost && launch.Arguments.Any(HasMarker)))
+            if (runsTheTool || (runsTheHost && launch.Arguments.Any(hasMarker)))
             {
                 return true;
             }
@@ -62,8 +81,27 @@ public static class SelfStart
         return false;
     }
 
-    private static bool HasMarker(string value) =>
-        Markers.Any(marker => value.Contains(marker, StringComparison.Ordinal));
+    private static Func<string, bool> MarkerTest(string text)
+    {
+        var reached = new List<Regex>();
+        foreach (var (type, members) in MarkerTypes)
+        {
+            var typeName = $@"(?:[\w.]+\s*\.\s*)?{type}";
+            if (Regex.IsMatch(text, $@"\busing\s+static\s+{typeName}\s*;"))
+            {
+                reached.AddRange(members.Select(member => new Regex($@"(?<![\w.]){member}\b")));
+            }
+
+            foreach (Match alias in Regex.Matches(text, $@"\busing\s+(\w+)\s*=\s*{typeName}\s*;"))
+            {
+                var name = Regex.Escape(alias.Groups[1].Value);
+                reached.AddRange(members.Select(member => new Regex($@"(?<![\w.]){name}\s*\.\s*{member}\b")));
+            }
+        }
+
+        return value => Markers.Any(marker => value.Contains(marker, StringComparison.Ordinal))
+            || reached.Any(pattern => pattern.IsMatch(value));
+    }
 
     private static IEnumerable<Parts> Launches(string text)
     {
@@ -338,9 +376,10 @@ public static class SelfStart
             }
 
             var end = StringEnd(expression, index);
-            if (IsInterpolated(expression, index))
+            var dollars = Dollars(expression, index);
+            if (dollars > 0)
             {
-                code.Append(' ').Append(Holes(expression[index..end]));
+                code.Append(' ').Append(Holes(expression[index..end], dollars));
             }
 
             code.Append(' ');
@@ -350,26 +389,52 @@ public static class SelfStart
         return Token.Matches(code.ToString()).Select(match => match.Value);
     }
 
-    private static bool IsInterpolated(string text, int quote)
+    // How many `$` prefix the string that opens at the quote: none for a plain string.
+    private static int Dollars(string text, int quote)
     {
+        var dollars = 0;
         for (var back = quote - 1; back >= 0 && text[back] is '@' or '$'; back--)
         {
             if (text[back] == '$')
             {
-                return true;
+                dollars++;
             }
         }
 
-        return false;
+        return dollars;
     }
 
-    private static string Holes(string literal)
+    // In a raw string a hole opens at a run of at least as many braces as there are `$`, and any
+    // braces before its last `$`-count of them are text; elsewhere `{{` is an escaped brace.
+    private static string Holes(string literal, int dollars)
     {
+        var raw = literal.StartsWith("\"\"\"", StringComparison.Ordinal);
         var holes = new StringBuilder();
         for (var index = 0; index < literal.Length; index++)
         {
             if (literal[index] != '{')
             {
+                continue;
+            }
+
+            if (raw)
+            {
+                var run = 1;
+                while (index + run < literal.Length && literal[index + run] == '{')
+                {
+                    run++;
+                }
+
+                if (run < dollars)
+                {
+                    index += run - 1;
+                    continue;
+                }
+
+                var inner = index + run;
+                var close = Cut(literal, inner, string.Empty);
+                holes.Append(' ').Append(literal, inner, close - inner);
+                index = close;
                 continue;
             }
 
@@ -387,21 +452,112 @@ public static class SelfStart
         return holes.ToString();
     }
 
-    // What a name was last bound to before a point: an assignment, or a pattern that declares it
-    // (`value is { } name`, `value is string name`), whose value is the matched expression.
+    private sealed record Bound(string Value, int Index, bool Scoped);
+
+    // What a name was last bound to before a point. A member read before it is declared (a field
+    // below the method, an expression-bodied member) has no earlier binding, so the first one
+    // after the point stands; a local binding is read only from before.
     private static (string Value, int Index)? Binding(string text, string name, int before)
     {
+        var all = Bindings(text, name);
+        var chosen = all.Where(bound => bound.Index < before).MaxBy(bound => bound.Index)
+            ?? all.Where(bound => !bound.Scoped).MinBy(bound => bound.Index);
+        return chosen is null ? null : (chosen.Value, chosen.Index);
+    }
+
+    // Every way the name is bound: an assignment, a field or property initializer, an
+    // expression-bodied member (`name => value`, `name() => value`), a pattern that declares it
+    // (`value is { } name`, `value is not string name`), a deconstruction and a foreach variable.
+    private static List<Bound> Bindings(string text, string name)
+    {
         var escaped = Regex.Escape(name);
-        var assigned = LastAssignment(text, $@"\b{escaped}", before);
-        var pattern = Regex
-            .Matches(text[..before], $@"\bis\s+(?:\{{[^{{}}]*\}}\s*|[A-Za-z_][\w.<>?\[\]]*\s+){escaped}\b")
-            .LastOrDefault();
-        if (pattern is null)
+        var bound = new List<Bound>();
+        foreach (Match match in Regex.Matches(text, $@"\b{escaped}(?:\s*\{{\s*get\s*;[^{{}}]*\}})?\s*=(?![=>])"))
         {
-            return assigned;
+            bound.Add(new Bound(Value(text, match.Index + match.Length, ";"), match.Index, false));
         }
 
-        return assigned is { } found && found.Index > pattern.Index ? found : (Subject(text, pattern.Index), pattern.Index);
+        foreach (Match match in Regex.Matches(text, $@"\b{escaped}\s*(?:\([^()]*\))?\s*(?:\{{\s*get\s*)?=>"))
+        {
+            bound.Add(new Bound(Value(text, match.Index + match.Length, ";"), match.Index, false));
+        }
+
+        foreach (Match match in Regex.Matches(text, @"\bis\b"))
+        {
+            if (Designates(text, match.Index + match.Length, name))
+            {
+                bound.Add(new Bound(Subject(text, match.Index), match.Index, true));
+            }
+        }
+
+        foreach (Match match in Regex.Matches(text, @"\(([^()]*)\)\s*=(?![=>])"))
+        {
+            var position = match.Groups[1].Value.Split(',').ToList()
+                .FindIndex(element => element.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).LastOrDefault() == name);
+            if (position >= 0)
+            {
+                var value = Value(text, match.Index + match.Length, ";");
+                var parts = value.StartsWith('(') ? Arguments(value, 1) : [];
+                var count = match.Groups[1].Value.Split(',').Length;
+                bound.Add(new Bound(parts.Count == count ? parts[position] : value, match.Index, true));
+            }
+        }
+
+        foreach (Match match in Regex.Matches(text, $@"\bforeach\s*\(\s*(?:[\w.<>?\[\],]+\s+)?{escaped}\s+in\b"))
+        {
+            bound.Add(new Bound(Value(text, match.Index + match.Length, string.Empty), match.Index, true));
+        }
+
+        return bound;
+    }
+
+    // Whether the pattern that starts at a point declares the name: the name is an identifier at
+    // the pattern's own level (inside braces it names a part of the value), after a type, `not`,
+    // `var` or a property pattern. The pattern ends at what cannot continue it.
+    private static bool Designates(string text, int start, string name)
+    {
+        if (NotDesignations.Contains(name))
+        {
+            return false;
+        }
+
+        var depth = 0;
+        var level = new StringBuilder();
+        for (var index = start; index < text.Length; index++)
+        {
+            var character = text[index];
+            var next = index + 1 < text.Length ? text[index + 1] : '\0';
+            if (character is '(' or '[' or '{')
+            {
+                level.Append(depth == 0 ? "{}" : string.Empty);
+                depth++;
+            }
+            else if (character is ')' or ']' or '}')
+            {
+                if (depth == 0)
+                {
+                    break;
+                }
+
+                depth--;
+            }
+            else if (depth > 0)
+            {
+                continue;
+            }
+            else if (character is ';' or ',' or ':' or '=' || (character == '&' && next == '&') || (character == '|' && next == '|')
+                || (character == '?' && char.IsWhiteSpace(text[index - 1])))
+            {
+                break;
+            }
+            else
+            {
+                level.Append(character);
+            }
+        }
+
+        var match = Regex.Match(level.ToString(), $@"(?<![\w.]){Regex.Escape(name)}\b(?![.(])");
+        return match.Success && level.ToString(0, match.Index).Trim().Length > 0;
     }
 
     // The expression a pattern tests: the text before `is`, back to the nearest separator that is
