@@ -244,12 +244,18 @@ LAUNCHER_STANDIN = (
     "sys.argv[1]]).wait()")
 
 
-GIT_READ_ONLY = ("Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),"
-                 "Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git blame:*),"
-                 "Bash(git merge-base:*)")
-# `git diff`, `git log` and `git show` all write a file given `--output=<file>`; the prefix
-# patterns above would preapprove that, so these deny rules (checked first) refuse it.
-GIT_WRITING = ("Bash(git diff*--output*),Bash(git log*--output*),Bash(git show*--output*)")
+READ_ONLY = ("Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),"
+             "Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git blame:*),"
+             "Bash(git merge-base:*),Bash(git ls-tree:*),Bash(grep:*),Bash(head:*),"
+             "Bash(tail:*),Bash(wc:*),Bash(ls:*),Bash(cat:*)")
+# `git diff`, `git log` and `git show` all write a file given `--output=<file>`, which the prefix
+# patterns above would preapprove; a redirect writes any file; and the host settings allow each host
+# write below. These deny rules (checked first, outranking an allow rule from any source) refuse them.
+READ_ONLY_DENIED = ("Bash(git diff*--output*),Bash(git log*--output*),Bash(git show*--output*),"
+                    "Bash(*>*),Bash(git fetch:*),Bash(git push:*),Bash(git worktree add:*),"
+                    "Bash(git worktree remove:*),Bash(git worktree prune:*),Bash(git branch -d:*),"
+                    "Bash(gh pr create:*),Bash(gh pr merge:*),Bash(gh release create:*),"
+                    "Bash(forge-issue:*),Bash(~/.agents/bin/forge-issue:*)")
 
 
 class LaunchArgvTest(unittest.TestCase):
@@ -259,16 +265,16 @@ class LaunchArgvTest(unittest.TestCase):
         self.assertEqual(after(list(argv), "--tools"), "Read,Bash,Skill")
         allowed = after(list(argv), "--allowedTools").split(",")
         self.assertNotIn("Bash", allowed)
-        self.assertEqual(allowed, ["Read", *GIT_READ_ONLY.split(","), "Skill"])
+        self.assertEqual(allowed, ["Read", *READ_ONLY.split(","), "Skill"])
 
-    def test_the_git_commands_that_write_a_file_through_output_are_denied(self):
+    def test_the_commands_that_write_a_file_or_the_host_are_denied(self):
         argv = launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM)
-        self.assertEqual(after(list(argv), "--disallowedTools"), GIT_WRITING)
+        self.assertEqual(after(list(argv), "--disallowedTools"), READ_ONLY_DENIED)
 
     def test_the_output_denial_joins_a_roles_own_disallowed_tools_and_needs_bash(self):
         both = Role("reviewer", "opus", "high", ("Read", "Bash"), ("Write",), "")
         self.assertEqual(after(list(launch_argv(both, SCHEMA, SESSION, SYSTEM)),
-                               "--disallowedTools"), f"Write,{GIT_WRITING}")
+                               "--disallowedTools"), f"Write,{READ_ONLY_DENIED}")
         no_shell = Role("reviewer", "opus", "high", ("Read",), None, "")
         self.assertNotIn("--disallowedTools", launch_argv(no_shell, SCHEMA, SESSION, SYSTEM))
 
@@ -280,8 +286,8 @@ class LaunchArgvTest(unittest.TestCase):
             "--session-id", "0b0b8a8e-6f0e-4d47-9d6a-3f1f2b9c1a11", "--strict-mcp-config",
             "--permission-mode", "dontAsk", "--model", "opus", "--effort", "high",
             "--max-turns", "150", "--max-budget-usd", "15.00",
-            "--tools", "Read,Bash", "--allowedTools", f"Read,{GIT_READ_ONLY}",
-            "--disallowedTools", GIT_WRITING,
+            "--tools", "Read,Bash", "--allowedTools", f"Read,{READ_ONLY}",
+            "--disallowedTools", READ_ONLY_DENIED,
             "--append-system-prompt-file", "/run/sessions/review.1.system.md"))
 
     def test_a_resume_names_the_session_by_resume_and_never_session_id(self):
@@ -755,9 +761,9 @@ class DeliverSessionTest(unittest.TestCase):
             else:
                 self.assertEqual(after(argv, "--tools"), names(tools))
                 self.assertEqual(after(argv, "--allowedTools"),
-                                 names(tools).replace("Bash", GIT_READ_ONLY))
+                                 names(tools).replace("Bash", READ_ONLY))
                 if "Bash" in tools:
-                    self.assertEqual(after(argv, "--disallowedTools"), GIT_WRITING)
+                    self.assertEqual(after(argv, "--disallowedTools"), READ_ONLY_DENIED)
                 else:
                     self.assertNotIn("--disallowedTools", argv)
             self.assertEqual(Path(after(argv, "--append-system-prompt-file")).read_text(

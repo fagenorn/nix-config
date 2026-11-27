@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -21,12 +20,13 @@ from unittest import mock
 
 from agent_tools.delivery import engine_guard, engine_session
 from tests.engine_fixture import AdoptedFixtures
+from tests.engine_permission_model import client_admits
 from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import StepCoverage
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_deliver import EngineProject
 from tests.test_engine_session import (
-    GIT_READ_ONLY, GIT_WRITING, NEVER, RESULT_NORMAL, SCHEMA, SESSION, SETTINGS_GUARDED,
+    NEVER, READ_ONLY, READ_ONLY_DENIED, RESULT_NORMAL, SCHEMA, SESSION, SETTINGS_GUARDED,
     SETTINGS_UNGUARDED, SYSTEM, copy_roles, install_stub, one_step,
 )
 from tests.test_engine_stubbed_run import Scenario
@@ -46,26 +46,6 @@ def setUpModule() -> None:
 
 def tearDownModule() -> None:
     STEPS.finish(sys.modules[__name__], Scenario)
-
-
-def _rule_matches(pattern: str, command: str) -> bool:
-    if pattern.endswith(":*"):  # the legacy prefix form: the prefix alone or followed by a space and anything
-        prefix = pattern[:-2]
-        return command == prefix or command.startswith(prefix + " ")
-    return re.fullmatch(".*".join(re.escape(part) for part in pattern.split("*")), command) is not None
-
-
-def client_admits(command: str, allowed: list[str], denied: list[str]) -> bool:
-    """Whether the client runs the single `command` under these `--allowedTools`/`--disallowedTools` words.
-
-    Models the wildcard forms of https://code.claude.com/docs/en/permissions (`*` matches any run of
-    characters, `:*` is the legacy prefix form, a deny rule is checked before an allow rule); CI runs no client."""
-    def bash_rules(rules: list[str]) -> list[str]:
-        return [rule[len("Bash("):-1] for rule in rules if rule.startswith("Bash(") and rule.endswith(")")]
-
-    if any(_rule_matches(pattern, command) for pattern in bash_rules(denied)):
-        return False
-    return "Bash" in allowed or any(_rule_matches(pattern, command) for pattern in bash_rules(allowed))
 
 
 def words_after(argv: tuple[str, ...] | list[str], flag: str) -> list[str]:
@@ -175,11 +155,11 @@ class WholeShellArgvTest(unittest.TestCase):
         # file changes the launch and fails this table until the table is changed on purpose.
         expected = {
             "planner": ("Read,Glob,Grep,Bash,Write,Edit,Skill,Agent(Explore)",
-                        f"Read,Glob,Grep,{GIT_READ_ONLY},Write,Edit,Skill,Agent(Explore)", GIT_WRITING),
+                        f"Read,Glob,Grep,{READ_ONLY},Write,Edit,Skill,Agent(Explore)", READ_ONLY_DENIED),
             "reviewer": ("Read,Glob,Grep,Bash,Write,Skill",
-                         f"Read,Glob,Grep,{GIT_READ_ONLY},Write,Skill", GIT_WRITING),
+                         f"Read,Glob,Grep,{READ_ONLY},Write,Skill", READ_ONLY_DENIED),
             "reviewer-lite": ("Read,Glob,Grep,Bash,Write",
-                              f"Read,Glob,Grep,{GIT_READ_ONLY},Write", GIT_WRITING),
+                              f"Read,Glob,Grep,{READ_ONLY},Write", READ_ONLY_DENIED),
         }
         for name, (tools, allowed, denied) in expected.items():
             with self.subTest(name):

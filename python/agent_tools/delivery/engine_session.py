@@ -43,12 +43,14 @@ flagged or not (`is_miss`). Any other reading without a usable reply is never re
 run resumes a session its predecessor left interrupted with `CONTINUE_PROMPT`, which asks it to finish
 the task it was given and then give only the structured answer.
 
-The role's `Bash` stays in `--tools` but is preapproved only as the reviewer's
-permitted read-only git inspection (`READ_ONLY_BASH`): under `dontAsk` any other
-shell command is denied, so a session cannot write to the worktree through it.
-`git diff`, `git log` and `git show` write a file given `--output`, which those
-prefix patterns would preapprove, so `GIT_WRITING` is passed as
-`--disallowedTools` (a deny rule is checked before an allow rule). A role that
+The role's `Bash` stays in `--tools` but is preapproved only as the read-only shapes of
+`READ_ONLY_BASH`, each a prefix rule, so a pipeline or command list whose every part is one of them runs
+(the client splits at `|`, `;`, `&&`, `||` and `&`); under `dontAsk` any other shell command is denied.
+`sed` is not among them, since no rule holds it to printing. `READ_ONLY_DENIED` is passed as
+`--disallowedTools` (a deny rule outranks an allow rule from any source): it refuses the git `--output`
+forms, any `>` (even `2>/dev/null`) and, by `HOST_WRITING`, each write the host settings allow. The
+`git -C <dir>` forms are not admitted. The detaching words are the lifecycle guard's to refuse (the client
+strips `nohup` before matching), and `shell_rules` gives a role's Bash rules. A role that
 needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
 one that is denied a tool call anyway ends the run at the engine's own stop
 `tool-denied` (`engine_shell`), never a graded reply.
@@ -152,11 +154,18 @@ USAGE_LIMIT = "usage-limit"
 API_ERROR = "api-error"
 GRACE_SECONDS = 5
 DRAIN_SECONDS = 5
-READ_ONLY_BASH: tuple[str, ...] = tuple(
-    f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
-                                      "blame", "merge-base"))
+READ_ONLY_BASH: tuple[str, ...] = (
+    *(f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
+                                        "blame", "merge-base", "ls-tree")),
+    *(f"Bash({program}:*)" for program in ("grep", "head", "tail", "wc", "ls", "cat")))
 GIT_WRITING: tuple[str, ...] = tuple(
     f"Bash(git {verb}*--output*)" for verb in ("diff", "log", "show"))
+HOST_WRITING: tuple[str, ...] = tuple(
+    f"Bash({prefix}:*)" for prefix in (
+        "git fetch", "git push", "git worktree add", "git worktree remove", "git worktree prune",
+        "git branch -d", "gh pr create", "gh pr merge", "gh release create", "forge-issue",
+        "~/.agents/bin/forge-issue"))
+READ_ONLY_DENIED: tuple[str, ...] = (*GIT_WRITING, "Bash(*>*)", *HOST_WRITING)
 REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
                   "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
                   "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
@@ -450,6 +459,31 @@ def is_miss(reading: Reading) -> bool:
     return not reading.is_error or reading.subtype == STRUCTURED_OUTPUT_EXHAUSTED
 
 
+def launch_rules(role: Role) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    """The words of the `--allowedTools` and `--disallowedTools` of `role`'s launch; None for a flag it omits."""
+    disallowed = list(role.disallowed or ())
+    if role.whole_shell:
+        if role.name not in WHOLE_SHELL_ROLES or role.tools is not None:
+            raise RoleError(f"the role {role.name} cannot have the whole shell")
+        return WHOLE_SHELL_ALLOWED, (*disallowed, *WHOLE_SHELL_DENIED)
+    allowed = None
+    if role.tools is not None:
+        allowed = tuple(entry for name in role.tools
+                        for entry in (READ_ONLY_BASH if name == "Bash" else (name,)))
+        if "Bash" in role.tools:
+            disallowed += READ_ONLY_DENIED
+    return allowed, (tuple(disallowed) if role.disallowed is not None or disallowed else None)
+
+
+def shell_rules(role: Role) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The Bash words of the allow and of the deny rules `launch_argv` passes for `role`, in argv order."""
+    def bash_words(words: tuple[str, ...] | None) -> tuple[str, ...]:
+        return tuple(word for word in words or () if word == "Bash" or word.startswith("Bash("))
+
+    allowed, denied = launch_rules(role)
+    return bash_words(allowed), bash_words(denied)
+
+
 def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, *,
                 resume: bool = False) -> tuple[str, ...]:
     """The launcher argv of one session; no word of it is a prompt.
@@ -462,26 +496,18 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, 
         for name in names or ():
             refuse_value(role.name, field, name)
     limits = bounds(role.name)
+    allowed, disallowed = launch_rules(role)
     argv = [*LAUNCHER, "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
             "--resume" if resume else "--session-id", session, "--strict-mcp-config",
             "--permission-mode", "dontAsk",
             "--model", role.model, "--effort", role.effort,
             "--max-turns", str(limits.turns), "--max-budget-usd", f"{limits.spend_usd:.2f}"]
-    disallowed = list(role.disallowed or ())
-    if role.whole_shell:
-        if role.name not in WHOLE_SHELL_ROLES or role.tools is not None:
-            raise RoleError(f"the role {role.name} cannot have the whole shell")
-        argv += ["--allowedTools", ",".join(WHOLE_SHELL_ALLOWED),
-                 "--disallowedTools", ",".join([*disallowed, *WHOLE_SHELL_DENIED])]
-        return (*argv, "--append-system-prompt-file", str(system_prompt))
     if role.tools is not None:
-        allowed = [entry for name in role.tools
-                   for entry in (READ_ONLY_BASH if name == "Bash" else (name,))]
-        argv += ["--tools", ",".join(role.tools), "--allowedTools", ",".join(allowed)]
-        if "Bash" in role.tools:
-            disallowed += GIT_WRITING
-    if role.disallowed is not None or disallowed:
+        argv += ["--tools", ",".join(role.tools)]
+    if allowed is not None:
+        argv += ["--allowedTools", ",".join(allowed)]
+    if disallowed is not None:
         argv += ["--disallowedTools", ",".join(disallowed)]
     return (*argv, "--append-system-prompt-file", str(system_prompt))
 

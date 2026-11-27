@@ -205,6 +205,7 @@ agent-workflow-tests *args:
     tests/test_engine_session_limits.py \
     tests/test_engine_tool_denied.py \
     tests/test_engine_whole_shell.py \
+    tests/test_engine_read_only_shell.py \
     tests/test_engine_reaping.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
