@@ -20,6 +20,7 @@ from datetime import datetime
 from unittest import mock
 
 from agent_tools.hosts.host_alerts import (
+    Chat,
     Outcome,
     RELATIVE_LOG,
     RELATIVE_SETTINGS,
@@ -27,10 +28,15 @@ from agent_tools.hosts.host_alerts import (
     SettingsError,
     TEST_MESSAGE,
     deliver,
+    list_chats,
     log_path,
     read_settings,
+    send_message,
     send_test,
+    send_test_result,
     settings_path,
+    valid_chat,
+    valid_token,
     write_settings,
 )
 
@@ -234,6 +240,137 @@ class SendTestTest(HostAlertsCase):
         self.assertIs(send_test(self.settings, api=self.bot.api), False)
         self.assertEqual(len(self.bot.requests), 2)
         self.assertFalse(self.log.exists())
+
+
+TOKEN = "123:SECRET-TOKEN"
+
+
+class ChatListTest(HostAlertsCase):
+    def test_the_chat_list_reads_each_chat_the_feed_names_once(self):
+        self.bot.body = {"ok": True, "result": [
+            {"update_id": 1, "message": {"chat": {"id": -1001234, "title": "Ops", "type": "group"}}},
+            {"update_id": 2, "message": {"chat": {"id": 42, "first_name": "Anis", "last_name": "S",
+                                                  "type": "private"}}},
+            {"update_id": 3, "edited_message": {"chat": {"id": -1001234, "title": "Ops", "type": "group"}}},
+            {"update_id": 4, "channel_post": {"chat": {"id": -1009, "username": "alerts_chan",
+                                                       "type": "channel"}}},
+            {"update_id": 5, "message": {"chat": {"id": True}}},
+        ]}
+        self.assertEqual(
+            list_chats(TOKEN, api=self.bot.api),
+            ((Chat("-1001234", "Ops"), Chat("42", "Anis S"), Chat("-1009", "@alerts_chan")), ""))
+        self.assertEqual(self.bot.requests, [{
+            "method": "POST",
+            "path": "/bot123:SECRET-TOKEN/getUpdates",
+            "content_type": "application/json",
+            "body": {},
+        }])
+
+    def test_an_empty_feed_is_no_chats(self):
+        self.bot.body = {"ok": True, "result": []}
+        self.assertEqual(list_chats(TOKEN, api=self.bot.api), ((), ""))
+        self.bot.body = {"ok": True, "result": {}}
+        self.assertEqual(list_chats(TOKEN, api=self.bot.api), ((), "ok false"))
+
+    def test_a_refused_chat_list_names_the_reason_without_the_token(self):
+        self.bot.status, self.bot.body = 401, {"ok": False}
+        first = list_chats(TOKEN, api=self.bot.api)
+        self.bot.status, self.bot.body = 200, {"ok": False}
+        second = list_chats(TOKEN, api=self.bot.api)
+        with socket.socket() as closed:
+            closed.bind(("127.0.0.1", 0))
+            port = closed.getsockname()[1]
+        third = list_chats(TOKEN, api=f"http://127.0.0.1:{port}")
+        self.assertEqual(first, ((), "HTTP 401"))
+        self.assertEqual(second, ((), "ok false"))
+        self.assertEqual(third, ((), "URLError"))
+        for shown in (first[1], second[1], third[1]):
+            self.assertNotIn("SECRET-TOKEN", shown)
+
+    def test_a_malformed_token_is_refused_without_a_request(self):
+        self.assertEqual(list_chats("123:a/../x", api=self.bot.api), ((), "bad token"))
+        self.assertEqual(list_chats("", api=self.bot.api), ((), "bad token"))
+        self.assertEqual(self.bot.requests, [])
+
+    def test_a_refusal_names_a_fixed_cause_and_never_telegrams_words(self):
+        self.write(SETTINGS)
+
+        def refuse(status, description):
+            self.bot.status = status
+            self.bot.body = {"ok": False, "error_code": status, "description": description}
+
+        refuse(403, "Forbidden: bot was blocked by the user")
+        self.assertEqual(send_test_result(self.settings, api=self.bot.api), (False, "HTTP 403 blocked by the user"))
+        refuse(403, "Forbidden: bot is not a member of the channel chat")
+        self.assertEqual(send_test_result(self.settings, api=self.bot.api), (False, "HTTP 403 not a member"))
+        refuse(409, "Conflict: terminated by other getUpdates request")
+        self.assertEqual(list_chats(TOKEN, api=self.bot.api), ((), "HTTP 409 another reader"))
+        refuse(409, "Conflict: can't use getUpdates method while webhook is active")
+        self.assertEqual(list_chats(TOKEN, api=self.bot.api), ((), "HTTP 409 webhook set"))
+        refuse(400, "Bad Request: 123:SECRET-TOKEN")
+        reason = list_chats(TOKEN, api=self.bot.api)[1]
+        self.assertEqual(reason, "HTTP 400")
+        self.assertNotIn("SECRET", reason)
+        refuse(400, "Bad Request: chat not found")
+        self.assertEqual(
+            send_message(Settings(True, TOKEN, "-1"), TEXT, api=self.bot.api), (False, "HTTP 400"))
+
+    def test_a_title_holding_the_token_is_shown_as_its_id_and_the_patterns_hold(self):
+        self.bot.body = {"ok": True, "result": [
+            {"update_id": 1, "message": {"chat": {"id": -77, "title": "ops 123:SECRET-TOKEN"}}}]}
+        self.assertEqual(list_chats(TOKEN, api=self.bot.api), ((Chat("-77", "-77"),), ""))
+        self.assertTrue(valid_token("123:SECRET-TOKEN"))
+        for value in ("123:a/b", "abc", "123:", 123, None):
+            self.assertFalse(valid_token(value), value)
+        for value in ("-1001234", "42", "@alerts_chan"):
+            self.assertTrue(valid_chat(value), value)
+        for value in ("12a", "@ab", "123:SECRET-TOKEN", -1001234, True):
+            self.assertFalse(valid_chat(value), value)
+
+
+class SendTestResultTest(HostAlertsCase):
+    def test_send_test_result_names_why_it_was_not_delivered(self):
+        self.assertEqual(send_test_result(self.settings, api=self.bot.api), (False, "settings missing"))
+        self.write(SETTINGS, 0o644)
+        self.assertEqual(send_test_result(self.settings, api=self.bot.api), (False, "settings refused"))
+        self.write({**SETTINGS, "chat_id": "123:SECRET-TOKEN"})
+        self.assertEqual(send_test_result(self.settings, api=self.bot.api), (False, "settings refused"))
+        self.write({"enabled": False, "bot_token": None, "chat_id": None})
+        self.assertEqual(send_test_result(self.settings, api=self.bot.api), (False, "settings incomplete"))
+        self.assertEqual(self.bot.requests, [])
+        self.write({**SETTINGS, "enabled": False})
+        self.bot.status, self.bot.body = 401, {"ok": False}
+        self.assertEqual(send_test_result(self.settings, api=self.bot.api), (False, "HTTP 401"))
+        self.bot.status, self.bot.body = 200, {"ok": True}
+        self.assertEqual(send_test_result(self.settings, api=self.bot.api), (True, ""))
+        self.assertEqual(self.bot.requests[-1]["body"], {"chat_id": "-1001234", "text": TEST_MESSAGE})
+        self.assertFalse(self.log.exists())
+
+
+class WriteSettingsFolderTest(HostAlertsCase):
+    def test_an_existing_wider_folder_is_made_private_and_a_foreign_one_is_refused(self):
+        value = Settings(True, TOKEN, "-1")
+        self.settings.parent.mkdir(mode=0o755)
+        self.settings.parent.chmod(0o755)
+        write_settings(value, self.settings)
+        self.assertEqual(stat.S_IMODE(self.settings.parent.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o600)
+
+        foreign = self.scratch / "foreign" / "telegram.json"
+        foreign.parent.mkdir(mode=0o755)
+        foreign.parent.chmod(0o755)
+        with self.assertRaises(SettingsError):
+            write_settings(value, foreign, uid=os.geteuid() + 1)
+        self.assertEqual(list(foreign.parent.iterdir()), [])
+        self.assertEqual(stat.S_IMODE(foreign.parent.stat().st_mode), 0o755)
+
+        target = self.scratch / "target"
+        target.mkdir()
+        link = self.scratch / "link"
+        link.symlink_to(target)
+        with self.assertRaises(SettingsError):
+            write_settings(value, link / "telegram.json")
+        self.assertEqual(list(target.iterdir()), [])
 
 
 class SettingsFileTest(HostAlertsCase):

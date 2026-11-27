@@ -29,14 +29,36 @@ recorded alert: `<ISO time> <kind> recorded only, alerts disabled: <text>` or
 `SettingsMissing`, a `SettingsError`, is the refusal of a missing file alone; `record_note` adds a
 `<ISO time> <kind> <text>` line to the log.
 
-`send_test` posts `TEST_MESSAGE` whether or not `enabled` is true, writes no log line and
-answers whether Telegram accepted it; refused settings or a missing token or chat id answer
-False without a request.
+`send_test_result` posts `TEST_MESSAGE` whether or not `enabled` is true, writes no log line and
+answers `(delivered, reason)`. Without a request the reason is `settings missing` (no file),
+`settings refused` (the file is refused, or the token fails `valid_token` or the chat fails
+`valid_chat`) or `settings incomplete` (no token or no chat id). Otherwise it is the request's
+reason: `HTTP <code>` with the fixed cause `CAUSES` names, `ok false` or an exception class name.
+`send_test` answers only whether Telegram accepted it.
+
+`CAUSES` rows `(status, needle, cause)` turn an HTTP error body into a fixed cause: the first
+row with that status whose needle is in the lowercased `description` of the JSON error body.
+Telegram's own words are never returned, and `send_message` keeps its plain `HTTP <code>`.
+
+`TOKEN_PATTERN` and `CHAT_PATTERN` are what `valid_token` and `valid_chat` accept: a `str` that
+fully matches (`<digits>:<token characters>`; a numeric chat id, or `@username`).
+
+`list_chats(bot_token)` posts `getUpdates` with an empty JSON body (it confirms no update) and
+answers `(chats, reason)`: each `Chat(id, title)` once, in order of first appearance, read from
+the `chat` of each `UPDATE_KINDS` member of every update. The title is the chat's title, else
+its first and last names, else `@username`, else its type, else its id, cut to 128 characters;
+a title that holds the token is shown as the id. The reason is `""`, `bad token` (nothing is
+requested), `HTTP <code>` with its cause, `ok false` or an exception class name; the token is
+never in it.
+
+`write_settings` refuses a settings folder that is a symlink, not a directory or owned by
+another uid with a `SettingsError` before it creates a file, and makes a wider folder 0700.
 """
 
 import http.client
 import json
 import os
+import re
 import stat
 import urllib.error
 import urllib.request
@@ -49,6 +71,25 @@ RELATIVE_SETTINGS = Path(".config/host-alerts/telegram.json")
 RELATIVE_LOG = Path(".local/state/host-alerts/alerts.log")
 TEST_MESSAGE = "Host alerts test: Telegram delivery from this host works."
 MAX_RESPONSE_BYTES = 65536
+TOKEN_PATTERN = re.compile(r"[0-9]{1,20}:[A-Za-z0-9_-]{1,200}")
+CHAT_PATTERN = re.compile(r"-?[0-9]{1,20}|@[A-Za-z0-9_]{5,32}")
+UPDATE_KINDS = ("message", "edited_message", "channel_post", "edited_channel_post",
+                "my_chat_member", "chat_member", "chat_join_request")
+# (HTTP status, lowercase needle in Telegram's description, fixed cause shown instead of it)
+CAUSES: tuple[tuple[int, str, str], ...] = (
+    (400, "chat not found", "chat not found"),
+    (403, "blocked by the user", "blocked by the user"),
+    (403, "not a member", "not a member"),
+    (403, "kicked", "removed from the chat"),
+    (409, "webhook is active", "webhook set"),
+    (409, "terminated by other getupdates request", "another reader"),
+)
+
+
+@dataclass(frozen=True)
+class Chat:
+    id: str
+    title: str
 
 
 @dataclass(frozen=True)
@@ -137,13 +178,30 @@ def read_settings(path: Path | None = None, *, uid: int | None = None) -> Settin
     return Settings(enabled, token, chat)
 
 
-def write_settings(settings: Settings, path: Path | None = None) -> None:
+def write_settings(settings: Settings, path: Path | None = None, *, uid: int | None = None) -> None:
     path = path if path is not None else settings_path()
+    uid = uid if uid is not None else os.geteuid()
     if not isinstance(settings.enabled, bool):
         raise ValueError("enabled is not a boolean")
     if settings.enabled and (_token(settings.bot_token) is None or _token(settings.chat_id) is None):
         raise ValueError("enabled settings need a bot_token and a chat_id")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except FileExistsError:
+        pass  # a non-directory is named by the check below
+    folder = os.lstat(path.parent)
+    if stat.S_ISLNK(folder.st_mode):
+        reason = "a symlink"
+    elif not stat.S_ISDIR(folder.st_mode):
+        reason = "not a directory"
+    elif folder.st_uid != uid:
+        reason = f"owned by uid {folder.st_uid}, not {uid}"
+    else:
+        reason = ""
+    if reason:
+        raise SettingsError(f"settings folder {path.parent} is {reason}")
+    if stat.S_IMODE(folder.st_mode) & 0o077:
+        os.chmod(path.parent, 0o700)
     body = json.dumps(
         {"enabled": settings.enabled, "bot_token": settings.bot_token, "chat_id": settings.chat_id},
         indent=2) + "\n"
@@ -158,11 +216,36 @@ def write_settings(settings: Settings, path: Path | None = None) -> None:
         raise
 
 
-def send_message(settings: Settings, text: str, *, api: str = API, timeout: float = 20.0) -> tuple[bool, str]:
+def valid_token(value: object) -> bool:
+    return isinstance(value, str) and TOKEN_PATTERN.fullmatch(value) is not None
+
+
+def valid_chat(value: object) -> bool:
+    return isinstance(value, str) and CHAT_PATTERN.fullmatch(value) is not None
+
+
+def _cause(status: int, error: urllib.error.HTTPError) -> str:
+    """The fixed cause an error body names, or "" (Telegram's own words are never returned)."""
+    try:
+        document = json.loads(error.read(MAX_RESPONSE_BYTES))
+    except (OSError, http.client.HTTPException, ValueError):
+        return ""
+    description = document.get("description") if isinstance(document, dict) else None
+    if not isinstance(description, str):
+        return ""
+    lowered = description.lower()
+    for code, needle, cause in CAUSES:
+        if code == status and needle in lowered:
+            return cause
+    return ""
+
+
+def _call(token: str | None, method: str, payload: dict, api: str, timeout: float) -> tuple[object, str, str]:
+    """One bot API POST: `(body | None, reason, cause)`; never raises, never shows the token."""
     try:
         request = urllib.request.Request(
-            f"{api}/bot{settings.bot_token}/sendMessage",
-            data=json.dumps({"chat_id": settings.chat_id, "text": text}).encode(),
+            f"{api}/bot{token}/{method}",
+            data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -170,14 +253,61 @@ def send_message(settings: Settings, text: str, *, api: str = API, timeout: floa
             code = response.status
             body = json.loads(response.read(MAX_RESPONSE_BYTES))
     except urllib.error.HTTPError as error:
-        return False, f"HTTP {error.code}"
+        return None, f"HTTP {error.code}", _cause(error.code, error)
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as error:
-        return False, type(error).__name__
+        return None, type(error).__name__, ""
     if code != 200:
-        return False, f"HTTP {code}"
+        return None, f"HTTP {code}", ""
+    return body, "", ""
+
+
+def send_message(settings: Settings, text: str, *, api: str = API, timeout: float = 20.0) -> tuple[bool, str]:
+    body, reason, _ = _call(settings.bot_token, "sendMessage",
+                            {"chat_id": settings.chat_id, "text": text}, api, timeout)
+    if reason:
+        return False, reason
     if not (isinstance(body, dict) and body.get("ok") is True):
         return False, "ok false"
     return True, ""
+
+
+def _title(chat: dict, chat_id: str, token: str) -> str:
+    names = " ".join(name for name in (chat.get("first_name"), chat.get("last_name"))
+                     if isinstance(name, str) and name)
+    username = chat.get("username")
+    candidates = (
+        chat.get("title"),
+        names,
+        f"@{username}" if isinstance(username, str) and username else "",
+        chat.get("type"),
+    )
+    title = next((text for text in candidates if isinstance(text, str) and text), chat_id)
+    return chat_id if token in title else title[:128]
+
+
+def list_chats(bot_token: str, *, api: str = API, timeout: float = 20.0) -> tuple[tuple[Chat, ...], str]:
+    """The chats the bot's pending updates name, each once, and a reason ("" on success)."""
+    if not valid_token(bot_token):
+        return (), "bad token"
+    body, reason, cause = _call(bot_token, "getUpdates", {}, api, timeout)
+    if reason:
+        return (), f"{reason} {cause}" if cause else reason
+    result = body.get("result") if isinstance(body, dict) and body.get("ok") is True else None
+    if not isinstance(result, list):
+        return (), "ok false"
+    chats: dict[str, Chat] = {}
+    for update in result:
+        if not isinstance(update, dict):
+            continue
+        for kind in UPDATE_KINDS:
+            part = update.get(kind)
+            chat = part.get("chat") if isinstance(part, dict) else None
+            identifier = chat.get("id") if isinstance(chat, dict) else None
+            if isinstance(identifier, int) and not isinstance(identifier, bool):
+                key = str(identifier)
+                if key not in chats:
+                    chats[key] = Chat(key, _title(chat, key, bot_token))
+    return tuple(chats.values()), ""
 
 
 def _record(log: Path, line: str) -> None:
@@ -224,11 +354,25 @@ def deliver(
     return outcome
 
 
-def send_test(path: Path | None = None, *, api: str = API) -> bool:
+def send_test_result(path: Path | None = None, *, api: str = API) -> tuple[bool, str]:
     try:
         loaded = read_settings(path)
+    except SettingsMissing:
+        return False, "settings missing"
     except SettingsError:
-        return False
+        return False, "settings refused"
     if loaded.bot_token is None or loaded.chat_id is None:
-        return False
-    return send_message(loaded, TEST_MESSAGE, api=api)[0]
+        return False, "settings incomplete"
+    if not (valid_token(loaded.bot_token) and valid_chat(loaded.chat_id)):
+        return False, "settings refused"
+    body, reason, cause = _call(loaded.bot_token, "sendMessage",
+                                {"chat_id": loaded.chat_id, "text": TEST_MESSAGE}, api, 20.0)
+    if reason:
+        return False, f"{reason} {cause}" if cause else reason
+    if not (isinstance(body, dict) and body.get("ok") is True):
+        return False, "ok false"
+    return True, ""
+
+
+def send_test(path: Path | None = None, *, api: str = API) -> bool:
+    return send_test_result(path, api=api)[0]
