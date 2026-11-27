@@ -113,7 +113,7 @@ class PastSetupVerdictTest(unittest.TestCase):
         self.assertEqual((code, report["verdict"], report["lane"]), (0, "met", "direct"))
 
     def test_a_delivery_started_in_the_activation_second_is_not_before_the_activation(self):
-        anchor = ANCHOR + timedelta(milliseconds=250)  # the activation row keeps microseconds, a run's start whole seconds
+        anchor = ANCHOR + timedelta(milliseconds=250)  # the activation keeps microseconds, a run's start does not
         write_run(self.root, "r", timedelta(0), direct_root_events(timedelta(0)), "deliver")
         write_run(self.root, "d", timedelta(0), [entry(HOUR)], "direct", parent="r")
         code, report = verify_checks.past_setup_verdict(self.root, anchor, ANCHOR + 3 * HOUR)
