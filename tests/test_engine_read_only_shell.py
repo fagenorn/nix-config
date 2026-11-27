@@ -1,8 +1,9 @@
-"""Contract tests for the read-only engine roles' shell: the planner and the two reviewers run read pipelines
-and command lists of the preapproved read shapes, and are denied every write, redirect and host write.
+"""Contract tests for the read-only engine roles' shell: the planner and the two reviewers run one plain read per
+Bash call and are denied every pipeline, command list, write, redirect and host write.
 
 The client's rules are modelled by tests/engine_permission_model.py; CI runs no client, so these cases pin the
-words each launch passes against that model, with the host's own allow rules in force.
+words each launch passes against that model, with the host's own allow rules in force, and the lifecycle guard's
+read-only check on top of them.
 """
 
 from __future__ import annotations
@@ -32,6 +33,16 @@ HOST_READS = ("git status", "git log", "git diff", "git worktree list", "gh pr v
               "gh pr checks", "gh issue view", "gh issue list", "artifact-budget",
               "~/.agents/bin/artifact-budget")
 DENIED_1740 = REPO_ROOT / "tests/fixtures/engine-session/result-denied-1740.json"
+ADMITTED = [
+    "git log --oneline -5", "git show HEAD:python/x.py", "git diff origin/main...HEAD --stat",
+    "git diff --check 0123abcd 4567ef01", "git show --cc 0123abcd", "git status --short", "git rev-parse HEAD",
+    "git merge-base HEAD origin/main", "git ls-files python", "git ls-tree -r HEAD --name-only",
+    "git log --grep='a$' -1", "git log --format=%H -3", "git log -S '[{]' -- python", "git diff 'HEAD~1'",
+    "grep -rn 'def launch' python", 'grep -n "a|b" python/x.py', "grep -rn -e '--output' python",
+    "ls python/agent_tools", "wc -l python/x.py", "cat README.md", "head -n 40 python/x.py",
+    "tail -n 20 python/x.py", "head", "sed -n 1,40p python/x.py", "sed -n '10,$p' python/x.py",
+    "git log origin/main --oneline -i --grep='question box'",
+]
 
 
 def _load_guard():
@@ -55,9 +66,9 @@ def launch_words(name: str) -> tuple[list[str], list[str]]:
 
 
 def read_only_admits(command: str, allowed: list[str], denied: list[str]) -> bool:
-    """The client's rules, then the guard's detaching check and its read-only-shell check (the session's switch)."""
+    """The client's rules, then the guard's detaching check and its one-plain-read check (the session's switch)."""
     return (client_admits(command, allowed, denied) and GUARD.detaching_word(command) is None
-            and not GUARD.read_only_shell_problem(command))
+            and GUARD.read_only_plain(command))
 
 
 class ReadOnlyShellTest(unittest.TestCase):
@@ -65,47 +76,61 @@ class ReadOnlyShellTest(unittest.TestCase):
     def setUpClass(cls):
         assert "Bash(git push:*)" in HOST and len(HOST) >= 10, HOST
 
-    def test_the_recorded_applies_call_is_admitted_by_each_read_only_role(self):
+    def test_the_recorded_applies_reads_run_one_plain_command_each_and_the_whole_call_is_refused(self):
         denials = json.loads(DENIED_1740.read_text(encoding="utf-8"))["permission_denials"]
         self.assertEqual(len(denials), 1)
         command = denials[0]["tool_input"]["command"]
-
-        for name in READ_ONLY_ROLES:
-            with self.subTest(name):
-                self.assertTrue(read_only_admits(command, *launch_words(name)))
-
-    def test_read_pipelines_and_command_lists_are_admitted(self):
-        admitted = [
-            "git log --oneline -5 | head",
-            "git ls-tree -r HEAD --name-only | grep -i -E 'engine|guard' | head -30",
-            "git show HEAD:python/x.py | head -80",
-            "git diff origin/main...HEAD --stat",
-            "git log --oneline -5 && git status --short",
-            "git rev-parse HEAD || git status",
-            "grep -rn 'def launch' python | head -20",
-            'grep -n "a|b" python/x.py',
-            "ls python/agent_tools; wc -l python/x.py",
-            "cat README.md | head -40",
-            "tail -n 20 python/x.py",
-            "head -n 40 python/x.py",
-            "git blame -L 1,10 python/x.py",
-            "git ls-files | wc -l",
-            "git merge-base HEAD origin/main",
-            "git show --cc 0123abcd",
-            "git diff --check 0123abcd 4567ef01",
+        segments = [
+            "git log origin/main --oneline -i --grep='question box'",
             "head",
+            "git ls-tree -r origin/main --name-only",
+            "grep -i -E 'console|ask'",
+            "head -30",
         ]
+        for segment in segments:
+            self.assertIn(segment, command)
+
+        self.assertFalse(GUARD.read_only_plain(command))
         for name in READ_ONLY_ROLES:
             words = launch_words(name)
-            for command in admitted:
+            with self.subTest(role=name, whole=True):
+                self.assertFalse(read_only_admits(command, *words))
+            for segment in segments:
+                with self.subTest(role=name, segment=segment):
+                    self.assertTrue(read_only_admits(segment, *words))
+
+    def test_the_guard_reads_one_plain_read_only_command_and_nothing_else(self):
+        refused = [
+            "git log | head", "git log; git status", "git log -1 && git status", "git rev-parse HEAD || git status",
+            "git log &", "git log > l.txt", "cat < f", "git log 2>&1", "git log $(rm x)", "git show `touch x`",
+            "cat $HOME/x", 'cat "$HOME"', 'grep x "!x"', "cat ${x}", "cat *.py", "cat f?", "ls [ab]",
+            "cat python/{a,b}.py", "ls ~", "git diff HEAD~1", "git log ^x", "git log # x", "grep 'a\\.b' f",
+            "git log\ngit status", "nohup git log", "timeout 5 git log", "env git log", "command git log",
+            "time git log", "xargs git log", "x=1 git log", "=git log", "cat =ls", "/usr/bin/git log", "sh -c 'git log'",
+            "git blame f", "git -C . log", "git -c core.pager=sh log", "git --no-pager log", "git checkout main",
+            "git log 'x", "git log --output=l.txt", "git diff --output d.patch", "git diff --outp=d.patch",
+            "git log --o=x", "git log -1 --OUTPUT=l.txt", "sed 1p f", "sed -n -i 1p f", "sed -n 1w f",
+            "sed -n 1p f -i", "sed -n 'e x' f", "sed -n s/a/b/p f", "git", "sed", "sed -n", "sed -n 1p", "",
+        ]
+        for command in ADMITTED:
+            with self.subTest(admitted=command):
+                self.assertIs(GUARD.read_only_plain(command), True)
+        for command in refused:
+            with self.subTest(refused=command):
+                self.assertIs(GUARD.read_only_plain(command), False)
+
+    def test_plain_reads_are_admitted_to_each_read_only_role(self):
+        for name in READ_ONLY_ROLES:
+            words = launch_words(name)
+            for command in ADMITTED:
                 with self.subTest(role=name, command=command):
                     self.assertTrue(read_only_admits(command, *words))
 
-    def test_writes_pushes_checkouts_resets_redirections_and_detaching_are_refused(self):
+    def test_writes_pushes_checkouts_resets_redirections_lists_and_detaching_are_refused(self):
         refused = [
             "git commit -m x", "git add f.py", "rm -rf build", "touch f", "mv a b", "cp a b",
             "git log | tee out.txt", "sed -i s/a/b/ f.py", "sed -n -ni '' 1p python/x.py",
-            "sed -n '1w out.txt' python/x.py", "sed -n 1,40p python/x.py", "git log --output=log.txt",
+            "sed -n '1w out.txt' python/x.py", "git log --output=log.txt",
             "git diff --output=d.patch", "git show --output=s.txt HEAD", "git fetch origin",
             "git push origin b", "git log -1 && git push origin b", "git worktree add ../x b",
             "git worktree remove ../x", "git worktree prune", "git branch -d b",
@@ -116,6 +141,8 @@ class ReadOnlyShellTest(unittest.TestCase):
             "git log --oneline | head > top.txt", "git log 2>/dev/null", "nohup git log", "setsid git log",
             "git log & disown", "git log $(rm x)", "git show `touch x`", 'grep -rn "$(rm -rf x)" python',
             "git -c core.pager=sh log", "sh -c 'git log'", "python3 -c 'print(1)'",
+            "git log --oneline -5 | head", "git log -1; git status", "git blame -L 1,10 python/x.py",
+            "cat README.md | head -40",
         ]
         for name in READ_ONLY_ROLES:
             words = launch_words(name)
@@ -123,7 +150,7 @@ class ReadOnlyShellTest(unittest.TestCase):
                 with self.subTest(role=name, command=command):
                     self.assertFalse(read_only_admits(command, *words))
 
-    def test_arguments_fed_on_stdin_to_a_git_read_are_refused_to_each_read_only_role(self):
+    def test_every_earlier_rebuilt_or_fed_output_spelling_is_refused(self):
         fed = [
             "cat args.txt | xargs git diff",
             "grep -h output args.txt | xargs git log",
@@ -133,16 +160,6 @@ class ReadOnlyShellTest(unittest.TestCase):
             'cat args.txt | x""args git diff',
             "cat args.txt | XARGS git diff",
         ]
-        for name in READ_ONLY_ROLES:
-            words = launch_words(name)
-            for command in fed:
-                with self.subTest(role=name, command=command):
-                    self.assertFalse(read_only_admits(command, *words))
-        for command in fed[:3]:  # the client alone strips the bare xargs, so no rule words refuse these
-            with self.subTest(client_alone=command):
-                self.assertTrue(client_admits(command, *launch_words("reviewer")))
-
-    def test_a_git_output_option_the_shell_rebuilds_is_refused_to_each_read_only_role(self):
         rebuilt = [
             'git diff --out""put=d.patch HEAD~1',
             "git log --outp\\ut=l.txt -1",
@@ -173,42 +190,28 @@ class ReadOnlyShellTest(unittest.TestCase):
             "git log -\\-outp{u,u}t=l.txt -1",
             "git diff${IFS}-\\-out{p,p}ut=d.patch HEAD~1",  # joined to the word before it
         ]
-        for command in expanded:
+        isolated = [  # a plain revision and exactly one refusing construct, so one rule's removal turns one red
+            'git diff --out""put=d.patch 0123abcd',  # the literal text is `--output`: the `--output` rule
+            "git diff --out{p,p}ut=d.patch 0123abcd",  # brace
+            "git diff --{output,output}=d.patch 0123abcd",  # brace
+            "git diff 0123abcd$IFS--output=d.patch",  # unquoted `$`, the `$IFS` spelling
+            'git diff "0123abcd${IFS}--output=d.patch"',  # `$` inside double quotes, the `${IFS}` spelling
+            "git diff --$'o'utput=d.patch 0123abcd",  # unquoted `$`, the `$'...'` spelling
+            "git diff --out$@put=d.patch 0123abcd",  # unquoted `$`, the `$@` spelling
+            'git diff "--out$*put=d.patch" 0123abcd',  # `$` inside double quotes, the `$*` spelling
+            'git diff "--${x:-output}=d.patch" 0123abcd',  # `$` inside double quotes, the `${...}` spelling
+        ]
+        for command in fed + rebuilt + expanded + isolated:
             with self.subTest(guard_alone=command):
-                self.assertTrue(GUARD.read_only_shell_problem(command))
-        for command in ("git log --grep='a$' -1", "git log --format=%H -3", "git log --grep=x --oneline",
-                        "git show HEAD:python/x.py", "git log -S '[{]' -- python"):
-            with self.subTest(guard_alone_admitted=command):
-                self.assertFalse(GUARD.read_only_shell_problem(command))
+                self.assertIs(GUARD.read_only_plain(command), False)
         for name in READ_ONLY_ROLES:
             words = launch_words(name)
-            for command in rebuilt + expanded:
+            for command in fed + rebuilt + expanded + isolated:
                 with self.subTest(role=name, command=command):
                     self.assertFalse(read_only_admits(command, *words))
-            with self.subTest(role=name, admitted="a search for the text"):
-                self.assertTrue(read_only_admits("grep -rn -e '--output' python", *words))
-        for command in rebuilt[:3]:  # the client's rule words read the literal text only
-            with self.subTest(client_alone=command):
-                self.assertTrue(client_admits(command, *launch_words("reviewer")))
 
-    def test_the_guard_refuses_a_git_output_option_only_in_a_read_only_shell_session(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            wrapper = real_guard(Path(tmp) / "guard")
-            for switched in (True, False):
-                env = {key: value for key, value in os.environ.items() if key != engine_session.READ_ONLY_SHELL_SWITCH}
-                if switched:
-                    env[engine_session.READ_ONLY_SHELL_SWITCH] = "1"
-                payload = json.dumps({"tool_name": "Bash",
-                                      "tool_input": {"command": 'git diff --out""put=d.patch HEAD~1'}})
-                done = subprocess.run([str(wrapper)], input=payload, env=env, capture_output=True, text=True,
-                                      cwd=tmp, timeout=60, check=False)
-                with self.subTest(switched=switched):
-                    self.assertEqual("refused in a read-only shell session" in done.stderr, switched)
-                    if switched:
-                        self.assertEqual(done.returncode, 2, done.stderr)
-
-    def test_the_guard_refuses_xargs_only_in_a_read_only_shell_session(self):
-        def refusal(command: str, switched: bool) -> subprocess.CompletedProcess:
+    def test_the_guard_refuses_anything_but_one_plain_read_in_a_read_only_shell_session(self):
+        def run(command: str, switched: bool) -> subprocess.CompletedProcess:
             env = {key: value for key, value in os.environ.items() if key != engine_session.READ_ONLY_SHELL_SWITCH}
             if switched:
                 env[engine_session.READ_ONLY_SHELL_SWITCH] = "1"
@@ -219,11 +222,26 @@ class ReadOnlyShellTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             wrapper = real_guard(Path(tmp) / "guard")
             self.assertEqual(GUARD.READ_ONLY_SHELL_ENV, engine_session.READ_ONLY_SHELL_SWITCH)
-            refused = refusal("cat args.txt | xargs git diff", True)
+            refused = run("git log --oneline -3 | head", True)
             self.assertEqual(refused.returncode, 2, refused.stderr)
-            self.assertIn("`xargs` and git `--output` refused in a read-only shell session", refused.stderr)
-            self.assertNotIn("refused in a read-only", refusal("cat args.txt | xargs git diff", False).stderr)
-            self.assertEqual(refusal("git log --oneline -3 | head", True).returncode, 0)
+            self.assertIn(GUARD.READ_ONLY_SHELL_REFUSAL, refused.stderr)
+            self.assertNotIn("one plain command per Bash call", run("git log --oneline -3 | head", False).stderr)
+            self.assertEqual(run("git log --oneline -3", True).returncode, 0)
+            short = run("git", True)  # a raise would exit 1 and let the call run
+            self.assertEqual(short.returncode, 2, short.stderr)
+            self.assertIn(GUARD.READ_ONLY_SHELL_REFUSAL, short.stderr)
+            detaching = run("nohup git log", True)
+            self.assertEqual(detaching.returncode, 2, detaching.stderr)
+            self.assertIn(GUARD.READ_ONLY_SHELL_REFUSAL, detaching.stderr)
+            self.assertNotIn("background mode", detaching.stderr)
+            unswitched = run("nohup git log", False)
+            self.assertEqual(unswitched.returncode, 2, unswitched.stderr)
+            self.assertIn("background mode", unswitched.stderr)
+
+    def test_the_guard_and_the_launch_hold_one_allow_list(self):
+        self.assertEqual(engine_session.READ_ONLY_PROGRAMS, GUARD.READ_ONLY_PROGRAMS)
+        self.assertEqual(engine_session.READ_ONLY_BASH,
+                         tuple(f"Bash({program}:*)" for program in GUARD.READ_ONLY_PROGRAMS))
 
     def test_only_a_read_only_shell_role_gets_the_switch(self):
         planner = read_role(AGENTS, "planner")
@@ -302,7 +320,8 @@ class ReadOnlyShellTest(unittest.TestCase):
         plain = engine_session.denial_prompt(implementer, calls)
         whole_shell = engine_session.denial_prompt(whole, calls)
 
-        self.assertIn("Shell rules allowing a command: Bash(git diff:*)", read_only)
+        self.assertIn("Shell rules allowing a command: "
+                      + ", ".join(engine_session.shell_rules(read_role(AGENTS, "reviewer"))[0]), read_only)
         self.assertIn("No `>` redirection runs.", read_only)
         self.assertNotIn("host", read_only)
         self.assertIn("host settings' own allow rules", plain)

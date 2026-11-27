@@ -43,10 +43,11 @@ flagged or not (`is_miss`). Any other reading without a usable reply is never re
 run resumes a session its predecessor left interrupted with `CONTINUE_PROMPT`, which asks it to finish
 the task it was given and then give only the structured answer.
 
-The role's `Bash` stays in `--tools` but is preapproved only as the read-only shapes of
-`READ_ONLY_BASH`, each a prefix rule, so a pipeline or command list whose every part is one of them runs
-(the client splits at `|`, `;`, `&&`, `||` and `&`); under `dontAsk` any other shell command is denied.
-`sed` is not among them, since no rule holds it to printing. `READ_ONLY_DENIED` is passed as
+The role's `Bash` stays in `--tools` but is preapproved only as one prefix rule per `READ_ONLY_PROGRAMS`
+entry (`READ_ONLY_BASH`), and the read-only-shell switch makes the lifecycle guard refuse anything that is
+not one plain call of one of them, so a pipeline or command list of allowed parts no longer runs (the
+client alone would split it at `|`, `;`, `&&`, `||` and `&` and admit it); under `dontAsk` any other shell
+command is denied. `READ_ONLY_DENIED` is passed as
 `--disallowedTools` (a deny rule outranks an allow rule from any source): it refuses the git `--output`
 forms, any `>` (even `2>/dev/null`) and, by `HOST_WRITING`, each write the host settings allow. The
 `git -C <dir>` forms are not admitted. The detaching words are the lifecycle guard's to refuse (the client
@@ -101,8 +102,8 @@ names the bound the engine's own clock fires.
 launcher starts the client only on `$HOME/.claude/settings.json`, the file `engine deliver` checked. It
 also drops `CLAUDE_CODE_SIMPLE` (`BARE_SWITCH`), the client's bare-mode switch, which would skip the hooks.
 For a read-only shell role (`read_only_shell`) the shell gives the launch `role_environment`: it holds
-`CLAUDE_READ_ONLY_SHELL` (`READ_ONLY_SHELL_SWITCH`), which makes the lifecycle guard refuse `xargs`: the client
-strips a bare `xargs`, so no rule sees the arguments it feeds a git read from stdin (`--output=<file>`).
+`CLAUDE_READ_ONLY_SHELL` (`READ_ONLY_SHELL_SWITCH`), which makes the lifecycle guard admit only one plain read
+per call: the client strips wrappers and splits a command list, so no rule sees the whole call.
 
 This module imports no `engine_core`.
 """
@@ -160,10 +161,10 @@ USAGE_LIMIT = "usage-limit"
 API_ERROR = "api-error"
 GRACE_SECONDS = 5
 DRAIN_SECONDS = 5
-READ_ONLY_BASH: tuple[str, ...] = (
-    *(f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
-                                        "blame", "merge-base", "ls-tree")),
-    *(f"Bash({program}:*)" for program in ("grep", "head", "tail", "wc", "ls", "cat")))
+READ_ONLY_PROGRAMS: tuple[str, ...] = (
+    "git log", "git show", "git diff", "git ls-tree", "git ls-files", "git status", "git rev-parse",
+    "git merge-base", "grep", "ls", "wc", "cat", "head", "tail", "sed -n")
+READ_ONLY_BASH: tuple[str, ...] = tuple(f"Bash({program}:*)" for program in READ_ONLY_PROGRAMS)
 GIT_WRITING: tuple[str, ...] = tuple(
     f"Bash(git {verb}*--output*)" for verb in ("diff", "log", "show"))
 HOST_WRITING: tuple[str, ...] = tuple(

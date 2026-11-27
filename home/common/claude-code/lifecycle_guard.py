@@ -80,11 +80,11 @@ heredoc body, a comment, `nohup.out` and a word handed to `xargs` or `timeout` a
 so does a slugged branch or worktree name such as `issue-7-refuse-nohup`. A commit message that names a word is
 refused; reword it or use `git commit -F`.
 
-A session whose environment holds a non-empty `CLAUDE_READ_ONLY_SHELL` (a role holding `Bash` only as read-only
-shapes) is also refused, read the same way, the whole word `xargs` and `--output` after a `git` word: a rule sees
-neither the arguments `xargs` feeds from stdin nor `--out""put` rebuilt by the shell (`grep -e '--output'` still runs).
-So is, after a `git` word, an option name that holds an expansion, a brace alternative or an escape
-(`--out{p,p}ut`, `--${x:-output}`) and a word that opens with one (`$'\055\055output'`).
+A session whose environment holds a non-empty `CLAUDE_READ_ONLY_SHELL` is refused every command that is not one plain
+call of a program in `READ_ONLY_PROGRAMS` (`read_only_plain`). A plain call has no pipe, list, redirection,
+substitution, expansion, glob, backslash or wrapper, `git` takes a listed subcommand as its second word and no option
+naming or abbreviating `--output`, and `sed` runs only as `sed -n <line>[,<line>]p <file>...`. The refusal
+(`READ_ONLY_SHELL_REFUSAL`) names the Read and Grep tools.
 
 Transmitting git invocations
 ----------------------------
@@ -971,17 +971,15 @@ DETACHING_DEFAULT_PATTERN = re.compile(
 # quote (`no$''hup`), then every backslash, quote, brace and comma, which
 # rebuilds `no''hup`, `no\hup` and `no{,}hup`.
 DETACHING_DELETED = re.compile(r"\$(?=['\"])|[\\'\"{},]")
-# A read-only shell session refuses `xargs` (it feeds arguments no rule can read) and `--output` after a `git`
-# word (it writes a file), each in the raw text or its deletion copy, bounded as a detaching word is.
+# A read-only shell session runs one plain call of a listed program: only the hook sees the whole command.
 READ_ONLY_SHELL_ENV = "CLAUDE_READ_ONLY_SHELL"
-READ_ONLY_SHELL_PATTERN = re.compile(
-    r"(?:(?<![A-Za-z0-9_-])|(?<=[cs])|(?<=\$[0-9!@*]))xargs(?![A-Za-z0-9_-])"
-    r"|(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_-])[\s\S]*?--output(?![A-Za-z0-9_-])",
-    re.IGNORECASE | re.ASCII,
-)
+READ_ONLY_PROGRAMS = ("git log", "git show", "git diff", "git ls-tree", "git ls-files", "git status",
+                      "git rev-parse", "git merge-base", "grep", "ls", "wc", "cat", "head", "tail", "sed -n")
 READ_ONLY_SHELL_REFUSAL = (
-    "`xargs` and git `--output` refused in a read-only shell session: the first hands a command arguments from "
-    "stdin and the second writes a file, and no shell rule can read either; use the file tools")
+    "Refused because a read-only session allows only one plain command per Bash call: split a pipeline or "
+    f"command list into separate calls, each one of {', '.join(READ_ONLY_PROGRAMS[:-1])} or "
+    f"{READ_ONLY_PROGRAMS[-1]} with no `|`, `;`, `&&`, redirection, expansion, glob, backslash or git "
+    "`--output`, or use the Read and Grep tools to read and search files.")
 CD_PRELUDE_PROBLEM = (
     "the directory the verb runs in cannot be resolved: a directory change is "
     "accepted only as one leading cd <absolute directory> && before a single "
@@ -995,6 +993,8 @@ CD_PRELUDE_PROBLEM = (
 # history expansion).
 PLAIN_WORD = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
 DOUBLE_QUOTE_ACTIVE = frozenset('"$`\\!')
+READ_ONLY_PIECE = re.compile(
+    f"({PLAIN_WORD.pattern})|'([^']*)'|\"([^{re.escape(''.join(sorted(DOUBLE_QUOTE_ACTIVE)))}]*)\"")
 LIFECYCLE_VERBS = (
     ("git", "push"), ("git", "branch", "-d"), ("gh", "pr", "create"),
     ("gh", "pr", "merge"), ("gh", "release", "create"),
@@ -2998,24 +2998,26 @@ def detaching_word(command):
     return None
 
 
-def read_only_rebuilt(command):
-    """True when, after a `git` word with quotes and backslashes removed (a quote between two dashes joins them), a
-    word opens with an expansion (`$'\\055\\055output'`) or its name, up to `=`, holds `$`, a backtick, a brace or a
-    parenthesis and leads with a dash or holds two (`-"-"out{p,p}ut`, `--${x:-output}`, `diff${IFS}--out$@put`)."""
-    text = re.sub(r"[\\'\"]", "", command.replace("\\\n", ""))
-    git = re.search(r"(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_-])", text, re.IGNORECASE | re.ASCII)
-    for word in text[git.end():].split() if git else ():
-        name = word.split("=", 1)[0]
-        if word[0] in "$`{" or (name[0] == "-" or "--" in name) and any(mark in name for mark in "$`{}()"):
-            return True
-    return False
-
-
-def read_only_shell_problem(command):
-    """True when `command`, read as `detaching_word` reads it, holds `xargs` or `--output` after a `git` word, or
-    a `git` option name, or a word's opening, the shell builds by expansion (`read_only_rebuilt`)."""
-    return (any(READ_ONLY_SHELL_PATTERN.search(text) for text in detaching_texts(command))
-            or read_only_rebuilt(command))
+def read_only_plain(command):
+    """True only for one plain call of a listed read program, read as the module docstring says."""
+    words, end = [], 0
+    for piece in READ_ONLY_PIECE.finditer(command):
+        gap = command[end:piece.start()]
+        if gap.strip(" \t") or (not words or gap) and command[piece.start()] == "=":
+            return False
+        text = "".join(part or "" for part in piece.groups())
+        words[-1:] = [words[-1] + text] if words and not gap else [*words[-1:], text]
+        end = piece.end()
+    if re.search(r"[\\\x00-\x08\x0a-\x1f]", command) or command[end:].strip(" \t"):
+        return False
+    words = words or [""]
+    if words[0] == "sed":
+        return (len(words) >= 4 and words[1] == "-n" and re.fullmatch(r"(?:\d+|\$)(?:,(?:\d+|\$))?p", words[2])
+                is not None and not any(word.startswith("-") for word in words[3:]))
+    git = words[0] == "git"
+    names = [word.split("=", 1)[0].lower() for word in words[2:]] if git else []
+    return (" ".join(words[:2]) if git else words[0]) in READ_ONLY_PROGRAMS and not any(
+        name.startswith("--output") or len(name) >= 3 and "--output".startswith(name) for name in names)
 
 
 def lifecycle_words(command):
@@ -6825,10 +6827,11 @@ def main():
     if not isinstance(command, str):
         return block("invalid hook input: expected tool_input.command to be a string")
 
+    limited = os.environ.get(READ_ONLY_SHELL_ENV)
     word = detaching_word(command)
     if word is not None:
-        return block(f"detaching command `{word}` refused: {DETACHING_ROUTES}")
-    if os.environ.get(READ_ONLY_SHELL_ENV) and read_only_shell_problem(command):
+        return block(READ_ONLY_SHELL_REFUSAL if limited else f"detaching command `{word}` refused: {DETACHING_ROUTES}")
+    if limited and not read_only_plain(command):
         return block(READ_ONLY_SHELL_REFUSAL)
 
     base, reason = load_base_policy(args.base_policy)

@@ -244,10 +244,9 @@ LAUNCHER_STANDIN = (
     "sys.argv[1]]).wait()")
 
 
-READ_ONLY = ("Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),"
-             "Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git blame:*),"
-             "Bash(git merge-base:*),Bash(git ls-tree:*),Bash(grep:*),Bash(head:*),"
-             "Bash(tail:*),Bash(wc:*),Bash(ls:*),Bash(cat:*)")
+READ_ONLY = ("Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git ls-tree:*),Bash(git ls-files:*),"
+             "Bash(git status:*),Bash(git rev-parse:*),Bash(git merge-base:*),Bash(grep:*),Bash(ls:*),"
+             "Bash(wc:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(sed -n:*)")
 # `git diff`, `git log` and `git show` all write a file given `--output=<file>`, which the prefix
 # patterns above would preapprove; a redirect writes any file; and the host settings allow each host
 # write below. These deny rules (checked first, outranking an allow rule from any source) refuse them.
