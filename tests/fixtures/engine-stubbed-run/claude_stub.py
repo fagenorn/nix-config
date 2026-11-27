@@ -17,7 +17,9 @@ committed, or aborted when `resolve` is absent); `"same_head": {"worktree"}` ans
 `"leave": {"worktree", "path", "text"}` writes that file in the worktree after every other effect
 and neither adds nor commits it (one untracked file, no head moved);
 `"switch": {"worktree", "branch"}` checks out a new branch of that name in the worktree after the
-others, and `"miss": true` gives no structured answer after every effect. It appends `{"argv", "cwd", "key", "prompt"}` (`cwd` being its working directory) as one JSON line to `<log>`, `key` being the
+others, and `"miss": true` gives no structured answer after every effect. An entry of the `{"reply": ...}` form
+may carry `"sleep": <seconds>`: the first launch of that entry that is not a `--resume` waits that long before any
+effect, so a test can kill the engine while the session is open; no later launch waits. It appends `{"argv", "cwd", "key", "prompt"}` (`cwd` being its working directory) as one JSON line to `<log>`, `key` being the
 step id (never the visit), writes `{"account": "stub"}` to the file named by
 `CLAUDE_ACCOUNT_ANSWER` when that is set, and prints
 `tests/fixtures/engine-session/result-normal.json` with `structured_output` replaced by the
@@ -33,6 +35,7 @@ import shutil
 import subprocess
 import tempfile
 import sys
+import time
 from pathlib import Path
 
 NORMAL = Path(__file__).resolve().parents[1] / "engine-session" / "result-normal.json"
@@ -179,6 +182,11 @@ def main(argv: list[str]) -> int:
     else:
         if record is not None:
             record.unlink(missing_ok=True)
+        slept = Path(log + ".slept") / str(name)
+        if "--resume" not in words and name is not None and not slept.exists():
+            slept.parent.mkdir(parents=True, exist_ok=True)
+            slept.touch()
+            time.sleep(scenario[name].get("sleep", 0))
         run_entry(result, scenario, name)
         if record is not None and "structured_output" in result:
             record.parent.mkdir(parents=True, exist_ok=True)
