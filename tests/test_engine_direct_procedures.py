@@ -180,10 +180,10 @@ class DirectProcedureTest(unittest.TestCase):
         for check in ("revert-check", "lite-revert-check", "escalated-revert-check", "full-revert-check"):
             with self.subTest(check=check):
                 one = step(direct, check)
-                self.assertEqual((one["kind"], one["command"], one["holds"]), ("command", "revert-check", "head"))
+                self.assertEqual((one["kind"], one["command"], one["holds"]), ("command", "revert-check", "run"))
                 self.assertEqual(one["in"], ["preflight.worktree_path", "preflight.integration_branch"])
-                self.assertEqual((one["on"]["refused"], one["on"]["out-of-bounds"]),
-                                 ("revert-check-unavailable", "revert-check-unavailable"))
+                self.assertEqual((one["on"]["refused"], one["on"]["out-of-bounds"], one["on"]["failed"]),
+                                 ("revert-check-unavailable",) * 3)
         self.assertEqual(step(direct, "revert-check")["on"]["ok"], "implemented")
         self.assertEqual(step(direct, "implement")["on"]["done"], "revert-check")
         self.assertEqual(step(direct, "implement")["on"]["blocked"], "revert-check")
@@ -203,6 +203,30 @@ class DirectProcedureTest(unittest.TestCase):
         reviewing = replayed(events + reported("lite-revert-check", "ok", CHECKED))
         self.assertEqual((type(reviewing.action), reviewing.action.step, reviewing.action.visit),
                          (engine_core.StartSession, "lite-rereview", 1))
+
+    def test_a_checker_that_crashes_before_its_json_enters_the_retry_stop(self):
+        stopped = replayed(reported("preflight", "clear", PREFLIGHT) + reported("implement", "done", IMPLEMENTED)
+                           + reported("revert-check", "failed", {}))
+        self.assertEqual((type(stopped.action), stopped.action.name, stopped.action.need),
+                         (Stop, "revert-check-unavailable", "retry"))
+
+    def test_a_check_stored_at_one_head_is_not_stale_when_the_checkout_of_the_run_moves(self):
+        """The engine reads the head of the project's checkout, which a pull moves while a run is cut."""
+        events = (to_the_lite_group() + lite_round(lite_review("findings", NAMED))
+                  + [{"type": "entered", "step": "lite-fix"}])
+        for name in ("revert-check", "lite-revert-check"):
+            with self.subTest(check=name):
+                stored = [{**event, "head": "a" * 40} if event.get("step") == name and event["type"] == "outcome"
+                          else event for event in events]
+                if name == "lite-revert-check":
+                    fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": [],
+                           "declines": []}
+                    stored = (events[:-1] + reported("lite-fix", "done", fix)
+                              + [{**event, "head": "a" * 40} if event["type"] == "outcome" else event
+                                 for event in reported("lite-revert-check", "ok", CHECKED)]
+                              + [{"type": "entered", "step": "lite-rereview"}])
+                moved = engine_core.reentry(load(PROCEDURES, "direct"), SHIPPED_INPUTS, stored, "b" * 40)
+                self.assertNotIn(name, moved.stale)
 
     def test_a_fix_with_no_commit_stops_direct_fix(self):
         fix = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": [], "declines": []}

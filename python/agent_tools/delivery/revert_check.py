@@ -2,7 +2,8 @@
 
 `revert-check --worktree-path <abs path> --integration-branch <name>` (both required; a usage error is
 exit 2) prints exactly one compact JSON line, keys sorted, and exits 0 whatever it finds:
-`{base, head, new_tests, reason, still_passing, verdict}`. `verdict` is always `ok`; `base` is the
+`{base, head, new_tests, reason, still_passing, verdict}`. `verdict` is `ok` whenever the checker gets to print
+(a checker that dies first prints no JSON and the engine grades it `failed`); `base` is the
 merge base of the worktree's `HEAD` and `refs/remotes/origin/<branch>` and `head` is the worktree's
 `HEAD` (each `""` when unread); `new_tests` lists the change's new test ids sorted by file path then
 id; `still_passing` is the subset whose run exited 0, in the same order; `reason` is `""` when every
@@ -17,7 +18,10 @@ find ends that branch). Its id is `<module>.<Class>.<method>`, `<module>` being 
 worktree root with `.py` dropped and `/` replaced by `.`. It is new when the file at the merge base
 (absent counts as empty) lacks `<Class>.<method>`. Only `.py` files changed `A` or `M` between the
 merge base and `HEAD` (`git diff --no-renames`) are read, as the blob bytes (so a byte-order mark or a
-coding declaration is the parser's). A blob git cannot read ends the check with its error in `reason`.
+coding declaration is the parser's). A blob git cannot read ends the check with its error in `reason`. A
+changed `.py` file Python cannot parse has no test looked for in it, and `reason` starts with `changed Python
+files that could not be parsed, so no test was looked for in them: <path>: <error>; ...`. A base named by
+`from <module> import TestCase as <Alias>` is the unittest class, as a bare `TestCase` is.
 A change with no new test returns empty lists and `reason ""` and creates nothing.
 
 The check makes a scratch directory with `tempfile.mkdtemp(prefix="revert-check-", dir=<scratch
@@ -38,7 +42,11 @@ base (it would lead out of the scratch), and a new test's top-level directory th
 shadow it. Each new test then runs once as `python -m unittest <id>` with the scratch checkout as the
 working directory, no standard stream inherited, in its own session behind a small watcher that kills
 the session when the checker dies; the guard and the watcher are given the checker's pid, so a checker
-that dies before they start is noticed too; the group is also killed after `TEST_SECONDS`. Exit 0 is still passing, any other
+that dies before they start is noticed too; at that death, and after `TEST_SECONDS`, every process below the
+watcher is killed by its parent links (a service of a session of its own included) and then the watcher's group.
+Where the host has `sandbox-exec` (macOS) or `bwrap` (Linux) and it starts, the test runs under it so that
+nothing below the run's worktree, its git directory or the repository's common git directory can be written to
+(the scratch directory still can); a host where it cannot start runs the test unsealed. Exit 0 is still passing, any other
 exit or a timeout is not; a timeout adds `new tests stopped at the <n> s limit: <ids>` to `reason`, so a test
 the limit interrupted is told from one whose assertion failed. The tests' `PYTHONPATH` is the checkout, then `<checkout>/<D>` for each
 distinct non-empty `D` that is the parent of a top-level package tracked at the merge base (a tracked
@@ -139,20 +147,72 @@ for _ in range(100):
     time.sleep(%s)
 """ % (HOLDER_PREFIX, WATCH_SECONDS, WATCH_SECONDS)
 
-# Runs as `python -I -c WATCHER <id> <checker pid> [<python>]`: the test's session leader. It runs the test
-# (`<python> -m unittest <id>`, with no standard stream of the test shared with it) and, once the checker is gone,
-# kills its whole session. When it cannot start the test it writes why to its own standard error and exits 1, and
-# nothing else of it ever reaches that stream, so a message there is a launch error and never a test's outcome.
-WATCHER = """
-import os, signal, subprocess, sys, threading, time
+def descendants(root):
+    """The pids of every process below `root` by parent links, whatever session or group each one is in."""
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    children = {}
+    for line in listing.splitlines():
+        words = line.split()
+        if len(words) == 2 and all(word.isdigit() for word in words):
+            children.setdefault(int(words[1]), []).append(int(words[0]))
+    found, pending = set(), [root]
+    while pending:
+        for child in children.get(pending.pop(), ()):
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+def kill_tree(root):
+    """Kill every process below `root`, a service in a session of its own included, then `root`'s group.
+
+    The descendants are stopped round by round until a round finds none new (a stopped process forks nothing)
+    and only then killed, so none is reparented out of reach first."""
+    stopped = set()
+    for _ in range(20):
+        fresh = descendants(root) - stopped
+        if not fresh:
+            break
+        for pid in fresh:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except OSError:
+                pass
+        stopped |= fresh
+    for pid in stopped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        os.killpg(root, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+# Runs as `python -I -c WATCHER <id> <checker pid> [<python> [<seal argv as JSON>]]`: the test's session leader. It
+# runs the test (`<seal> <python> -m unittest <id>`, with no standard stream of the test shared with it) and, once
+# the checker is gone, kills every process below it. When it cannot start the test it writes why to its own
+# standard error and exits 1, and nothing else of it ever reaches that stream, so a message there is a launch
+# error and never a test's outcome.
+WATCHER = "import json, os, signal, subprocess, sys, threading, time\n" + inspect.getsource(
+    descendants) + inspect.getsource(kill_tree) + """
 parent = int(sys.argv[2])
 def watch():
     while os.getppid() == parent:
         time.sleep(%s)
-    os.killpg(0, signal.SIGKILL)
+    kill_tree(os.getpid())
 threading.Thread(target=watch, daemon=True).start()
+seal = json.loads(sys.argv[4]) if len(sys.argv) > 4 else []
+python = sys.argv[3] if len(sys.argv) > 3 else sys.executable
 try:
-    child = subprocess.Popen([sys.argv[3] if len(sys.argv) > 3 else sys.executable, "-m", "unittest", sys.argv[1]],
+    if seal and not os.access(python, os.X_OK):  # the seal's own exit would hide that the test never started
+        raise OSError("cannot execute " + python)
+    child = subprocess.Popen([*seal, python, "-m", "unittest", sys.argv[1]],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 except OSError as error:
     sys.stderr.write(str(error).replace("\\n", " ") + "\\n")
@@ -217,8 +277,9 @@ def _reaching(source: str | bytes, path: str, load: Load | None, memo: dict[str,
                for node in tree.body if isinstance(node, ast.ImportFrom) for alias in node.names}
     bases = {base.id for node in classes.values() for base in node.bases
              if isinstance(base, ast.Name) and base.id in imports and base.id not in classes}
-    imported: set[str] = set()
-    for name in sorted(bases):
+    # `from <module> import TestCase as Alias` names the unittest class itself, as a bare `TestCase` does.
+    imported: set[str] = {name for name in bases if imports[name][2] == "TestCase"}
+    for name in sorted(bases - imported):
         module, level, original = imports[name]
         for candidate in _module_paths(path, module, level) if load else ():
             if candidate not in memo:
@@ -292,18 +353,26 @@ def _loader(run_git: RunGit, worktree: str, revision: str) -> Load:
     return load
 
 
-def _new_tests(worktree: str, base: str, head: str, run_git: RunGit) -> tuple[list[tuple[str, str]], dict[str, bytes]]:
-    """The `(path, id)` of each new test, sorted by path then id, and the head blob of each file holding one."""
+def _new_tests(worktree: str, base: str, head: str, run_git: RunGit
+               ) -> tuple[list[tuple[str, str]], dict[str, bytes], list[str]]:
+    """The `(path, id)` of each new test, sorted by path then id, the head blob of each file holding one, and
+    `<path>: <error>` for each changed file Python could not parse (no test of it could be looked for)."""
     done = run_git("-C", worktree, "diff", "--no-renames", "--name-only", "--diff-filter=AM", "-z", base, head)
     if done.returncode:
         raise RuntimeError(f"git diff: {_last_line(done)}")
     found: list[tuple[str, str]] = []
     blobs: dict[str, bytes] = {}
+    unparsed: list[str] = []
     loaders = {revision: _loader(run_git, worktree, revision) for revision in (base, head)}
     for path in sorted(name for name in done.stdout.decode(errors="replace").split("\0") if name.endswith(".py")):
         text = _read(run_git, worktree, head, path)
         if text is None:
             raise RuntimeError(f"{path} is not in {head}")
+        try:
+            ast.parse(text)
+        except (SyntaxError, ValueError) as error:
+            unparsed.append(f"{path}: {type(error).__name__}: {error}")
+            continue
         before = _read(run_git, worktree, base, path)
         old = case_ids(before, path, loaders[base]) if before is not None else frozenset()
         module = path[:-len(".py")].replace("/", ".")
@@ -311,7 +380,7 @@ def _new_tests(worktree: str, base: str, head: str, run_git: RunGit) -> tuple[li
         if added:
             blobs[path] = text
             found.extend((path, f"{module}.{case}") for case in added)
-    return found, blobs
+    return found, blobs, unparsed
 
 
 def _tracked_inits(worktree: str, base: str, run_git: RunGit) -> set[str]:
@@ -443,19 +512,59 @@ def _guard(scratch_root: str | None) -> tuple["subprocess.Popen[str]", str]:
     return guard, holder
 
 
+def seal_argv(protected: Sequence[str], writable: str, *, system: str | None = None,
+              which: Callable[[str], str | None] = shutil.which, run: Callable[..., object] = subprocess.run) -> list[str]:
+    """The argv prefix under which a process cannot write below any path of `protected` (below `writable` it
+    still can), or `[]` when the host offers no working one.
+
+    macOS has `sandbox-exec` and Linux `bwrap` (read-only bind mounts); each is tried once on a command that
+    does nothing, so a host where it cannot start (an outer sandbox, no user namespaces) gets `[]` and the test
+    runs unsealed there, as before."""
+    system = sys.platform if system is None else system
+    if system == "darwin" and (tool := which("sandbox-exec")):
+        names = [f"P{index}" for index in range(len(protected))]
+        profile = ("(version 1)(allow default)(deny file-write* "
+                   + "".join(f'(subpath (param "{name}"))' for name in names)
+                   + ')(allow file-write* (subpath (param "W")))')
+        argv = [tool, *(word for name, path in zip(names, protected) for word in ("-D", f"{name}={path}")),
+                "-D", f"W={writable}", "-p", profile]
+    elif system.startswith("linux") and (tool := which("bwrap")):
+        argv = [tool, "--bind", "/", "/", *(word for path in protected for word in ("--ro-bind", path, path)),
+                "--bind", writable, writable, "--"]
+    else:
+        return []
+    try:
+        done = run([*argv, sys.executable, "-I", "-c", "pass"], capture_output=True, stdin=subprocess.DEVNULL,
+                   timeout=GIT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return argv if getattr(done, "returncode", 1) == 0 else []
+
+
+def _protected_paths(worktree: str, run_git: RunGit) -> list[str]:
+    """The real paths of the run's worktree, its git directory and the repository's common git directory."""
+    done = run_git("-C", worktree, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
+    if done.returncode:
+        raise OSError(f"git rev-parse --git-dir: {_last_line(done)}")
+    paths = [worktree, *done.stdout.decode(errors="replace").split("\n")]
+    return sorted({os.path.realpath(path) for path in paths if path})
+
+
 class _TimedOut(Exception):
     """A test ran past its time limit and its session was killed."""
 
 
-def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds: float) -> bool:
+def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds: float,
+            seal: Sequence[str] = ()) -> bool:
     """Whether the test exits 0; an OSError when the watcher could not start it, `_TimedOut` when it ran too long."""
     process = subprocess.Popen(
-        [sys.executable, "-I", "-c", WATCHER, identifier, str(os.getpid()), TEST_PYTHON], cwd=scratch,
-        env=dict(env), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        [sys.executable, "-I", "-c", WATCHER, identifier, str(os.getpid()), TEST_PYTHON, json.dumps(list(seal))],
+        cwd=scratch, env=dict(env), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         start_new_session=True)
     try:
         _, error = process.communicate(timeout=test_seconds)
     except subprocess.TimeoutExpired:
+        kill_tree(process.pid)  # the watcher is not reaped yet, so its pid is still its own
         raise _TimedOut(identifier) from None
     finally:
         try:
@@ -486,11 +595,14 @@ def check(worktree: str, integration_branch: str, *, environ: Mapping[str, str],
                                 f"could not be read: {_last_line(failed)}")
             return result
         result["base"] = base.stdout.decode().strip()
-        found, blobs = _new_tests(worktree, result["base"], result["head"], run_git)
+        found, blobs, unparsed = _new_tests(worktree, result["base"], result["head"], run_git)
         result["new_tests"] = [identifier for _, identifier in found]
         if found:
             _run_in_scratch(worktree, result, found, blobs, run_git, environ, scratch_root,
                             test_seconds, budget_seconds, started)
+        if unparsed:
+            message = f"changed Python files that could not be parsed, so no test was looked for in them: {'; '.join(unparsed)}"
+            result["reason"] = f"{message} {result['reason']}".strip()
     except Exception as error:
         result["reason"] = f"the check failed: {type(error).__name__}: {error}"
     return result
@@ -508,6 +620,7 @@ def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], b
             if done.returncode:
                 raise OSError(f"git read-tree: {_last_line(done)}")
             objects = _object_directory(worktree, run_git)
+            seal = seal_argv(_protected_paths(worktree, run_git), holder)
         except (OSError, subprocess.SubprocessError) as error:
             result["reason"] = f"the scratch worktree could not be made: {error}"
             return
@@ -524,7 +637,7 @@ def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], b
             _checkout(worktree, holder, tree, blobs, run_git, base=result["base"], links=links, objects=objects)
             env["PYTHONPATH"] = _python_path(tree, worktree, environ.get("PYTHONPATH", ""), inits)
             try:
-                passed = _passes(identifier, tree, env, test_seconds)
+                passed = _passes(identifier, tree, env, test_seconds, seal)
             except _TimedOut:
                 timed_out.append(identifier)
                 continue

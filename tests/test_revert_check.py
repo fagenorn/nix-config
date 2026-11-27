@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -22,7 +23,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery.engine_commands import PLATFORM_WALL_SECONDS
-from agent_tools.delivery.revert_check import BUDGET_SECONDS, TEST_SECONDS, WATCHER, case_ids, check, main
+from agent_tools.delivery.revert_check import (
+    BUDGET_SECONDS, TEST_SECONDS, WATCHER, case_ids, check, main, seal_argv)
 
 TIER = "integration"  # every case starts git and the tests as processes
 
@@ -47,8 +49,18 @@ PROOF_CHANGE = {FAREWELL_PATH: FAREWELL_SOURCE, FAREWELL_CHECK_PATH: FAREWELL_CH
 FAREWELL_ID = "checks.check_farewell.FarewellCheck.test_farewell_says_goodbye"
 GREET_ID = "checks.check_greet.GreetCheck.test_greet_keeps_the_name"
 BRANCH = "issue-1-topic"
-SLEEPER = ("import os\nimport time\nimport unittest\n\n\nclass SleepCheck(unittest.TestCase):\n"
-           "    def test_sleeps(self):\n        open({marker!r}, 'w').write(str(os.getpid()))\n        time.sleep(30)\n")
+SLEEPER = ("import os\nimport subprocess\nimport sys\nimport time\nimport unittest\n\n\nclass SleepCheck(unittest.TestCase):\n"
+           "    def test_sleeps(self):\n"
+           "        service = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+           "        open({marker!r}, 'w').write(f'{{os.getpid()}} {{service.pid}}\\n')\n        time.sleep(30)\n")
+SERVICE = ("import os\nimport subprocess\nimport sys\nimport time\nimport unittest\n\n\nclass ServiceCheck(unittest.TestCase):\n"
+           "    def test_starts_a_service(self):\n"
+           "        service = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+           "        open({marker!r}, 'w').write(str(service.pid) + '\\n')\n        time.sleep(60)\n")
+WRITER = (
+    "import unittest\n\n\nclass WriterCheck(unittest.TestCase):\n    def test_writes_outside(self):\n"
+    "        for target in {targets!r}:\n            try:\n                open(target, 'w').write('x')\n"
+            "            except OSError:\n                pass\n")
 READONLY = (
     "import os\nimport unittest\n\n\nclass RoCheck(unittest.TestCase):\n"
     "    def test_a_leaves(self):\n        os.makedirs('ro/sub')\n        open('ro/sub/x', 'w').write('x')\n"
@@ -119,8 +131,16 @@ class FixtureRepository:
 
     def snapshot(self) -> tuple[str, str, str]:
         digest = hashlib.sha256()
-        for path in sorted(p for p in self.worktree.rglob("*") if p.is_file()):
-            digest.update(str(path.relative_to(self.worktree)).encode() + b"\0" + path.read_bytes() + b"\0")
+        for path in sorted(self.worktree.rglob("*")):
+            status = path.lstat()
+            if stat.S_ISLNK(status.st_mode):
+                body = b"link " + os.fsencode(os.readlink(path))
+            elif stat.S_ISREG(status.st_mode):
+                body = b"file " + path.read_bytes()
+            else:
+                body = b"other"
+            digest.update(str(path.relative_to(self.worktree)).encode() + b"\0"
+                          + f"{stat.S_IMODE(status.st_mode):o}".encode() + b"\0" + body + b"\0")
         return (digest.hexdigest(), self.git(self.main, "rev-parse", f"refs/heads/{BRANCH}"),
                 self.git(self.main, "worktree", "list", "--porcelain"))
 
@@ -228,6 +248,16 @@ class CheckTest(unittest.TestCase):
             "def test_e(): pass\n")
         self.assertEqual(case_ids(source), frozenset({"A.test_a", "B.test_b", "C.test_c"}))
         self.assertEqual(case_ids("def broken(:"), frozenset())
+
+    def test_case_ids_resolve_an_aliased_testcase_import(self):
+        source = (
+            "from unittest import TestCase as Case\nfrom unittest.case import TestCase\n\n"
+            "class Sample(Case):\n    def test_a(self): pass\n\n"
+            "class Child(Sample):\n    def test_b(self): pass\n\n"
+            "class Direct(TestCase):\n    def test_c(self): pass\n")
+        self.assertEqual(case_ids(source), frozenset({"Sample.test_a", "Child.test_b", "Direct.test_c"}))
+        self.assertEqual(case_ids("from other import Thing as Case\n\nclass S(Case):\n    def test_a(self): pass\n"),
+                         frozenset())
 
     def test_case_ids_follow_an_imported_base_into_its_file(self):
         files = {
@@ -385,12 +415,14 @@ class CheckTest(unittest.TestCase):
             env={**repository.env, "PYTHONPATH": str(REPO_ROOT / "python"), "REVERT_CHECK_SCRATCH": scratch})
         self.addCleanup(checker.wait)
         self.addCleanup(lambda: checker.poll() is None and os.killpg(checker.pid, signal.SIGKILL))
-        self.assertTrue(eventually(lambda: marker.exists() and marker.read_text().isdigit()))
-        pid = int(marker.read_text())
-        self.addCleanup(lambda: alive(pid) and os.kill(pid, signal.SIGKILL))
+        self.assertTrue(eventually(lambda: marker.exists() and marker.read_text().endswith("\n")))
+        pids = [int(word) for word in marker.read_text().split()]
+        for pid in pids:
+            self.addCleanup(lambda pid=pid: alive(pid) and os.kill(pid, signal.SIGKILL))
         os.killpg(checker.pid, signal.SIGKILL)
         checker.wait()
-        self.assertTrue(eventually(lambda: not alive(pid)), "the test outlived the checker")
+        for pid in pids:
+            self.assertTrue(eventually(lambda pid=pid: not alive(pid)), "the test or its service outlived the checker")
         self.assertTrue(eventually(lambda: os.listdir(scratch) == []), os.listdir(scratch))
         self.assertEqual(repository.snapshot(), before)
 
@@ -510,6 +542,67 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(result["still_passing"], [])
         self.assertEqual(result["reason"], "new tests stopped at the 1 s limit: checks.check_slow.SlowCheck.test_sleeps")
         self.assertLess(time.monotonic() - started, 20)
+
+    def test_a_service_a_timed_out_test_started_in_its_own_session_is_killed_too(self):
+        repository = FixtureRepository(self)
+        marker = repository.tmp / "service-pid"
+        repository.commit({"checks/check_service.py": SERVICE.format(marker=str(marker))})
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self),
+                       environ=os.environ, test_seconds=5)
+        self.assertEqual(result["still_passing"], [])
+        self.assertIn("stopped at the 5 s limit", result["reason"])
+        pid = int(marker.read_text())
+        self.addCleanup(lambda: alive(pid) and os.kill(pid, signal.SIGKILL))
+        self.assertTrue(eventually(lambda: not alive(pid)), "the service outlived the timed out test")
+
+    def test_a_new_test_cannot_write_into_the_live_worktree_or_its_git_directory(self):
+        repository = FixtureRepository(self)
+        targets = [str(repository.worktree / "leak.txt"), str(repository.main / ".git" / "leak.txt")]
+        repository.commit({"checks/check_writer.py": WRITER.format(targets=targets)})
+        scratch = scratch_directory(self)
+        sealed = bool(seal_argv([str(repository.worktree), str(repository.main / ".git")], scratch))
+        result = check(str(repository.worktree), "main", scratch_root=scratch, environ=os.environ)
+        self.assertEqual(result["still_passing"], result["new_tests"])
+        self.assertEqual([Path(target).exists() for target in targets], [not sealed] * 2)
+        for target in targets:
+            Path(target).unlink(missing_ok=True)
+
+    def test_the_seal_names_the_protected_paths_and_the_writable_one_or_is_empty(self):
+        def run(code):
+            return lambda argv, **_: subprocess.CompletedProcess(argv, code)
+        found = lambda name: f"/bin/{name}"  # noqa: E731
+        darwin = seal_argv(["/w", "/g"], "/s", system="darwin", which=found, run=run(0))
+        self.assertEqual(darwin[0], "/bin/sandbox-exec")
+        self.assertEqual([word for word in darwin if word.startswith(("P0=", "P1=", "W="))], ["P0=/w", "P1=/g", "W=/s"])
+        linux = seal_argv(["/w", "/g"], "/s", system="linux", which=found, run=run(0))
+        self.assertEqual(linux[0], "/bin/bwrap")
+        self.assertEqual(linux[linux.index("--ro-bind"):linux.index("--ro-bind") + 3], ["--ro-bind", "/w", "/w"])
+        self.assertIn("/g", linux)
+        self.assertEqual(linux[linux.index("--bind", 3):][:3], ["--bind", "/s", "/s"])
+        self.assertEqual(seal_argv(["/w"], "/s", system="darwin", which=found, run=run(1)), [])
+        self.assertEqual(seal_argv(["/w"], "/s", system="linux", which=lambda name: None, run=run(0)), [])
+        self.assertEqual(seal_argv(["/w"], "/s", system="plan9", which=found, run=run(0)), [])
+
+    def test_a_new_test_module_that_cannot_be_parsed_is_named_in_the_reason(self):
+        repository = FixtureRepository(self)
+        repository.commit({**PROOF_CHANGE, "checks/check_broken.py": "def broken(:\n"})
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["still_passing"], [GREET_ID])
+        self.assertIn("checks/check_broken.py: SyntaxError", result["reason"])
+        self.assertTrue(result["reason"].startswith("changed Python files that could not be parsed"), result["reason"])
+
+    def test_the_snapshot_notices_a_retargeted_link_and_a_changed_mode(self):
+        repository = FixtureRepository(self)
+        (repository.worktree / "one.txt").write_text("same")
+        (repository.worktree / "two.txt").write_text("same")
+        os.symlink("one.txt", repository.worktree / "link")
+        first = repository.snapshot()
+        (repository.worktree / "link").unlink()
+        os.symlink("two.txt", repository.worktree / "link")
+        second = repository.snapshot()
+        self.assertNotEqual(first, second)
+        (repository.worktree / "one.txt").chmod(0o755)
+        self.assertNotEqual(repository.snapshot(), second)
 
     def test_a_spent_budget_runs_no_further_test_and_says_so(self):
         repository = FixtureRepository(self)

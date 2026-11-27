@@ -178,7 +178,8 @@
   },
   "revert-check": {
     "verdicts": [
-      "ok"
+      "ok",
+      "failed"
     ]
   },
   "router": null,
