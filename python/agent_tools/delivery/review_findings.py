@@ -12,7 +12,7 @@ results of a run. The five values:
 - `declined`: the implementer declined it in the fix reply's `declines` and the
   re-reviewer did not restate it.
 - `filed`: it became a follow-up issue.
-- `dropped`: a minor finding nobody acted on.
+- `dropped`: a minor finding, or one naming only criteria of other kinds than code, nobody acted on.
 - `open`: still open when the run stopped.
 
 A disposition is never set by hand and never asked of a model. A finding is
@@ -24,9 +24,9 @@ last stored visit of a step that is asked again). A procedure that files a
 follow-up issue from a finding writes the finding's rule and kind into the issue
 body and passes its name in that round's `filed`.
 
-`usable` copies the rule of the direct re-review route (`engine_graders`) rather than
-importing it, so this module imports no engine module; a test holds the copy to
-the grader. The landing route's re-review (`LANDING_REREVIEWS`) takes any `pass` or `findings`
+`usable` copies the rule of the direct re-review route (`engine_graders`), including its drop of a
+finding naming only non-code criteria of `acceptance`, rather than importing it, so this module
+imports no engine module; a test holds the copy to the grader. The landing route's re-review (`LANDING_REREVIEWS`) takes any `pass` or `findings`
 verdict and stops on `findings`, so it is judged by that verdict, not by `usable`. A minor
 finding a re-review restates as a blocker keeps the restatement as its own finding. Nothing here reads a file, starts a process or reads a clock, and an
 odd shape never raises.
@@ -36,6 +36,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+
+NON_CODE_KINDS: tuple[str, ...] = ("evidence", "human", "note")
 
 KINDS: tuple[str, ...] = (
     "edge-or-failure-path", "weak-test", "missing-test", "contract-mismatch", "stale-docs", "security",
@@ -50,12 +52,14 @@ DISPOSITIONS: tuple[str, ...] = ("fixed", "declined", "filed", "dropped", "open"
 @dataclass(frozen=True)
 class Round:
     """The stored results of one review round: each review step's id and result (`None` for no reply),
-    the fix step's result, the re-review step's id and result, and the names filed as follow-up issues."""
+    the fix step's result, the re-review step's id and result, the names filed as follow-up issues, and the
+    run's `implement.acceptance` (given only for a round of the direct route)."""
 
     reviews: tuple[tuple[str, object], ...]
     fix: object = None
     rereview: tuple[str, object] | None = None
     filed: frozenset[str] = frozenset()
+    acceptance: object = None
 
 
 @dataclass(frozen=True)
@@ -80,15 +84,41 @@ def _minor(finding: Mapping[str, object]) -> bool:
     return finding.get("severity") == "minor"
 
 
-def usable(rereview: object) -> bool:
+def _names(text: str, cid: str) -> bool:
+    """Whether `cid` occurs in `text` with no ASCII letter, digit or underscore right before or after it."""
+    start = text.find(cid)
+    while start >= 0:
+        end = start + len(cid)
+        around = [text[start - 1] if start else "", text[end] if end < len(text) else ""]
+        if not any(ch.isascii() and (ch.isalnum() or ch == "_") for ch in around):
+            return True
+        start = text.find(cid, start + 1)
+    return False
+
+
+def _kinds(acceptance: object) -> dict[str, object]:
+    if not isinstance(acceptance, list):
+        return {}
+    return {c["id"]: c.get("kind") for c in acceptance
+            if isinstance(c, Mapping) and isinstance(c.get("id"), str) and c["id"].strip()}
+
+
+def _drops(finding: Mapping[str, object], kinds: Mapping[str, object]) -> bool:
+    texts = [finding[m] for m in ("restates", "summary", "failing_input", "file") if isinstance(finding.get(m), str)]
+    named = [cid for cid in kinds if any(_names(text, cid) for text in texts)]
+    return bool(named) and all(kinds[cid] in NON_CODE_KINDS for cid in named)
+
+
+def usable(rereview: object, acceptance: object = None) -> bool:
     """Whether the re-review route would accept this reply instead of discarding it and asking again."""
     if not isinstance(rereview, Mapping) or rereview.get("verdict") not in ("pass", "findings"):
         return False
     findings = rereview.get("findings")
     if not isinstance(findings, list):
         return False
-    return not any(isinstance(f, Mapping) and not _minor(f) and _blank(f.get("file")) and _blank(f.get("failing_input"))
-                   for f in findings)
+    kinds = _kinds(acceptance)
+    return not any(isinstance(f, Mapping) and not _drops(f, kinds) and not _minor(f)
+                   and _blank(f.get("file")) and _blank(f.get("failing_input")) for f in findings)
 
 
 def _answered(rereview: object) -> bool:
@@ -118,13 +148,15 @@ def dispositions(rounds: Sequence[Round]) -> tuple[Disposed, ...]:
         reviewed = [item for step, result in one.reviews for item in _named(step, result)]
         declined = _declined(one.fix)
         closes = one.rereview is not None and (
-            _answered(one.rereview[1]) if one.rereview[0] in LANDING_REREVIEWS else usable(one.rereview[1]))
+            _answered(one.rereview[1]) if one.rereview[0] in LANDING_REREVIEWS
+            else usable(one.rereview[1], one.acceptance))
+        kinds = _kinds(one.acceptance)
         again = _named(*one.rereview) if closes else []
         restated = {f["restates"] for _, f in again if isinstance(f.get("restates"), str)}
         for name, finding in reviewed:
             if name in one.filed:
                 value = "filed"
-            elif _minor(finding):
+            elif _minor(finding) or _drops(finding, kinds):
                 value = "dropped"
             elif closes and name not in restated:
                 value = "declined" if name in declined else "fixed"
@@ -137,6 +169,7 @@ def dispositions(rounds: Sequence[Round]) -> tuple[Disposed, ...]:
             original = originals.get(restates) if isinstance(restates, str) else None
             if original is not None and (_minor(finding) or not _minor(original)):
                 continue
-            value = "filed" if name in one.filed else "dropped" if _minor(finding) else "open"
+            dropping = _minor(finding) or _drops(finding, kinds)
+            value = "filed" if name in one.filed else "dropped" if dropping else "open"
             disposed.append(Disposed(place, name, finding, value))
     return tuple(disposed)

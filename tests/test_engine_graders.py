@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from agent_tools.delivery import lane_rule
-from agent_tools.delivery.engine_graders import GRADERS
+from agent_tools.delivery.engine_graders import GRADERS, NON_CODE_KINDS, dropped
 
 TIER = "fast"
 
@@ -246,6 +246,121 @@ class GraderTest(unittest.TestCase):
     def test_a_minor_independent_finding_does_not_block(self):
         results = full(ind_verdict="findings", ind_findings=[MINOR])
         self.assertEqual(GRADERS["direct-full-tally"].grade(results), "clean")
+
+
+ACCEPTANCE = [{"id": "AC1", "text": "t", "kind": "code", "result": "r"},
+              {"id": "AC5", "text": "t", "kind": "evidence", "result": "r"}]
+EVIDENCE = {"severity": "important", "file": "python/x.py:340", "failing_input": "gh pr list",
+            "summary": "AC5 is evidence-kind and still has no evidence", "kind": "other", "restates": "AC5"}
+NAMED_KIND = dict(NAMED, kind="other")
+
+
+def rereview(findings, acceptance=ACCEPTANCE, verdict="findings"):
+    results = {"full-rereview.verdict": verdict, "full-rereview.findings": findings}
+    if acceptance is not None:
+        results["implement.acceptance"] = acceptance
+    return results
+
+
+def graded(results):
+    return GRADERS["direct-settled"].grade(results), GRADERS["direct-settled"].drops(results)
+
+
+class DropTest(unittest.TestCase):
+    def test_a_re_review_finding_naming_only_an_evidence_criterion_settles_clean_and_is_listed(self):
+        results = rereview([EVIDENCE])
+
+        grade = GRADERS["direct-settled"].grade(results)
+        drops = GRADERS["direct-settled"].drops(results)
+
+        self.assertEqual(grade, "clean")
+        self.assertEqual(drops, ({"finding": "full-rereview:1", "criteria": ["AC5"]},))
+        self.assertEqual(results["full-rereview.findings"], [EVIDENCE])
+
+    def test_a_finding_that_names_a_code_criterion_an_unknown_kind_or_nothing_is_kept(self):
+        both = dict(EVIDENCE, summary="AC5 and AC1 lack evidence")
+        other = [{"id": "AC5", "text": "t", "kind": "other", "result": "r"}]
+        no_kind = [{"id": "AC5", "text": "t", "result": "r"}]
+        rows = [("code named", rereview([both]), "findings"),
+                ("unknown kind", rereview([EVIDENCE], other), "findings"),
+                ("no kind", rereview([EVIDENCE], no_kind), "findings"),
+                ("no criterion", rereview([NAMED]), "findings")]
+        for label, results, expected in rows:
+            with self.subTest(label):
+                self.assertEqual(graded(results), (expected, ()))
+
+    def test_an_id_matches_only_as_a_whole_token(self):
+        acceptance = [{"id": "AC2", "text": "t", "kind": "evidence", "result": "r"}]
+        kept = dict(EVIDENCE, summary="AC20 is unmet", restates="full-review:2")
+        self.assertEqual(graded(rereview([kept], acceptance)), ("findings", ()))
+        for summary in ("AC2.", "(AC2) is unmet", "AC2, then more","AC20 and AC2 differ"):
+            with self.subTest(summary=summary):
+                found = dict(EVIDENCE, summary=summary, restates="full-review:2")
+                self.assertEqual(graded(rereview([found], acceptance)),
+                                 ("clean", ({"finding": "full-rereview:1", "criteria": ["AC2"]},)))
+        for summary in ("AC2x", "_AC2", "1AC2"):
+            with self.subTest(summary=summary):
+                found = dict(EVIDENCE, summary=summary, restates="full-review:2")
+                self.assertEqual(graded(rereview([found], acceptance)), ("findings", ()))
+
+    def test_every_one_of_the_four_members_names_a_criterion(self):
+        quiet = dict(EVIDENCE, restates="", summary="s", failing_input="x", file="a.py")
+        for member in ("restates", "summary", "failing_input", "file"):
+            with self.subTest(member=member):
+                finding = dict(quiet, **{member: "see AC5"})
+                self.assertEqual(graded(rereview([finding])),
+                                 ("clean", ({"finding": "full-rereview:1", "criteria": ["AC5"]},)))
+
+    def test_an_id_outside_the_acceptance_names_nothing_and_no_acceptance_drops_nothing(self):
+        unknown = dict(EVIDENCE, summary="AC9 unmet", restates="AC9")
+        self.assertEqual(graded(rereview([unknown])), ("findings", ()))
+        self.assertEqual(graded(rereview([EVIDENCE], None)), ("findings", ()))
+        self.assertEqual(graded(rereview([EVIDENCE], "AC5")), ("findings", ()))
+        plan = {"plan-review.verdict": "findings", "plan-review.findings": [EVIDENCE]}
+        self.assertEqual(GRADERS["plan-settled"].drops(plan), ())
+        self.assertEqual(GRADERS["plan-settled"].grade(plan), "findings")
+
+    def test_a_minor_finding_naming_only_an_evidence_criterion_is_listed_too(self):
+        minor = dict(EVIDENCE, severity="minor")
+        self.assertEqual(graded(rereview([minor])),
+                         ("clean", ({"finding": "full-rereview:1", "criteria": ["AC5"]},)))
+
+    def test_a_dropped_finding_is_never_unusable(self):
+        blank = dict(EVIDENCE, file="", failing_input="", restates="")
+        self.assertEqual(graded(rereview([blank]))[0], "clean")
+        self.assertEqual(graded(rereview([blank], None))[0], "unusable")
+
+    def test_a_drop_names_its_place_in_the_unfiltered_list(self):
+        results = rereview([NAMED_KIND, EVIDENCE])
+        self.assertEqual(graded(results),
+                         ("findings", ({"finding": "full-rereview:2", "criteria": ["AC5"]},)))
+
+    def test_the_criteria_of_a_drop_follow_the_acceptance_order(self):
+        acceptance = [{"id": "AC7", "text": "t", "kind": "human", "result": "r"},
+                      {"id": "AC5", "text": "t", "kind": "evidence", "result": "r"}]
+        finding = dict(EVIDENCE, summary="AC5 and AC7", restates="")
+        self.assertEqual(graded(rereview([finding], acceptance))[1],
+                         ({"finding": "full-rereview:1", "criteria": ["AC7", "AC5"]},))
+
+    def test_the_tallies_filter_both_the_review_and_the_independent_review(self):
+        for name, build, review, independent in (
+                ("direct-full-tally", full, "full-review", "full-independent"),
+                ("direct-lite-tally", lite, "lite-review", "lite-independent"),
+                ("direct-escalated-tally", escalated, "escalated", "lite-independent")):
+            for label, kw, step in (("review", dict(verdict="findings", findings=[EVIDENCE]), review),
+                                    ("independent", dict(ind_verdict="findings", ind_findings=[EVIDENCE]),
+                                     independent)):
+                with self.subTest(name=name, label=label):
+                    results = {**build(acceptance=GRADED, **kw), "implement.acceptance": ACCEPTANCE}
+                    self.assertEqual(GRADERS[name].grade(results), "clean")
+                    self.assertEqual(GRADERS[name].drops(results),
+                                     ({"finding": f"{step}:1", "criteria": ["AC5"]},))
+
+    def test_only_the_four_review_graders_drop(self):
+        self.assertEqual({n for n, g in GRADERS.items() if g.drops is dropped},
+                         {"direct-lite-tally", "direct-escalated-tally", "direct-full-tally", "direct-settled"})
+        self.assertEqual(NON_CODE_KINDS, ("evidence", "human", "note"))
+        self.assertEqual(GRADERS["lane-rule"].drops({}), ())
 
 
 PATHS = {"guard": ["home/x/lifecycle_guard.py"], "release": ["rel/"], "secrets": ["secrets/"]}

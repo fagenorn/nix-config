@@ -120,6 +120,9 @@ RESTATING = {"verdict": "findings", "findings": [dict(IMPORTANT, restates="lite-
 NEW = {"verdict": "findings", "findings": [IMPORTANT]}
 STALE = {"verdict": "findings", "findings": [dict(IMPORTANT, restates="lite-review:99")]}
 UNNAMED = {"verdict": "findings", "findings": [dict(IMPORTANT, file="", failing_input=" ")]}
+ACCEPTANCE = [{"id": "AC1", "text": "t", "kind": "code", "result": "r"},
+              {"id": "AC5", "text": "t", "kind": "evidence", "result": "r"}]
+BLANK_EVIDENCE = dict(IMPORTANT, file="", failing_input="", summary="AC5 has no evidence")
 MERGE = ("merge-review", {"verdict": "findings", "findings": [IMPORTANT]})
 MERGED = Round((MERGE,), FIX, ("merge-rereview", PASS))
 CASES = [
@@ -161,6 +164,14 @@ CASES = [
             ("lite-rereview", RESTATING))],
      [(1, "lite-review:1", "dropped"), (1, "lite-rereview:1", "open")]),
     ("a member with no reply contributes nothing", [Round((("lite-review", None),))], []),
+    ("a re-review finding naming only an evidence criterion is dropped",
+     [Round((REVIEWED,), FIX, ("lite-rereview", {"verdict": "findings", "findings": [BLANK_EVIDENCE]}),
+            acceptance=ACCEPTANCE)],
+     [(1, "lite-review:1", "fixed"), (1, "lite-rereview:1", "dropped")]),
+    ("a review finding naming only an evidence criterion is dropped",
+     [Round((("lite-review", {"verdict": "findings", "findings": [dict(IMPORTANT, summary="AC5 has no evidence")]}),),
+            FIX, ("lite-rereview", PASS), acceptance=ACCEPTANCE)],
+     [(1, "lite-review:1", "dropped")]),
 ]
 
 
@@ -177,12 +188,20 @@ class DispositionTest(unittest.TestCase):
         replies = [PASS, NEW, {"verdict": "findings", "findings": [MINOR]},
                    {"verdict": "findings", "findings": [dict(IMPORTANT, file="")]},
                    {"verdict": "findings", "findings": [dict(IMPORTANT, file="", failing_input="")]},
-                   {"verdict": "findings", "findings": [dict(MINOR, file="", failing_input="")]}]
-        for reply in replies:
-            with self.subTest(reply=reply):
-                graded = GRADERS["direct-settled"].grade({"lite-rereview.verdict": reply["verdict"],
-                                                          "lite-rereview.findings": reply["findings"]})
-                self.assertIs(usable(reply), graded != "unusable")
+                   {"verdict": "findings", "findings": [dict(MINOR, file="", failing_input="")]},
+                   {"verdict": "findings", "findings": [BLANK_EVIDENCE]},
+                   {"verdict": "findings", "findings": [dict(BLANK_EVIDENCE, summary="AC1 has no evidence")]},
+                   {"verdict": "findings", "findings": [dict(BLANK_EVIDENCE, summary="AC50 has no evidence")]}]
+        for acceptance in (None, ACCEPTANCE):
+            for reply in replies:
+                with self.subTest(reply=reply, acceptance=acceptance):
+                    members = {"implement.acceptance": acceptance} if acceptance is not None else {}
+                    graded = GRADERS["direct-settled"].grade({"lite-rereview.verdict": reply["verdict"],
+                                                              "lite-rereview.findings": reply["findings"],
+                                                              **members})
+                    self.assertIs(usable(reply, acceptance), graded != "unusable")
+        self.assertTrue(usable({"verdict": "findings", "findings": [BLANK_EVIDENCE]}, ACCEPTANCE))
+        self.assertFalse(usable({"verdict": "findings", "findings": [BLANK_EVIDENCE]}))
         for reply in ({}, None, {"verdict": "unavailable", "findings": []}, {"verdict": "pass", "findings": "x"}):
             with self.subTest(reply=reply):
                 self.assertFalse(usable(reply))
