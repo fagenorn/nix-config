@@ -268,6 +268,7 @@ agent-workflow-tests *args:
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
     tests/test_console_release_rerun_check.py \
+    tests/test_console_production_rerun_check.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \

@@ -39,6 +39,7 @@ not be read at all.
 """
 import json
 import os
+import posixpath
 import re
 import stat
 from dataclasses import dataclass
@@ -225,6 +226,25 @@ def policy_rows(path: Path) -> dict | None:
     if document["derivation"] is not None and not isinstance(document["derivation"], dict):
         return None
     return dict(derived)
+
+
+def is_rerun_change(change) -> bool:
+    """Whether a `production.changes` entry is the rule `gh run rerun`, its program read by basename."""
+    argv = change.get("argv") if isinstance(change, dict) else None
+    if not isinstance(argv, list) or not argv or not all(isinstance(word, str) for word in argv):
+        return False
+    return [posixpath.basename(argv[0]), *argv[1:]] == ["gh", "run", "rerun"]
+
+
+def rerun_rule(slug: str | None) -> dict | None:
+    """The `{id, argv}` of the `gh run rerun` change the guard's policy, loaded whole, declares for `slug`, else None."""
+    rows = policy_rows(policy_file()) if slug else None
+    for repository, row in (rows or {}).items():
+        production = row.get("production")
+        for change in production["changes"] if repository.lower() == slug.lower() and production else ():
+            if is_rerun_change(change):
+                return {"id": change["id"], "argv": list(change["argv"])}
+    return None
 
 
 def _declared_changes(snapshot: dict) -> dict | None:

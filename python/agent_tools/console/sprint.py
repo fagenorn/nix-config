@@ -243,7 +243,7 @@ prints the console's decision only when the reply's `mac` proves it, and prints 
 `tool_use_id`, or for a reply that is not signed; a mention is a
 merge, a rerun, the plain `release transaction run` (allowed, ADR-console-094) or a release abandon or
 dispose (denied). The request also
-carries the hook input's string `tool_use_id`, which names the one tool call, so a landed merge is paired
+carries the hook input's string `tool_use_id`, which names the one tool call, so a landed merge or rerun is paired
 with the allow of that same call; a command `mentions` accepts whose input has none is the failure below.
 Otherwise, in the
 judge phase, the console's `allow` or `deny` is printed as `{"hookSpecificOutput": {"hookEventName":
@@ -251,7 +251,7 @@ judge phase, the console's `allow` or `deny` is printed as `{"hookSpecificOutput
 decision prints nothing; any failure (stdin that is not such an object, no sprint id or secret, a console
 that is unreachable or answers other than 200, a reply that is not `{"decision", "reason"}`) prints the
 same object with `deny` and the reason `the console could not judge this command: <why>`. With
-`--landed` the command tells the console the merge ran and prints nothing in every case.
+`--landed` the command tells the console the merge or rerun ran and prints nothing in every case.
 
 `sprint permit --prompt` is the manager's `PermissionRequest` hook (#1424, ADR-console-021 as amended): the
 client runs it when a tool call needs a permission and takes the one line it prints as the decision. It reads the

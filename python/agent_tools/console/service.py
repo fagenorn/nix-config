@@ -1100,12 +1100,12 @@ own `permit.judged` rows (`permit.rerun_record`, folded) each head's allowed rer
 ADR-console-106), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the lock again takes the
 sprint, its checks and the grant afresh and judges once more over the memo's frozen replay: any refusal, any difference
 or any read the memo did not hold is `permit.MOVED`. Each decided verdict appends one `permit.judged` row under that
-lock `{"sprint_id", "session_id", "tool_use_id", "repo", "verb", "decision", "reason", "target"}`; an allowed merge is
-also remembered in memory as `(sprint_id, session_id, tool_use_id, repo, pr, head)` with the service's clock.
-`permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True, and appends one `permit.landed` row
-`{"sprint_id", "session_id", "tool_use_id", "repo", "verb": "merge", "target": {"pr", "head"}}`, only when the command
-is exactly such a merge (`permit.merge_target`) and the allow of that same tool call was judged at most
-`PERMIT_LANDED_SECONDS` (30 minutes) ago; otherwise it is False and appends nothing.
+lock `{"sprint_id", "session_id", "tool_use_id", "repo", "verb", "decision", "reason", "target"}` (an allowed rerun adds
+`"rule"`, `permit.rule_member`); an allowed merge or rerun is also remembered by `permit.landing_key` with the service's
+clock. `permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True, and appends one `permit.landed` row
+of the same members less `"decision"` and `"reason"` (`target` `{"pr", "head"}` for a merge, `{"run"}` for a rerun),
+only when the command is exactly that merge or the granted rerun and its call's allow was judged at most
+`PERMIT_LANDED_SECONDS` (30 minutes) ago and has not landed; otherwise it is False and appends nothing.
 
 An approved action (`action_permit`): a body with a `nonce` is a signed body that carries no secret and no
 command text, which `action_permit.reply` answers through `permit_action` and `permit_action_landed`; only
@@ -4801,7 +4801,7 @@ class ConsoleService(ActionPermit):
         self._branch_pattern_of = branch_pattern_of
         self._permit_forge = permit_forge
         self._merge_binding_of = merge_binding_of
-        self._permit_allows: dict[tuple[str, str, str, object, int, object], float] = {}
+        self._permit_allows: dict[tuple, float] = {}
         self._rerun_record: dict[tuple[str | None, str], tuple[permit.Rerun, ...]] = {}
         self._patterns: dict[str, str] = {}
         self._activity = activity
@@ -9629,7 +9629,7 @@ class ConsoleService(ActionPermit):
         self._apply(self.log.append([(PERMIT_JUDGED, sprint.project_id, {
             "sprint_id": sprint.sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
             "repo": slug, "verb": verdict.verb, "decision": verdict.decision, "reason": verdict.reason,
-            "target": dict(verdict.target)})]))
+            "target": dict(verdict.target), **permit.rule_member(verdict, slug)})]))
         return verdict
 
     def permit(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
@@ -9664,26 +9664,26 @@ class ConsoleService(ActionPermit):
                     verdict = permit.Verdict(permit.DENY, permit.MOVED, verb, {})
             except sprints.Refused:
                 verdict = permit.Verdict(permit.DENY, permit.MOVED, verb, {})
-            if verdict.decision == permit.ALLOW and verdict.verb == permit.MERGE:
-                self._permit_allows[(sprint_id, session_id, tool_use_id, slug, verdict.target["pr"],
-                                     verdict.target["head"])] = self._clock()
-            return self._permit_record(sprint, session_id, tool_use_id, slug, verdict)
+            recorded = self._permit_record(sprint, session_id, tool_use_id, slug, verdict)
+            if (key := permit.landing_key(verdict)) is not None:
+                self._permit_allows[(sprint_id, session_id, tool_use_id, slug, *key)] = self._clock()
+            return recorded
 
     def permit_landed(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
                       command: str) -> bool:
-        """Record a merge the console allowed and the manager's session ran; False records nothing."""
+        """Record a merge or rerun the console allowed and the manager's session ran; False records nothing."""
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
             state = self._states.get(sprint.project_id)
             root = None if state is None else state.root
-        if root is None or permit.verb_of(command) != permit.MERGE:
+        if root is None or permit.verb_of(command) not in (permit.MERGE, permit.RERUN):
             return False
         slug, _, strategy, delete_branch = self._permit_reads(root)
-        target = permit.merge_target(command, permit.Grant(
+        landing = permit.landing_of(command, permit.Grant(
             slug, root, strategy, delete_branch, None, frozenset(), frozenset()))
-        if target is None:
+        if landing is None:
             return False
-        key = (sprint_id, session_id, tool_use_id, slug, target["pr"], target["head"])
+        key = (sprint_id, session_id, tool_use_id, slug, *landing[1])
         with self._ingest:
             self._manager_sprint(sprint_id, secret)
             judged = self._permit_allows.get(key)
@@ -9691,8 +9691,8 @@ class ConsoleService(ActionPermit):
                 return False
             self._apply(self.log.append([(PERMIT_LANDED, sprint.project_id, {
                 "sprint_id": sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
-                "repo": slug, "verb": permit.MERGE, "target": dict(target)})]))
-            return True
+                "repo": slug, "verb": landing[0], "target": dict(landing[2])})]))
+            return self._permit_allows.pop(key) is not None
 
     def withdraw_notice(self, sprint_id: str, secret: str, notice_id: int) -> int:
         """Append one `notice.withdrawn` event for an open notice of the sprint; the notice's id."""
