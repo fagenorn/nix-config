@@ -14,14 +14,18 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.claims import forge_markers
 from agent_tools.delivery import engine_stop
+from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_stubbed_world import StubbedRun
-from tests.guard_policy_world import REPO_ROOT
+from tests.guard_policy_world import REAL_GIT, REPO_ROOT
 from tests.process_liveness import process_alive
+from tests.test_engine_stubbed_run import Scenario
 
 CUT_ENGINE = REPO_ROOT / "tests/fixtures/engine-stubbed-run/cut_engine.py"
 RESULT_FILE = "result-file"
@@ -143,3 +147,257 @@ def cut_at(run: StubbedRun, point: CutPoint) -> subprocess.CompletedProcess:
         raise AssertionError(f"cut point {point.name()} never reached: exit {done.returncode}")
     settle(run)
     return done
+
+
+def _mutating() -> frozenset[str]:
+    steps = set()
+    for path in PROCEDURES.glob("*.json"):
+        if path.name.endswith(".reply.json"):
+            continue
+        for step in json.loads(path.read_text(encoding="utf-8"))["steps"]:
+            if step["kind"] == "agent" and step.get("mutates"):
+                steps.add(step["id"])
+    return frozenset(steps)
+
+
+MUTATING = _mutating()
+NAMED = (CutPoint("direct#1", "session_starting", "implement", 1, 1),
+         CutPoint("direct#1", RESULT_FILE, "implement", 1, 1))
+SAMPLE = (NAMED[0], BROKEN_CUT, NAMED[1], CutPoint("land-attempt#1", RESULT_FILE, "merge-pr", 1, 1))
+MAX_DELIVERIES = 3
+EFFECTS = ("comment posted", "issue created", "pull request created", "pull request merged")
+
+
+@dataclass(frozen=True)
+class Outcome:
+    end: str
+    state: dict
+    effects: dict
+    fresh: dict
+    fresh_steps: dict
+
+
+def _git(path: str | Path, *args: str) -> list[str]:
+    done = subprocess.run([REAL_GIT, "-C", str(path), *args], capture_output=True, text=True, check=True)
+    return done.stdout.splitlines()
+
+
+def _root_events(run: StubbedRun) -> list[dict]:
+    roots = run.runs()
+    return run.events(roots[0]) if roots and (roots[0] / "events.jsonl").exists() else []
+
+
+def last_event(run: StubbedRun) -> str | None:
+    events = _root_events(run)
+    return events[-1]["event"] if events else None
+
+
+def _end(run: StubbedRun) -> str:
+    events = _root_events(run)
+    if events and events[-1]["event"] == "run_done":
+        return "done"
+    if events and events[-1]["event"] == "stop_reached":
+        return f"stop {events[-1]['stop']}"
+    return "open"
+
+
+def _fresh(run: StubbedRun) -> tuple[dict, dict]:
+    ids: dict[str, int] = {}
+    steps: dict[str, int] = {}
+    for launch in run.launches():
+        argv = launch["argv"]
+        if "--session-id" in argv:
+            session = argv[argv.index("--session-id") + 1]
+            ids[session] = ids.get(session, 0) + 1
+            steps[launch["key"]] = steps.get(launch["key"], 0) + 1
+    return ids, dict(sorted(steps.items()))
+
+
+def _effects(run: StubbedRun) -> dict:
+    calls = run.forge.calls()
+    created = ["api", "-X", "POST", f"repos/{run.fixture.slug}/issues"]
+    next_pull = json.loads(run.pulls_state.read_text(encoding="utf-8"))["next"]
+    return {
+        EFFECTS[0]: sum(1 for c in calls if c["argv"][:3] == ["api", "-X", "POST"]
+                        and len(c["argv"]) > 3 and c["argv"][3].endswith("/comments")),
+        EFFECTS[1]: sum(1 for c in calls if c["argv"][:4] == created),
+        EFFECTS[2]: next_pull - 1,
+        EFFECTS[3]: sum(1 for p in run.pulls() if p["state"] == "MERGED"),
+    }
+
+
+def outcome(run: StubbedRun, start: str) -> Outcome:
+    issue = run.forge.issue()
+    markers = [forge_markers.parse(comment) for comment in run.forge.stored()]
+    state = {
+        "issue state": issue["state"],
+        "issue labels": sorted(issue["labels"]),
+        "issues created": len(issue["created"]),
+        "comments": sorted("text" if m is None else m.kind for m in markers),
+        "live claims": len(run.claims()),
+        "released claims": sum(1 for m in markers if m is not None and m.kind == "claim" and "released" in m.fields),
+        "lock refs": sorted(run.lock_refs()),
+        "pull requests": [[p["number"], p["state"], p["headRefName"]] for p in run.pulls()],
+        "main change": _git(run.bare, "diff", "--raw", "--no-renames", "--no-abbrev", start, "main"),
+        "main subjects": _git(run.bare, "log", "--format=%s", f"{start}..main"),
+        "branch on origin": run.origin_tip(run.branch) is not None,
+        "local branches": sorted(_git(run.fixture.root, "for-each-ref", "--format=%(refname)", "refs/heads")),
+        "worktree": run.worktree_path.exists(),
+    }
+    fresh, fresh_steps = _fresh(run)
+    return Outcome(_end(run), state, _effects(run), fresh, fresh_steps)
+
+
+def judge(name: str, reference: Outcome, got: Outcome) -> list[str]:
+    prefix = f"cut after {name}: "
+    lines = [f"session {session} launched fresh {count} times"
+             for session, count in sorted(got.fresh.items()) if count > 1]
+    for step in sorted(MUTATING):
+        was, now = reference.fresh_steps.get(step, 0), got.fresh_steps.get(step, 0)
+        if was != now:
+            lines.append(f"mutates step {step} launched fresh {now} times, uninterrupted {was}")
+    for effect, was in reference.effects.items():
+        now = got.effects.get(effect, 0)
+        if was != now:
+            lines.append(f"{effect} {now} times, uninterrupted {was}")
+    if reference.end != got.end:
+        lines.append(f"ended {got.end}, uninterrupted {reference.end}")
+    for key, was in reference.state.items():
+        if got.state.get(key) != was:
+            lines.append(f"{key} {got.state.get(key)!r}, uninterrupted {was!r}")
+    return [prefix + line for line in lines]
+
+
+def again(last_event: str | None, need: str | None, deliveries: int) -> bool:
+    if deliveries == 0:
+        return last_event != "run_done"
+    return need == "retry" and deliveries < MAX_DELIVERIES
+
+
+def reading(done: subprocess.CompletedProcess) -> tuple[str | None, str | None]:
+    lines = (done.stdout or "").splitlines()
+    if len(lines) == 1:
+        try:
+            document = json.loads(lines[0])
+        except ValueError:
+            document = None
+        if isinstance(document, dict):
+            return document.get("need"), None
+    errors = [line for line in (done.stderr or "").splitlines() if line.strip()]
+    return None, f"exited {done.returncode} with no result line: {errors[-1] if errors else ''}"
+
+
+def continue_to_end(run: StubbedRun, *, broken: bool = False) -> tuple[list[subprocess.CompletedProcess], list[str]]:
+    deliveries: list[subprocess.CompletedProcess] = []
+    notes: list[str] = []
+    need = None
+    while again(last_event(run), need, len(deliveries)):
+        deliveries.append(deliver(run, broken=broken))
+        need, note = reading(deliveries[-1])
+        if note:
+            notes.append(f"delivery {len(deliveries)} {note}")
+            break
+    return deliveries, notes
+
+
+def select(points, slice_spec: str | None, only: str | None) -> tuple[CutPoint, ...]:
+    if only:
+        names = only.split("|")
+        known = {point.name() for point in points}
+        for name in names:
+            if name not in known:
+                raise ValueError(f"no cut point named {name!r}")
+        return tuple(point for point in points if point.name() in names)
+    if slice_spec:
+        match = re.fullmatch(r"([0-9]+)/([1-9][0-9]*)", slice_spec)
+        if match is None or int(match[1]) >= int(match[2]):
+            raise ValueError(f"malformed slice {slice_spec!r}, want k/n with 0 <= k < n")
+        k, n = int(match[1]), int(match[2])
+        return tuple(point for i, point in enumerate(sorted(points, key=CutPoint.name)) if i % n == k)
+    return tuple(points)
+
+
+def contained(name: str, action: Callable[[], list[str]]) -> list[str]:
+    try:
+        return action()
+    except Exception as error:
+        return [f"cut after {name}: {type(error).__name__}: {error}"]
+
+
+def _event_label(event: dict) -> str:
+    step, visit = event.get("step"), event.get("visit")
+    if step is None:
+        return event["event"]
+    return f"{event['event']} {step}" if visit is None else f"{event['event']} {step}.{visit}"
+
+
+def diagnose(run: StubbedRun, deliveries) -> str:
+    out = []
+    for directory in run.run_dirs():
+        procedure = json.loads((directory / "run.json").read_text(encoding="utf-8"))["procedure"]
+        out.append(f"== {procedure} {directory.name}")
+        if (directory / "events.jsonl").exists():
+            out.extend(_event_label(event) for event in run.events(directory)[-15:])
+    for index, done in enumerate(deliveries, 1):
+        out.append(f"== delivery {index}: exit {done.returncode}")
+        out.extend((done.stderr or "").splitlines()[-20:])
+    return "\n".join(out)
+
+
+class CutSweep(Scenario):
+    cuts_reached = 0
+
+    def world(self) -> tuple[StubbedRun, str]:
+        run = self.stubbed()
+        return run, run.origin_tip("main")
+
+    def reference(self) -> tuple[Outcome, tuple[CutPoint, ...]]:
+        cls = type(self)
+        if "_reference" not in cls.__dict__:
+            started = time.monotonic()
+            run, start = self.world()
+            log = run.tmp / CUT_LOG_NAME
+            done = deliver(run, log=log)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            result = outcome(run, start)
+            self.assertEqual(result.end, "done")
+            points = cut_points(log)
+            self.assertEqual(len(set(points)), len(points))
+            lines = sum(len(run.events(directory)) for directory in run.run_dirs())
+            files = sum(1 for directory in run.run_dirs() if (directory / "results").is_dir()
+                        for path in (directory / "results").iterdir() if RESULT_NAME.fullmatch(path.name))
+            self.assertEqual(sum(1 for p in points if p.event != RESULT_FILE), lines)
+            self.assertEqual(sum(1 for p in points if p.event == RESULT_FILE), files)
+            seconds = time.monotonic() - started
+            print(f"cut reference: {len(points)} cut points, {seconds:.1f} s", file=sys.stderr)
+            cls.reference_seconds = seconds
+            cls._reference = (result, points)
+        return cls._reference
+
+    def cut_and_continue(self, plan, expected: Outcome, *, broken: bool = False) -> tuple[str, list[str]]:
+        name = ", ".join(point.name() for point in plan)
+        self.cuts_reached = 0
+        seen: dict = {}
+
+        def action() -> list[str]:
+            run, start = self.world()
+            seen["run"] = run
+            seen["deliveries"] = []
+            try:
+                for point in plan:
+                    cut_at(run, point)
+                    self.cuts_reached += 1
+                deliveries, notes = continue_to_end(run, broken=broken)
+                seen["deliveries"] = deliveries
+                lines = judge(name, expected, outcome(run, start)) + [f"cut after {name}: {note}" for note in notes]
+            except Exception:
+                print(diagnose(run, seen["deliveries"]), file=sys.stderr)
+                raise
+            if lines:
+                print(diagnose(run, deliveries), file=sys.stderr)
+            return lines
+
+        try:
+            return name, contained(name, action)
+        finally:
+            self.doCleanups()
