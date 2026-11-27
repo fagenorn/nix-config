@@ -29,7 +29,8 @@ from agent_tools.delivery.touched_tests import (
     select, selection)
 from agent_tools.delivery.dotnet_format_lint import Refusal, child_env
 from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
-from agent_tools.delivery.touched_tests import DotnetSelection, dotnet_selection
+from agent_tools.delivery.touched_tests import (
+    DotnetSelection, dotnet_selection, exact_changed_paths)
 
 TIER = "integration"  # MainTest builds a git repository
 
@@ -494,10 +495,12 @@ class DotnetMainTest(unittest.TestCase):
                                "    tests/test_alpha.py\n")
         self.write("tests/test_alpha.py", "from pkg import alpha\n")
         self.write("python/pkg/alpha.py", "VALUE = 1\n")
-        for name in ("Planted.slnx", "Planted/Planted.csproj", "Planted/Widget.cs",
+        for name in ("Planted/Planted.csproj", "Planted/Widget.cs",
                      "Planted.Tests/Planted.Tests.csproj", "Planted.Tests/WidgetTests.cs",
                      "Other/Other.csproj", "Other.Tests/Other.Tests.csproj"):
             self.write(f"{s}/{name}", "x\n")
+        self.write_solution("Planted/Planted.csproj", "Planted.Tests/Planted.Tests.csproj",
+                            "Other/Other.csproj", "Other.Tests/Other.Tests.csproj")
         self.commit("base")
         self.calls = []
         self.environments = []
@@ -515,6 +518,10 @@ class DotnetMainTest(unittest.TestCase):
     def commit(self, message):
         self.git("add", "-A")
         self.git("-c", "commit.gpgsign=false", "commit", "-q", "-m", message)
+
+    def write_solution(self, *projects):
+        listing = "".join(f'  <Project Path="{p}" />\n' for p in projects)
+        self.write(f"{SOLUTION_ROOT}/Planted.slnx", f"<Solution>\n{listing}</Solution>\n")
 
     def change(self, *names):
         for name in names:
@@ -579,6 +586,35 @@ class DotnetMainTest(unittest.TestCase):
         self.assertEqual(self.calls, [([*RUNNER, "tests/test_alpha.py"], self.root)])
         self.assertNotIn("cannot list the .NET projects", err)
         self.assertEqual(code, 0)
+
+    def test_a_dotnet_file_no_rule_reads_never_lists_the_dotnet_projects(self):
+        self.change(f"{SOLUTION_ROOT}/tools/check.py", f"{SOLUTION_ROOT}/README.md")
+        with mock.patch("agent_tools.delivery.touched_tests.sources",
+                        side_effect=PermissionError(13, "Permission denied")):
+            code, out, err = self.run_main("--dotnet-tests")
+        self.assertEqual(self.calls, [])
+        self.assertNotIn("cannot list the .NET projects", err)
+        self.assertIn("no suite member is touched", out)
+        self.assertEqual(code, 0)
+
+    def test_a_solution_that_omits_a_test_project_runs_every_test_project(self):
+        s = SOLUTION_ROOT
+        self.write_solution("Planted/Planted.csproj", "Planted.Tests/Planted.Tests.csproj")
+        self.commit("solution omits Other.Tests")
+        self.change(f"{s}/Directory.Build.props")
+        self.run_main("--dotnet-tests")
+        self.assertEqual([argv for argv, _ in self.calls],
+                         [["/tools/bin/dotnet", "test", f"{s}/Other.Tests/Other.Tests.csproj"],
+                          ["/tools/bin/dotnet", "test", f"{s}/Planted.Tests/Planted.Tests.csproj"]])
+
+    def test_git_names_keep_their_bytes_so_distinct_directories_stay_distinct(self):
+        raw = b"dotnet/A\xff/Widget.cs\0dotnet/A\xef\xbf\xbd/Widget.cs\0"
+        done = subprocess.CompletedProcess([], 0, stdout=raw, stderr=b"")
+        with mock.patch("agent_tools.delivery.touched_tests.subprocess.run", return_value=done):
+            paths = exact_changed_paths(self.root, "HEAD~1")
+        self.assertEqual(paths, [os.fsdecode(b"dotnet/A\xff/Widget.cs"),
+                                 "dotnet/A�/Widget.cs"])
+        self.assertEqual(len(set(paths)), 2)
 
     def test_a_dotnet_diff_with_unreadable_projects_still_exits_2(self):
         self.change(f"{SOLUTION_ROOT}/Planted/Widget.cs")

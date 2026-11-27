@@ -88,7 +88,13 @@ def table_rows(block: str | None) -> list[list[str]]:
 def governs(path: str, globs: Iterable[str]) -> bool:
     """True when `path` (POSIX, relative to the root) matches some glob; `*` stays in one level, `**` spans many."""
     parts = PurePosixPath(path).parts
-    return any(pattern and _segments_match(parts, tuple(pattern.split("/"))) for pattern in globs)
+    return any(pattern_parts and _segments_match(parts, pattern_parts)
+               for pattern_parts in map(pattern_segments, globs))
+
+
+def pattern_segments(pattern: str) -> tuple[str, ...]:
+    """A glob's segments as `Path.glob` reads them: a `.` or empty segment is dropped."""
+    return PurePosixPath(pattern).parts
 
 
 def _segments_match(parts: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
@@ -290,7 +296,7 @@ def check(root: Path, map_path: Path) -> list[str]:
                 matched = None
                 errors.append(f"{rel_map}: area '{name}' has an unparseable glob `{pattern}`")
                 continue
-            if matched is None and pattern.split("/", 1)[0] != SOLUTION_ROOT:
+            if matched is None and pattern_segments(pattern)[:1] != (SOLUTION_ROOT,):
                 errors.append(f"{rel_map}: area '{name}' glob `{pattern}` matches no existing path")
         areas[name] = (area_file, globs)
 

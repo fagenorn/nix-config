@@ -243,6 +243,19 @@ class ContextMapLintTest(unittest.TestCase):
                 with self.subTest(path=path, globs=globs):
                     self.assertEqual(context_map_lint.governs(path, globs), expected)
 
+    def test_a_leading_dot_slash_glob_governs_what_it_names(self):
+        self.assertTrue(context_map_lint.governs(
+            f"{SOLUTION_ROOT}/Delivery/A.cs", [f"./{SOLUTION_ROOT}/Delivery/*.cs"]))
+        self.assertFalse(context_map_lint.governs(
+            f"{SOLUTION_ROOT}/Other/A.cs", [f"./{SOLUTION_ROOT}/Delivery/*.cs"]))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.dotnet_tree(
+                root, f"`*.py`, `./{SOLUTION_ROOT}/Delivery/*.cs`, `./{SOLUTION_ROOT}/Future/**`",
+                ["main.py", f"{SOLUTION_ROOT}/Delivery/A.cs"])
+            result = self.run_lint(root, context_map)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_a_top_level_star_governs_no_dotnet_source(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()

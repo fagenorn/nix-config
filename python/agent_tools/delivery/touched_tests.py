@@ -62,8 +62,10 @@ without the variable.
 .NET rule: `--dotnet-tests` also runs the .NET tests a change touches, and without it none of
 this happens (no `sources`, no tools, no `dotnet` key). The .NET rule reads the changed paths
 with `git diff --no-renames --name-only -z <base>...HEAD`, so a non-ASCII path arrives
-unquoted, while the Python selection keeps git's quoted lines. Only changed paths under the solution
-root (`SOLUTION_ROOT`) count, and with none the projects are never listed. Otherwise they are every `.csproj` that
+unquoted, and each name is decoded with `os.fsdecode`, so it compares with the filesystem's
+names byte for byte, while the Python selection keeps git's quoted lines. Only a changed `.cs`,
+`.csproj` or `SHARED_BUILD_FILES` name under the solution root (`SOLUTION_ROOT`) counts, and with
+none the projects are never listed. Otherwise they are every `.csproj` that
 `agent_tools.delivery.dotnet_format_lint.sources` lists there (an `OSError` prints
 `test-touched: cannot list the .NET projects: <error>` and returns 2 before anything runs).
 A changed file named in `SHARED_BUILD_FILES` selects the whole set. A changed `.cs` or
@@ -73,7 +75,8 @@ project's target is the one project whose stem is `<stem>.Tests`. A path with no
 with no or several test projects, selects the whole set. With no `.csproj` under the solution
 root, no .NET target is selected. Any other path selects nothing. The
 whole set is the one solution file (a `Refusal` from `solution` prints `test-touched:
-<reason>` and returns 1 before anything runs); otherwise the targets are the sorted test
+<reason>` and returns 1 before anything runs) when it lists every test project, and the sorted
+test projects when it omits one (`listed_projects`); otherwise the targets are the sorted test
 projects. The selection file gains `dotnet`, the targets, only when there are some. The
 Python selection runs first; then, when targets exist, `dotnet test <target>` runs per target
 in order through the tools directory, with exactly `child_env(tools)` and none of the caller's environment (a `Refusal` from the tools
@@ -103,7 +106,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from agent_tools.delivery.dotnet_format_lint import (
-    Refusal, child_env, solution, sources, tools_directory)
+    Refusal, child_env, listed_projects, solution, sources, tools_directory)
 from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from agent_tools.delivery.suite_runner import (
     REPORT_ENV, REPORT_VERSION, suite_members, write_report)
@@ -135,6 +138,12 @@ def _owning_project(path: str, projects: Sequence[str]) -> str | None:
             return found[0] if len(found) == 1 else None
         directory = posixpath.dirname(directory)
     return None
+
+
+def dotnet_relevant(path: str) -> bool:
+    """Whether the .NET rule reads `path`: a `.cs`, `.csproj` or shared build file under the solution root."""
+    return path.startswith(f"{SOLUTION_ROOT}/") and (
+        posixpath.basename(path) in SHARED_BUILD_FILES or path.endswith((".cs", ".csproj")))
 
 
 def dotnet_selection(changed: Sequence[str], projects: Sequence[str]) -> DotnetSelection:
@@ -181,8 +190,7 @@ def exact_changed_paths(root: Path, base: str) -> list[str]:
         capture_output=True)
     if result.returncode != 0:
         raise GitError(result.stderr.decode("utf-8", errors="replace").rstrip("\n"))
-    return [name.decode("utf-8", errors="replace")
-            for name in result.stdout.split(b"\0") if name]
+    return [os.fsdecode(name) for name in result.stdout.split(b"\0") if name]
 
 
 def build_trigger(changed: Sequence[str], globs: Sequence[str]) -> str | None:
@@ -383,7 +391,7 @@ def main(argv: Sequence[str] | None = None, *,
     chosen = selection(changed, members, read, source_roots=args.source_root, pairs=pairs,
                        covers=covers, build_globs=args.build_when)
     dotnet_targets: list[str] = []
-    if args.dotnet_tests and any(p.startswith(f"{SOLUTION_ROOT}/") for p in exact):
+    if args.dotnet_tests and any(dotnet_relevant(p) for p in exact):
         try:
             projects = [p.relative_to(root).as_posix() for p in sources(root)
                         if p.name.endswith(".csproj")]
@@ -393,10 +401,16 @@ def main(argv: Sequence[str] | None = None, *,
         picked = dotnet_selection(exact, projects)
         if picked.whole_because and projects:
             try:
-                dotnet_targets = [solution(root).relative_to(root).as_posix()]
+                whole = solution(root)
             except Refusal as refusal:
                 _say(sys.stderr, f"test-touched: {refusal.reason}")
                 return 1
+            tests = sorted(p for p in projects if _project_stem(p).endswith(".Tests"))
+            listed = listed_projects(whole)
+            if all(Path(os.path.normpath(root / p)) in listed for p in tests):
+                dotnet_targets = [whole.relative_to(root).as_posix()]
+            else:
+                dotnet_targets = tests
         elif projects:
             dotnet_targets = list(picked.test_projects)
         if dotnet_targets:
