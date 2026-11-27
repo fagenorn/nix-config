@@ -20,9 +20,12 @@ public sealed record SolutionGraph(IReadOnlyList<ProjectFile> Projects, IReadOnl
         {
             var rel = SolutionTree.Relative(solutionRoot, file);
             var isProject = file.EndsWith(".csproj", StringComparison.Ordinal);
+            // A response file (Directory.Build.rsp, MSBuild.rsp) sets global properties, which override
+            // the shared props, so it is refused like any other MSBuild file.
             var isOther = file.EndsWith(".props", StringComparison.Ordinal)
                 || file.EndsWith(".targets", StringComparison.Ordinal)
-                || file.EndsWith(".user", StringComparison.Ordinal);
+                || file.EndsWith(".user", StringComparison.Ordinal)
+                || file.EndsWith(".rsp", StringComparison.OrdinalIgnoreCase);
             if (!isProject && !isOther)
             {
                 continue;

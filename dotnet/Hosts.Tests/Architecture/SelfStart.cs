@@ -21,7 +21,9 @@ public static class SelfStart
     private static readonly Regex InstanceLaunch = new(@"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*Start\s*\(\s*\)");
     private static readonly Regex Identifier = new(@"^[A-Za-z_][A-Za-z0-9_]*$");
     private static readonly Regex NamedArgument = new(@"^([A-Za-z_][A-Za-z0-9_]*)\s*:(?!:)(.*)$", RegexOptions.Singleline);
-    private static readonly Regex NewStartInfo = new(@"\bnew\s+(?:\w+\s*\.\s*)*ProcessStartInfo\s*\(");
+    // A target-typed `new(...)` handed to a launch or assigned to a StartInfo can only build a start info.
+    private static readonly Regex TargetTypedNew = new(@"^new\s*[({]");
+    private static readonly Regex NewStartInfo = new(@"\bnew\s+(?:\w+\s*\.\s*)*ProcessStartInfo\s*\(|\bnew\s*\(");
 
     private sealed record Parts(List<string> Executables, List<string> Arguments);
 
@@ -74,7 +76,7 @@ public static class SelfStart
 
             var resolved = Resolve(target, text, launch.Index);
             var parts = new Parts([], []);
-            if (resolved.Contains(StartInfoType, StringComparison.Ordinal))
+            if (resolved.Contains(StartInfoType, StringComparison.Ordinal) || TargetTypedNew.IsMatch(resolved))
             {
                 AddStartInfo(parts, resolved, text, launch.Index);
             }
@@ -84,9 +86,10 @@ public static class SelfStart
                 parts.Arguments.AddRange(others.Select(arg => Resolve(arg, text, launch.Index)));
             }
 
-            if (Identifier.IsMatch(target))
+            var variable = Unwrap(target);
+            if (Identifier.IsMatch(variable))
             {
-                AddMembers(parts, Regex.Escape(target), text, launch.Index);
+                AddMembers(parts, Regex.Escape(variable), text, launch.Index);
             }
 
             yield return parts;
@@ -283,21 +286,56 @@ public static class SelfStart
         return position < text.Length && text[position] == '\'' ? position + 1 : start;
     }
 
+    // Follows a chain of single assignments back from the launch. Each step reads only text before
+    // the assignment it came from, so the chain ends even when a variable is assigned from itself.
     private static string Resolve(string expression, string text, int launchIndex)
     {
-        var trimmed = expression.Trim();
-        if (!Identifier.IsMatch(trimmed))
+        var current = Unwrap(expression);
+        var before = launchIndex;
+        while (Identifier.IsMatch(current))
         {
-            return trimmed;
+            var assignment = LastAssignment(text, $@"\b{Regex.Escape(current)}", before);
+            if (assignment is null)
+            {
+                break;
+            }
+
+            current = Unwrap(assignment.Value.Value);
+            before = assignment.Value.Index;
         }
 
-        return LastAssignmentValue(text, $@"\b{Regex.Escape(trimmed)}", launchIndex) ?? trimmed;
+        return current;
     }
 
-    private static string? LastAssignmentValue(string text, string targetPattern, int launchIndex)
+    // Drops what leaves a value's identity alone: surrounding whitespace, a null-forgiving
+    // operator and enclosing parentheses.
+    private static string Unwrap(string expression)
+    {
+        var current = expression.Trim();
+        while (true)
+        {
+            if (current.EndsWith('!'))
+            {
+                current = current[..^1].TrimEnd();
+            }
+            else if (current.StartsWith('(') && Cut(current, 1, string.Empty) == current.Length - 1)
+            {
+                current = current[1..^1].Trim();
+            }
+            else
+            {
+                return current;
+            }
+        }
+    }
+
+    private static string? LastAssignmentValue(string text, string targetPattern, int launchIndex) =>
+        LastAssignment(text, targetPattern, launchIndex)?.Value;
+
+    private static (string Value, int Index)? LastAssignment(string text, string targetPattern, int launchIndex)
     {
         var last = Regex.Matches(text[..launchIndex], $@"{targetPattern}\s*=(?![=>])").LastOrDefault();
-        return last is null ? null : Value(text, last.Index + last.Length, ";");
+        return last is null ? null : (Value(text, last.Index + last.Length, ";"), last.Index);
     }
 
     private static List<string> Values(string text, string pattern, string stops) =>

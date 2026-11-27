@@ -298,6 +298,23 @@ public sealed class ReferenceGraphTests
         Assert.Equal(new[] { "Directory.Build.targets: unsupported MSBuild file" }, violations);
     }
 
+    [Theory]
+    [InlineData("Directory.Build.rsp")]
+    [InlineData("System/Directory.Build.rsp")]
+    [InlineData("MSBuild.rsp")]
+    [InlineData("directory.build.RSP")]
+    public void AResponseFileIsAViolation(string path)
+    {
+        using var planted = new PlantedSolution();
+        planted.Props("true");
+        planted.Project("System");
+        planted.Source(path, "-p:DisableTransitiveProjectReferences=false");
+
+        var violations = Violations(planted);
+
+        Assert.Equal(new[] { $"{path}: unsupported MSBuild file" }, violations);
+    }
+
     [Fact]
     public void AnImportIsAViolation()
     {

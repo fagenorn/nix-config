@@ -46,6 +46,17 @@ public sealed class SelfStartTests
     [InlineData("Process.Start(new ProcessStartInfo(arguments: \"commands\", fileName: \"agent-tools\"));")]
     [InlineData("Process.Start(startInfo: new ProcessStartInfo(Environment.ProcessPath!));")]
     [InlineData("var url = \"http://host\"; Process.Start(Environment.ProcessPath!);")]
+    [InlineData("var exe = Environment.ProcessPath; Process.Start(exe!);")]
+    [InlineData("var exe = Environment.ProcessPath; Process.Start((exe));")]
+    [InlineData("var exe = Environment.ProcessPath; Process.Start((exe)!);")]
+    [InlineData("var self = Environment.ProcessPath!; var exe = self; Process.Start(exe);")]
+    [InlineData("var self = Environment.ProcessPath!; var mid = self; var exe = mid!; Process.Start(exe);")]
+    [InlineData("var exe = Environment.ProcessPath!; ProcessStartInfo info = new(exe); Process.Start(info);")]
+    [InlineData("var exe = Environment.ProcessPath!; ProcessStartInfo info = new() { FileName = exe }; Process.Start(info);")]
+    [InlineData("var exe = Environment.ProcessPath!; ProcessStartInfo info = new(exe); Process.Start(info!);")]
+    [InlineData("var exe = Environment.ProcessPath!; Process.Start(new ProcessStartInfo(exe!));")]
+    [InlineData("var exe = Environment.ProcessPath!; using var p = new Process { StartInfo = new(exe) }; p.Start();")]
+    [InlineData("var exe = Environment.ProcessPath!; var p = new Process(); p.StartInfo = new() { FileName = exe }; p.Start();")]
     public void StartingTheToolsOwnBinaryIsAViolation(string source)
     {
         Assert.Equal(new[] { OwnBinary }, ViolationsOfHostsSource(source));
@@ -82,6 +93,22 @@ public sealed class SelfStartTests
     public void RecordingTheOwnPathBesideAnotherStartIsNoViolation()
     {
         var source = "var self = Environment.ProcessPath;\nProcess.Start(\"git\", \"status\");";
+
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void AnUnwrappedAndChainedLaunchOfAnotherProgramIsNoViolation()
+    {
+        var source = "var self = Environment.ProcessPath!; var exe = \"git\"; var alias = exe; Process.Start((alias)!);";
+
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void ATargetTypedStartInfoForAnotherProgramIsNoViolation()
+    {
+        var source = "var self = Environment.ProcessPath!; ProcessStartInfo info = new(\"git\"); Process.Start(info);";
 
         Assert.Empty(ViolationsOfHostsSource(source));
     }
