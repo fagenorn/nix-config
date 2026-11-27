@@ -655,7 +655,7 @@ class ConsoleCommentsStayShortTest(unittest.TestCase):
         ("python/agent_tools/console/service.py", "`read()` with retries:"),
         ("python/agent_tools/console/view.py", "What a running sprint is doing right now as one sentence"),
     )
-    PAGE = ("tests/test_console_page.py", "Raised from 75264: the work line")
+    PAGE = ("tests/test_console_page.py", "Raised from 75776: the Host alerts panel")
 
     def flagged(self, path, anchor):
         text = (REPO_ROOT / path).read_text("utf-8")

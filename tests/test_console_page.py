@@ -190,8 +190,8 @@ class PageTest(unittest.TestCase):
         # Raised from 72 KB by the merge of #1274, #1432 and #1424 (merged, 74199 bytes), from 73 KB: a long command's
         # permission card summary and fold did not fit, and from 73.5 KB: the done-for-now line and wrap-up did not fit.
         # The phone tap sizes and the End the sprint fold are measured against the merged page.
-        # Raised from 75264: the work line and the grid legend left no byte under it.
-        self.assertLess(len(gzip.compress(self.data, 9)), 75776)
+        # Raised from 75776: the Host alerts panel.
+        self.assertLess(len(gzip.compress(self.data, 9)), 77312)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -226,20 +226,20 @@ class PageTest(unittest.TestCase):
         self.assertEqual(
             {p for _, p in literals},
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
-             "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
-             "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
-             "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
-             "/api/account-add", "/api/signin-link", "/api/account-remove",
-             "/api/register-project", "/api/plan-answer", "/api/plan-approve",
-             "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
-             "/api/trust-check", "/api/register-cancel", "/api/picture/",
+             "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply", "/api/message",
+             "/api/stop", "/api/round-answer", "/api/continue", "/api/exclusion", "/api/pin",
+             "/api/signin", "/api/signin-code", "/api/signin-cancel", "/api/account-add",
+             "/api/signin-link", "/api/account-remove", "/api/register-project", "/api/plan-answer",
+             "/api/plan-approve", "/api/adoption-register", "/api/plan-defer",
+             "/api/register-confirm", "/api/trust-check", "/api/register-cancel", "/api/picture/",
              "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
              "/api/activate", "/api/look-retry", "/api/share-tailnet", "/api/share-colleague",
              "/api/share-remove", "/api/guest-account", "/api/guest-signin-code",
              "/api/guest-signin-cancel", "/api/adoption-merge", "/api/account-signout",
              "/api/guest-account-signout", "/api/guest-account-remove",
              "/api/project-question-delete", "/api/release-answer", "/api/permission-answer",
-             "/api/live-fault-withdraw"},
+             "/api/live-fault-withdraw", "/api/host-alerts-save", "/api/host-alerts-switch",
+             "/api/host-alerts-chats", "/api/host-alerts-test"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -248,7 +248,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 57)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 61)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )

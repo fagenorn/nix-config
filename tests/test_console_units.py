@@ -26,7 +26,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 PORT = 27184
 
 
-def check_command(case, command, home, launcher, tailscale=None):
+def check_command(case, command, home, launcher, tailscale=None, host_alerts=False):
     """The command's words; the first word is `launcher`, the console launcher of the platform package the host installs (from the host's own reading), `tailscale` the client path a host reads Serve status from (#1237, #1299)."""
     words = shlex.split(command)
     case.assertEqual(words[0], launcher)
@@ -36,6 +36,9 @@ def check_command(case, command, home, launcher, tailscale=None):
     if tailscale is not None:
         case.assertEqual(rest[:2], ["--tailscale", tailscale], command)
         rest = rest[2:]
+    if host_alerts:
+        case.assertEqual(rest[:1], ["--host-alerts"], command)
+        rest = rest[1:]
     case.assertEqual(len(rest), 2, command)
     # The one default screenshot folder a manual check's pictures may come from (issue 1112).
     case.assertEqual(rest[0], "--screenshots")
@@ -139,7 +142,8 @@ class DarwinAgent(unittest.TestCase):
             with self.subTest(host=host):
                 got, plist = self.got[host], self.plist[host]
                 command = got["command"]
-                check_command(self, command, got["home"], got["launcher"], got["tailscaleClient"])
+                check_command(self, command, got["home"], got["launcher"], got["tailscaleClient"],
+                              host_alerts=(host == "eleven-m5"))
                 self.assertEqual(got["daemonCommand" if got["atBoot"] else "agentCommand"], command)
                 self.assertEqual(plist["ProgramArguments"],
                                  ["/bin/sh", "-c", f"/bin/wait4path /nix/store && exec {command}"])
@@ -155,6 +159,10 @@ class DarwinAgent(unittest.TestCase):
         menu_bar = self.got["mbp"]
         self.assertIsNone(menu_bar["tailscaleClient"])
         self.assertNotIn("--tailscale", shlex.split(menu_bar["command"]))
+
+    def test_only_the_host_that_watches_memory_shows_host_alerts(self):
+        self.assertIn("--host-alerts", shlex.split(self.got["eleven-m5"]["command"]))
+        self.assertNotIn("--host-alerts", shlex.split(self.got["mbp"]["command"]))
 
     def test_a_boot_host_runs_the_console_as_a_daemon_of_the_owner(self):
         for got, plist in self.hosts():

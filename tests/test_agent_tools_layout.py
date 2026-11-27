@@ -50,6 +50,8 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.verification.verify_answer",  # answer, inbox, service
         "agent_tools.verification.verify_owner",  # view
         "agent_tools.verification.verify_wait",  # inbox
+        "agent_tools.hosts.host_alerts",  # console
+        "agent_tools.hosts.host_alerts_panel",  # console, service
         "agent_tools.hosts.model_pricing",  # spend
     }),
     "delivery": frozenset({

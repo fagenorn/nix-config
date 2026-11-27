@@ -385,8 +385,9 @@ growth is real and the server is idle.
 
 ### Alerts
 
-Alerts go to the owner's Telegram bot. The owner sets it up on the console page,
-which writes `~/.config/host-alerts/telegram.json` (mode `0600`, owned by the
+Alerts go to the owner's Telegram bot. The owner sets it up on the console page:
+the panel opens from the Alerts button at the top of the page and offers Find
+chats, Send test and the on/off switch. It writes `~/.config/host-alerts/telegram.json` (mode `0600`, owned by the
 owner) with `enabled`, `bot_token` and `chat_id`.
 
 When the file is unreadable, too open or incomplete, or when Telegram does not

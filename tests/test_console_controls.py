@@ -28,7 +28,7 @@ KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "
          "field-code")
 TREES = ("inbox", "statement", "projects", "unmanaged", "digest", "goal", "capacity", "account_add",
          "register", "accounts", "accounts_body", "promoted", "viewer", "reading", "sharing_open",
-         "sharing_body")
+         "sharing_body", "host_alerts_open", "host_alerts_body")
 BUTTON_FOLDS = ("sprint-more", "item-detail")
 QUIET_ONLY = frozenset({"btn-quiet"})
 PRIMARY_OR_QUIET = frozenset({"btn-primary", "btn-quiet"})
@@ -51,7 +51,8 @@ DESK_CONTROLS: dict = {
     **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry", "look-retry", "adoption-merge",
              "release-approve", "permission-allow"),
     **_roles(DANGER_ONLY, "withdraw", "stall-withdraw", "start-withdraw", "progress-withdraw",
-             "acct-remove", "acct-remove-send", "share-off", "share-remove", "reading-delete-send"),
+             "acct-remove", "acct-remove-send", "share-off", "share-remove", "reading-delete-send",
+             "alerts-off"),
     **_roles(OPTION_ONLY, "opt"),
     **_roles(
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
@@ -65,11 +66,13 @@ DESK_CONTROLS: dict = {
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
         "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate",
         "share-open", "share-close", "share-on", "share-edit", "share-project",
-        "share-add", "adoption-failed-dismiss", "release-decline", "permission-refuse"),
+        "share-add", "adoption-failed-dismiss", "release-decline", "permission-refuse",
+        "alerts-open", "alerts-close", "alerts-find", "alerts-chat", "alerts-save", "alerts-test", "alerts-on"),
     **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "kept-words-text", "ask-text",
              "follow-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
-             "notice-text", "register-path", "goal-filter", "goal-text", "share-login"),
+             "notice-text", "register-path", "goal-filter", "goal-text", "share-login", "alerts-token",
+             "alerts-chat-id"),
     **_roles(CODE_ONLY, "signin-code", "account-code"),
 }
 # The guest page's own-account controls (#1343): drawn only on the guest door, so the desk scenarios never reach them.
@@ -140,6 +143,9 @@ def spend_buttons() -> list:
 
 def page_script() -> str:
     return re.search(r"(?s)<script>(.*?)</script>", PAGE.read_text(encoding="utf-8")).group(1)
+
+
+ALERTS_SAVED = {"token_set": True, "chat_id": "-1001234", "enabled": True, "problem": None}
 
 
 def desk_scenarios() -> list:
@@ -270,6 +276,12 @@ def desk_scenarios() -> list:
         [START, {"frame": frame([manual])}, {"click": "ans-passed"}, snapshot],
         [*OPEN, {"click": "share-edit"}, snapshot],
         [*UNSHARED_OPEN, snapshot],
+        # the Host alerts panel: a saved bot with its found chats and the switch both ways
+        [START, {"frame": {**SHARED_FRAME, "host_alerts": ALERTS_SAVED}}, {"click": "alerts-open"},
+         {"respond": {"status": 200, "text": json.dumps({"chats": [{"id": "-1", "title": "Ops"}], "text": None})}},
+         {"click": "alerts-find"}, snapshot],
+        [START, {"frame": {**SHARED_FRAME, "host_alerts": {**ALERTS_SAVED, "enabled": False}}},
+         {"click": "alerts-open"}, snapshot],
     ]
 
 

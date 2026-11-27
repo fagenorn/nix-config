@@ -101,7 +101,11 @@ summary { min-height: 24px; }
 .acct-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; font-size: .8125rem; }
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
 #accounts .account-add { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
-.share-open { flex: 0 0 auto; }
+.share-open, .alerts-open { flex: 0 0 auto; }
+.alerts-line, .alerts-problem, .alerts-chats-text, .alerts-result { margin-top: 6px; }
+.alerts-find-row, .alerts-form, .alerts-test-row, .alerts-switch, .alerts-chats { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; }
+.alerts-switch { padding-top: 10px; border-top: 1px solid var(--hair); }
+.alerts-refused { color: var(--sub0); }
 .share-name, .share-line, .share-outside, .share-last, .share-none { margin-top: 6px; }
 .share-switch, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .share-people { list-style: none; }
@@ -560,7 +564,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><span class="top-who" id="top-who" hidden></span><a class="nav" id="spend-link" href="/spend" hidden>Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal" hidden></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)" hidden></button><button type="button" class="share-open btn-quiet" id="sharing-open" aria-haspopup="dialog" aria-controls="sharing" aria-expanded="false" hidden>Sharing</button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section><section class="acct-panel share-panel" id="sharing" role="dialog" aria-label="Sharing" tabindex="-1" hidden><div class="share-body" id="sharing-body"></div></section></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><span class="top-who" id="top-who" hidden></span><a class="nav" id="spend-link" href="/spend" hidden>Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal" hidden></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)" hidden></button><button type="button" class="share-open btn-quiet" id="sharing-open" aria-haspopup="dialog" aria-controls="sharing" aria-expanded="false" hidden>Sharing</button><button type="button" class="alerts-open btn-quiet" id="host-alerts-open" aria-haspopup="dialog" aria-controls="host-alerts" aria-expanded="false" hidden>Alerts</button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section><section class="acct-panel share-panel" id="sharing" role="dialog" aria-label="Sharing" tabindex="-1" hidden><div class="share-body" id="sharing-body"></div></section><section class="acct-panel alerts-panel" id="host-alerts" role="dialog" aria-label="Host alerts" tabindex="-1" hidden><div class="alerts-body" id="host-alerts-body"></div></section></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
@@ -3291,7 +3295,6 @@ function renderCapacity(view) {
   box.replaceChildren(...nodes);
 }
 let accountsOpen = false;
-let accountsReturn = null;
 function accountRow(shown, view) {
   const p = settled(shown);
   const known = (v) => v !== null && v !== undefined;
@@ -3401,7 +3404,7 @@ function renderAccounts(view) {
   removeFields = new Map();
   const head = el("div", "acct-head");
   head.appendChild(el("h2", "sec-h", "Accounts"));
-  head.appendChild(actionButton("acct-close btn-quiet", "Close", closeAccounts));
+  head.appendChild(actionButton("acct-close btn-quiet", "Close", () => closeTop("accounts")));
   const list = el("ul", "acct-rows");
   for (const p of cap.profiles) list.appendChild(accountRow(p, view));
   const parts = [head, list];
@@ -3432,38 +3435,57 @@ function anySigninLive() {
   const runs = lastView.signin_runs !== null && typeof lastView.signin_runs === "object" ? lastView.signin_runs : {};
   return Object.values(runs).some((run) => run !== null && typeof run === "object" && run.state === "running");
 }
-function openAccounts() {
+let sharingOpen = false;
+let alertsOpen = false;
+// The three top-bar panels share one open, close, toggle and Escape path: one is open at a time, and focus goes back to where it was.
+// blurLost: a panel opened with no page focus lets go of whatever holds it now (a field the inbox rebuild focused).
+const TOP_PANELS = {
+  accounts: {
+    button: "capacity", panel: "accounts", back: null, blurLost: true,
+    isOpen: () => accountsOpen, set: (on) => { accountsOpen = on; },
+    draw: (view) => {
+      if (anySigninLive()) renderInbox(view);
+      renderAccounts(view);
+    },
+  },
+  sharing: {
+    button: "sharing-open", panel: "sharing", back: null, blurLost: false,
+    isOpen: () => sharingOpen, set: (on) => { sharingOpen = on; }, draw: (view) => renderSharing(view),
+  },
+  alerts: {
+    button: "host-alerts-open", panel: "host-alerts", back: null, blurLost: false,
+    isOpen: () => alertsOpen, set: (on) => { alertsOpen = on; }, draw: (view) => renderHostAlerts(view),
+  },
+};
+function openTop(name) {
   if (lastView === null) return;
-  if (sharingOpen) closeSharing();
-  accountsReturn = document.activeElement;
-  accountsOpen = true;
-  if (anySigninLive()) renderInbox(lastView);
-  renderAccounts(lastView);
-  document.getElementById("accounts").focus();
+  for (const [other, shown] of Object.entries(TOP_PANELS)) if (other !== name && shown.isOpen()) closeTop(other);
+  const panel = TOP_PANELS[name];
+  panel.back = document.activeElement;
+  panel.set(true);
+  panel.draw(lastView);
+  document.getElementById(panel.panel).focus();
 }
-function closeAccounts() {
-  accountsOpen = false;
-  if (lastView !== null) {
-    if (anySigninLive()) renderInbox(lastView);
-    renderAccounts(lastView);
-  }
-  const back = accountsReturn;
-  accountsReturn = null;
-  if (back === null || back === document.body) {
-    // The page had no focus at opening: whatever holds it now (a field the inbox rebuild focused) lets go.
+function closeTop(name) {
+  const panel = TOP_PANELS[name];
+  panel.set(false);
+  if (lastView !== null) panel.draw(lastView);
+  const back = panel.back;
+  panel.back = null;
+  if (panel.blurLost && (back === null || back === document.body)) {
     const now = document.activeElement;
     if (now !== null && now !== undefined && now !== document.body) now.blur();
-    document.getElementById("accounts").blur();
+    document.getElementById(panel.panel).blur();
     return;
   }
-  (back.isConnected ? back : document.getElementById("capacity")).focus();
+  (back !== null && back.isConnected ? back : document.getElementById(panel.button)).focus();
 }
-document.getElementById("capacity").addEventListener("click", () => {
-  if (accountsOpen) closeAccounts();
-  else openAccounts();
-});
-let sharingOpen = false;
-let sharingReturn = null;
+for (const [name, panel] of Object.entries(TOP_PANELS)) {
+  document.getElementById(panel.button).addEventListener("click", () => {
+    if (panel.isOpen()) closeTop(name);
+    else openTop(name);
+  });
+}
 let loginDraft = "";
 const sharePicks = new Set();
 const sharePosts = new Map();
@@ -3504,31 +3526,40 @@ function shareLast(r) {
 function shareSwitch(shared) {
   return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ shared }) });
 }
-async function postShare(key, send, done, cls) {
-  const current = sharePosts.get(key);
+// One post at a time per key, for a top-bar panel: its post map, how to redraw it and the class of its refusal line.
+const SHARE_PANEL = { posts: sharePosts, draw: () => renderSharing(lastView), refused: "share-refused" };
+// A post whose answer is 200 with a JSON body (not 204) goes through jsonAnswer, and done receives its synthetic answer.
+async function jsonAnswer(response) {
+  if (response.status !== 200) return response;
+  return { status: 204, json: JSON.parse(await response.text()) };
+}
+async function postPanel(panel, key, send, done, cls) {
+  const current = panel.posts.get(key);
   if (current !== undefined && current.phase === "sending") return;
   const state = { phase: "sending", reason: "", cls };
-  sharePosts.set(key, state);
-  renderSharing(lastView);
+  panel.posts.set(key, state);
+  panel.draw();
   let reason;
+  let answer = null;
   try {
-    reason = await ownerAnswer(await send());
+    answer = await send();
+    reason = await ownerAnswer(answer);
   } catch (error) {
     console.error(error);
     reason = "the console did not answer";
   }
-  if (sharePosts.get(key) !== state) return;
+  if (panel.posts.get(key) !== state) return;
   if (reason === null) {
-    sharePosts.delete(key);
-    done();
+    panel.posts.delete(key);
+    done(answer);
   } else {
     state.phase = "failed";
     state.reason = reason;
   }
-  renderSharing(lastView);
+  panel.draw();
 }
-function shareAct(parent, key, cls, label, onClick, off) {
-  const state = sharePosts.get(key);
+function panelAct(panel, parent, key, cls, label, onClick, off) {
+  const state = panel.posts.get(key);
   const button = actionButton(cls, label, onClick);
   const sending = state !== undefined && state.phase === "sending";
   button.disabled = off;
@@ -3537,7 +3568,7 @@ function shareAct(parent, key, cls, label, onClick, off) {
   markBusy(button, sending && state.cls === cls.split(" ")[0]);
   parent.appendChild(button);
   if (state !== undefined && state.phase === "failed" && state.cls === cls.split(" ")[0]) {
-    parent.appendChild(el("span", "share-refused", "The console refused: " + state.reason + "."));
+    parent.appendChild(el("span", panel.refused, "The console refused: " + state.reason + "."));
   }
 }
 function findShare(node, row, login, cls, project) {
@@ -3571,12 +3602,12 @@ function renderSharing(view) {
   }
   const head = el("div", "acct-head");
   head.appendChild(el("h2", "sec-h", "Sharing"));
-  head.appendChild(actionButton("share-close btn-quiet", "Close", closeSharing));
+  head.appendChild(actionButton("share-close btn-quiet", "Close", () => closeTop("sharing")));
   const row = el("div", "share-switch");
   if (sharing.shared === true) {
-    shareAct(row, "sharing", "share-off btn-danger", "Turn sharing off", () => postShare("sharing", () => shareSwitch(false), () => {}, "share-off"), false);
+    panelAct(SHARE_PANEL, row, "sharing", "share-off btn-danger", "Turn sharing off", () => postPanel(SHARE_PANEL, "sharing", () => shareSwitch(false), () => {}, "share-off"), false);
   } else {
-    shareAct(row, "sharing", "share-on btn-quiet", "Turn sharing on", () => postShare("sharing", () => shareSwitch(true), () => {}, "share-on"), false);
+    panelAct(SHARE_PANEL, row, "sharing", "share-on btn-quiet", "Turn sharing on", () => postPanel(SHARE_PANEL, "sharing", () => shareSwitch(true), () => {}, "share-on"), false);
   }
   const parts = [head];
   if (shareName(sharing) !== null) parts.push(el("p", "share-name", shareName(sharing)));
@@ -3600,7 +3631,7 @@ function renderSharing(view) {
         const field = findShare(body, "", "", "share-login field-line", "");
         if (field !== null) field.focus({ preventScroll: true });
       }));
-      shareAct(item, "login\n" + c.login, "share-remove btn-danger", "Remove", () => postShare("login\n" + c.login, () => fetch("/api/share-remove", {
+      panelAct(SHARE_PANEL, item, "login\n" + c.login, "share-remove btn-danger", "Remove", () => postPanel(SHARE_PANEL, "login\n" + c.login, () => fetch("/api/share-remove", {
         method: "POST", headers: ownerHeaders(), body: JSON.stringify({ login: c.login }),
       }), () => {}, "share-remove"), false);
       list.appendChild(item);
@@ -3626,10 +3657,10 @@ function renderSharing(view) {
   }
   const name = loginDraft.trim().toLowerCase();
   const listed = sharing.colleagues.some((c) => c.login === name);
-  shareAct(form, "login\n" + name, "share-add btn-quiet", listed ? "Save projects" : "Add", () => {
+  panelAct(SHARE_PANEL, form, "login\n" + name, "share-add btn-quiet", listed ? "Save projects" : "Add", () => {
     const sent = loginDraft;
     const picks = [...sharePicks].sort();
-    postShare("login\n" + name, () => fetch("/api/share-colleague", {
+    postPanel(SHARE_PANEL, "login\n" + name, () => fetch("/api/share-colleague", {
       method: "POST", headers: ownerHeaders(), body: JSON.stringify({ login: sent.trim(), projects: picks }),
     }), () => {
       if (loginDraft === sent && [...sharePicks].sort().join("\n") === picks.join("\n")) {
@@ -3646,25 +3677,130 @@ function renderSharing(view) {
     if (again.tagName === "INPUT") again.setSelectionRange(kept.start, kept.end);
   }
 }
-function openSharing() {
-  if (lastView === null) return;
-  if (accountsOpen) closeAccounts();
-  sharingReturn = document.activeElement;
-  sharingOpen = true;
-  renderSharing(lastView);
-  document.getElementById("sharing").focus();
+let alertToken = "";
+let alertChat = null;
+let alertChats = null;
+let alertResult = null;
+const alertPosts = new Map();
+const ALERTS_PANEL = { posts: alertPosts, draw: () => renderHostAlerts(lastView), refused: "alerts-refused" };
+function findAlert(node, cls, chat) {
+  if (node.className === cls && (node.dataset === undefined || (node.dataset.chat || "") === chat)) return node;
+  for (const child of node.children || []) {
+    const found = findAlert(child, cls, chat);
+    if (found !== null) return found;
+  }
+  return null;
 }
-function closeSharing() {
-  sharingOpen = false;
-  if (lastView !== null) renderSharing(lastView);
-  const back = sharingReturn;
-  sharingReturn = null;
-  (back !== null && back.isConnected ? back : document.getElementById("sharing-open")).focus();
+// The Host alerts panel: the typed token lives only in alertToken and the token field's value, and is emptied once a save is answered.
+function renderHostAlerts(view) {
+  const entry = view.host_alerts !== null && typeof view.host_alerts === "object" ? view.host_alerts : null;
+  const body = document.getElementById("host-alerts-body");
+  if (entry === null && alertsOpen) {
+    alertsOpen = false;
+    TOP_PANELS.alerts.back = null;
+  }
+  document.getElementById("host-alerts-open").hidden = entry === null;
+  document.getElementById("host-alerts").hidden = !alertsOpen;
+  document.getElementById("host-alerts-open").setAttribute("aria-expanded", alertsOpen ? "true" : "false");
+  if (!alertsOpen) {
+    alertToken = "";
+    alertChat = null;
+    alertChats = null;
+    alertResult = null;
+    alertPosts.clear();
+    body.replaceChildren();
+    return;
+  }
+  let kept = null;
+  for (let n = document.activeElement; n; n = n.parentNode) {
+    if (n !== body) continue;
+    const at = document.activeElement;
+    kept = { cls: at.className, chat: at.dataset.chat || "", start: at.selectionStart, end: at.selectionEnd };
+    break;
+  }
+  const hasChat = typeof entry.chat_id === "string" && entry.chat_id !== "";
+  const ready = entry.token_set === true && hasChat;
+  const chat = alertChat !== null ? alertChat : typeof entry.chat_id === "string" ? entry.chat_id : "";
+  const head = el("div", "acct-head");
+  head.appendChild(el("h2", "sec-h", "Host alerts"));
+  head.appendChild(actionButton("alerts-close btn-quiet", "Close", () => closeTop("alerts")));
+  const parts = [head,
+    el("p", "alerts-line", entry.token_set === true ? "A bot token is saved." : "No bot token is saved yet."),
+    el("p", "alerts-line", hasChat ? "Alerts go to chat " + entry.chat_id + "." : "No chat is chosen yet."),
+    el("p", "alerts-line", entry.enabled === true ? "Alerts are on." : "Alerts are off: this computer records them in its log only.")];
+  if (typeof entry.problem === "string") parts.push(el("p", "alerts-problem", entry.problem));
+  const token = el("input", "alerts-token field-line");
+  token.type = "password";
+  token.autocomplete = "off";
+  token.spellcheck = false;
+  token.setAttribute("aria-label", "Bot token from BotFather");
+  token.setAttribute("placeholder", entry.token_set === true ? "Saved; type a new one to replace it" : "123456:ABC...");
+  token.value = alertToken;
+  token.addEventListener("input", () => {
+    alertToken = token.value;
+    renderHostAlerts(lastView);
+  });
+  const find = el("div", "alerts-find-row");
+  find.appendChild(token);
+  panelAct(ALERTS_PANEL, find, "chats", "alerts-find btn-quiet", "Find chats", () => {
+    const typed = alertToken.trim();
+    postPanel(ALERTS_PANEL, "chats", () => fetch("/api/host-alerts-chats", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify(typed === "" ? {} : { bot_token: typed }),
+    }).then(jsonAnswer), (answer) => { alertChats = answer.json; }, "alerts-find");
+  }, false);
+  parts.push(find);
+  if (alertChats !== null) {
+    const picks = el("div", "alerts-chats");
+    for (const c of alertChats.chats) {
+      const pick = actionButton("alerts-chat btn-quiet", c.title + " (" + c.id + ")", () => {
+        alertChat = c.id;
+        renderHostAlerts(lastView);
+      });
+      pick.dataset.chat = c.id;
+      pick.setAttribute("aria-pressed", chat.trim() === c.id ? "true" : "false");
+      picks.appendChild(pick);
+    }
+    parts.push(picks);
+    if (typeof alertChats.text === "string") parts.push(el("p", "alerts-chats-text", alertChats.text));
+  }
+  const chatField = accountField("alerts-chat-id field-line", "Chat id", "Chat id");
+  chatField.value = chat;
+  chatField.addEventListener("input", () => {
+    alertChat = chatField.value;
+    renderHostAlerts(lastView);
+  });
+  const save = el("div", "alerts-form");
+  save.appendChild(chatField);
+  panelAct(ALERTS_PANEL, save, "save", "alerts-save btn-quiet", "Save", () => {
+    const sent = alertToken.trim();
+    const sentChat = chat.trim();
+    postPanel(ALERTS_PANEL, "save", () => fetch("/api/host-alerts-save", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify(sent === "" ? { chat_id: sentChat } : { chat_id: sentChat, bot_token: sent }),
+    }), () => { if (alertToken.trim() === sent) alertToken = ""; }, "alerts-save");
+  }, chat.trim() === "" || (alertToken.trim() === "" && entry.token_set !== true));
+  parts.push(save);
+  const test = el("div", "alerts-test-row");
+  panelAct(ALERTS_PANEL, test, "test", "alerts-test btn-quiet", "Send test", () => {
+    postPanel(ALERTS_PANEL, "test", () => fetch("/api/host-alerts-test", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({}),
+    }).then(jsonAnswer), (answer) => { alertResult = answer.json.text; }, "alerts-test");
+  }, !ready);
+  parts.push(test);
+  if (typeof alertResult === "string") parts.push(el("p", "alerts-result", alertResult));
+  const row = el("div", "alerts-switch");
+  const other = entry.enabled !== true;
+  panelAct(ALERTS_PANEL, row, "switch", other ? "alerts-on btn-quiet" : "alerts-off btn-danger", other ? "Turn alerts on" : "Turn alerts off",
+    () => postPanel(ALERTS_PANEL, "switch", () => fetch("/api/host-alerts-switch", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ enabled: other }),
+    }), () => {}, other ? "alerts-on" : "alerts-off"), !ready);
+  parts.push(row);
+  body.replaceChildren(...parts);
+  const again = kept === null ? null : findAlert(body, kept.cls, kept.chat);
+  if (again !== null) {
+    again.focus({ preventScroll: true });
+    if (again.tagName === "INPUT") again.setSelectionRange(kept.start, kept.end);
+  }
 }
-document.getElementById("sharing-open").addEventListener("click", () => {
-  if (sharingOpen) closeSharing();
-  else openSharing();
-});
 function renderPromoted(view) {
   const box = document.getElementById("promoted");
   const cap = settledCapacity(view.capacity);
@@ -6430,6 +6566,7 @@ function render(view) {
     renderInbox(view);
     renderAccounts(view);
     renderSharing(view);
+    renderHostAlerts(view);
     renderDigest(view);
     renderProjects(view);
     renderUnmanaged(view);
@@ -6459,7 +6596,7 @@ const GUEST_TOP = "The owner's console, shared with you";
 const STALE_LEAD = "The tracker could not be read for ";
 const GUEST_KEEPS = new Set(["pic-thumb", "sprint-check"]);
 const OWNER_PARTS = ["spend-link", "capacity", "accounts", "accounts-body", "account-add", "sharing-open",
-  "sharing", "sharing-body", "promoted", "digest", "unmanaged", "register"];
+  "sharing", "sharing-body", "host-alerts-open", "host-alerts", "host-alerts-body", "promoted", "digest", "unmanaged", "register"];
 const guestDoor = document.getElementById("console-door").content !== "owner";
 if (guestDoor) {
   for (const id of OWNER_PARTS) {
@@ -6931,17 +7068,11 @@ document.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.altKey || event.metaKey || event.repeat || lastView === null) return;
   if (viewerKey(event)) return;
   if (guestDoor) return;
-  if (accountsOpen) {
+  const shown = Object.keys(TOP_PANELS).find((name) => TOP_PANELS[name].isOpen());
+  if (shown !== undefined) {
     if (event.key === "Escape") {
       event.preventDefault();
-      closeAccounts();
-    }
-    return;
-  }
-  if (sharingOpen) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeSharing();
+      closeTop(shown);
     }
     return;
   }
@@ -6967,7 +7098,7 @@ document.addEventListener("keydown", (event) => {
   if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT", "ARTICLE", "LI"].includes(focused)) return;
   if (event.target && event.target.isContentEditable === true) return;
   if (event.key === "a") {
-    openAccounts();
+    openTop("accounts");
     event.preventDefault();
     return;
   }
@@ -7035,4 +7166,4 @@ source.onerror = () => {
 };
 </script>
 </body>
-</html>
+</html> <!-- suppress-standard:B17 the console page is one served file, so its top-bar panels are drawn in it -->

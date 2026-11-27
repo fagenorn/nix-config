@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-nine screens the sprint block, the finished list, the message life, the
+- `STATES` names the sixty-one screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `sprint-fold-open` is the sprint block of `tell-box-open`
   with its own fold and its End the sprint fold opened (`open_end_fold`); on a base console End the
@@ -139,7 +139,8 @@ Contract:
   can act on with its Approve and Ask for changes controls; and an owner sprint with an owner message;
   and one tracker card, a release confirm of `owner/web#12`, waiting on the owner, which the page
   draws as `.guest-wait` with no control. `owner-actors` is the owner's desk over the same seed.
-  `owner-accounts` is that desk again with the accounts panel opened (`#capacity` clicked), the last state.
+  `owner-accounts` is that desk again with the accounts panel opened (`#capacity` clicked);
+  `host-alerts-panel`, the last state, is the Host alerts panel opened (tests/console_screenshot_host_alerts.py).
   `guest-page`, `guest-steer`, `owner-actors` and `owner-accounts` also hold the pool's three accounts, `work-main` and
   `work-spare`, each with a week and a 5h window, and `colleague-1`, which COLLEAGUE added himself (an
   `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1", "identity": <the mark of its directory>}` written straight to the log, the identity without which his row has no token and the page no Sign out or Remove) and
@@ -271,11 +272,9 @@ import inspect
 import json
 import os
 import socket
-import struct
 import sys
 import tempfile
 import threading
-import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
@@ -291,6 +290,7 @@ from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret
 from agent_tools.system.forge_api import ForgeError
 
+from . import console_screenshot_host_alerts as alert_shot
 from . import console_screenshot_stand_ins as stand_ins
 from . import console_screenshot_clock as shot_clock
 from .console_land_queue import land_queue_reader
@@ -311,7 +311,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-op
           "ask-goal", "question-read", "deeper-offer", "deeper-answer", "activation-tooling", "activation-host", "register-apply",
           "register-draft", "register-reconcile-apply", "register-reconcile-draft", "adoption-merge", "adoption-moved", "adoption-failed", "sharing-panel",
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors",
-          "owner-accounts")
+          "owner-accounts", "host-alerts-panel")
 WIDTHS = (1440, 480)
 # The widths in between a row may also name: they take no picture, a row at one is read in the
 # 1440 shot's page after its own rows, with the viewport resized to it.
@@ -2111,18 +2111,6 @@ def sandbox_environ(root: Path) -> dict[str, str]:
             "XDG_CONFIG_HOME": str(root / "xdg-config")}
 
 
-def _solid_png(colour: tuple[int, int, int], width: int = 96, height: int = 60) -> bytes:
-    """A small RGB PNG of one colour, so a picture gallery has something to draw."""
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        body = kind + data
-        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
-
-    row = b"\x00" + bytes(colour) * width
-    return (b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
-
-
 def _iso(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="microseconds")
 
@@ -2215,7 +2203,7 @@ class _Seed:
         stored = []
         for pair, line, colour in (("before", "Before, 1440 px", (222, 226, 232)),
                                    ("after", "After, 1440 px", (196, 224, 205))):
-            picture, _ = pictures.store(self.pictures_dir, _solid_png(colour))
+            picture, _ = pictures.store(self.pictures_dir, stand_ins.solid_png(colour))
             self.put(MINUTE * 5, *pictures.entry(project, sid, picture))
             stored.append({"picture": picture, "line": line, "pair": pair})
         return stored
@@ -2647,7 +2635,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "session_id": DESK_OUTSIDE, "cwd": web_root, "repo": web_root,
             "state": "working", "name": "importer run"})
         return running, ended
-    elif state not in ("nothing-running", *ACTIVATION_PATHS):
+    elif state not in ("nothing-running", alert_shot.STATE, *ACTIVATION_PATHS):
         raise ValueError(f"unknown state {state!r}")
     return ()
 
@@ -2949,7 +2937,8 @@ def _tailnet_kwargs(guest_dir: Path | None, readable: bool, service: list) -> di
 
 
 def start_service(fixture: Fixture, now_s: float, launches: list | None = None, *,
-                  guest_dir: Path | None = None, tailnet_readable: bool = True) -> ConsoleService:
+                  guest_dir: Path | None = None, tailnet_readable: bool = True,
+                  telegram: str | None = None) -> ConsoleService:
     def launcher(launch: manager.Launch) -> None:
         if launches is not None:
             launches.append(launch)
@@ -2977,6 +2966,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         repo_of=lambda cwd: cwd, ping_log=lambda: None,
         **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)),
         **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **(stand_ins.title_kwargs(ConsoleService) if fixture.titled else {}),
+        **({} if telegram is None else alert_shot.service_kwargs(ConsoleService, fixture.root, telegram)),
         **forge, **shot_clock.service_clocks(now_s))
     bound.append(service)
     service.start()
@@ -3104,12 +3094,14 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                     with shot_clock.fixture_dirs(home) as tmp, \
                             tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
                         fixture = build_fixture(Path(tmp).resolve(), state, now, read=read)
-                        service = start_service(
-                            fixture, now,
-                            guest_dir=Path(door) if state in SHARING_STATES else None,
-                            tailnet_readable=state != "sharing-unreadable")
-                        serve = None
+                        telegram = alert_shot.Telegram() if state == alert_shot.STATE else None
+                        service = serve = None
                         try:
+                            service = start_service(
+                                fixture, now,
+                                guest_dir=Path(door) if state in SHARING_STATES else None,
+                                tailnet_readable=state != "sharing-unreadable",
+                                telegram=None if telegram is None else telegram.api)
                             host, port = service.address
                             if state in HELD_PROMPTS:
                                 held = hold_permission(service, fixture, state)
@@ -3131,7 +3123,10 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                         finally:
                             if serve is not None:
                                 serve.close()
-                            service.close()
+                            if service is not None:
+                                service.close()
+                            if telegram is not None:
+                                telegram.close()
                 if sheets:
                     sheet(browser, shot_paths, out / f"{state}-sheet.png")
             if sheets and composite is not None:
@@ -3377,6 +3372,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: st
         if state in SHARING_PANELS and page.query_selector("#sharing-open") is not None:
             page.click("#sharing-open")
             page.wait_for_selector("#sharing:not([hidden])")
+        if state == alert_shot.STATE:
+            alert_shot.open_panel(page)
         tell = None
         if state == "tell-box-open":
             page.click("button.tell-open")

@@ -8,6 +8,8 @@ given has no titles read, and the stand-in tracker lives here rather than in the
 import http.client
 import inspect
 import socket
+import struct
+import zlib
 from pathlib import Path
 
 TITLES = {21: "Keep the theme after a reload", 22: "Save the settings in one click",
@@ -26,6 +28,18 @@ def title_kwargs(constructor) -> dict:
     if "title_reader" in inspect.signature(constructor).parameters:
         return {"title_reader": title_reader}
     return {}
+
+
+def solid_png(colour: tuple[int, int, int], width: int = 96, height: int = 60) -> bytes:
+    """A small RGB PNG of one colour, so a picture gallery has something to draw."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    row = b"\x00" + bytes(colour) * width
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
 
 
 def poll_titles(service) -> None:

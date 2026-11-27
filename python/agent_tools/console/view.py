@@ -65,12 +65,14 @@ Wire format, one object:
      "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...],
      "activation": <activation line> | null,
      "spend": <spend view> | null,
+     "host_alerts": {"token_set": <bool>, "chat_id": "<id>" | null, "enabled": <bool>, "problem": "<text>" | null} | null,
      "sharing": {"shared": <bool>, "tailnet": <this host's read name> | null,
                  "colleagues": [{"login", "projects"}, ...],
                  "state": "off" | "unreadable" | "unchecked" | "not_proxying" | "serving",
                  "last_request": <guest-door reading> | null, "socket": <guest socket path> | null,
                  "other_device_seen": <bool>}}
 
+`host_alerts` is null without a panel, is never on a guest's view (`guest.scrub`) and never holds the bot token.
 `sharing` is the owner's access list for the guest door and its Serve state (#1237,
 `guest.sharing_entry`), `SHARING_OFF` when none is given; it is never on a guest's view
 (`guest.scrub`). `last_request` is the last guest-door request's `guest.reading` (counts and flags,
@@ -2325,10 +2327,8 @@ def derive_view(
     deliveries: Mapping[tuple[str, str], DeliveryState] | None = None,
     now_ms: int | None = None,
     sprints: Mapping[str, SprintState] | None = None,
-    managers: bool = True,
-    pending: Mapping[str, PendingStop] | None = None,
-    signin_runs: Mapping[str, Mapping] | None = None,
-    accounts_added: Iterable[str] = (),
+    managers: bool = True, pending: Mapping[str, PendingStop] | None = None,
+    signin_runs: Mapping[str, Mapping] | None = None, accounts_added: Iterable[str] = (),
     pin: Mapping | None = None, pin_launches: Iterable[str] = (),
     registration: Mapping | None = None,
     adoption_items: Iterable[Mapping] = (), release_items: Iterable[Mapping] = (),
@@ -2344,7 +2344,7 @@ def derive_view(
     sharing: Mapping | None = None, moves: Mapping[str, MoveNote] | None = None,
     engine_runs: Iterable[engine_runs_module.RunState] | None = None, engine_lines: bool = True,
     issue_titles: Mapping[str, Mapping[int, str]] | None = None,
-    prompted_sprints: Iterable[str] = (),
+    prompted_sprints: Iterable[str] = (), host_alerts: Mapping | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -2600,7 +2600,7 @@ def derive_view(
                  if p.reason is not None and p.project_id in registered),
                 key=lambda p: (p.failed_at, p.sprint_id))],
         "activation": _activation_line(activation, activation_run, now_ms),
-        "spend": dict(spend) if spend is not None else None,
+        "spend": dict(spend) if spend is not None else None, "host_alerts": dict(host_alerts) if host_alerts is not None else None,
         "sharing": _sharing_copy(SHARING_OFF if sharing is None else sharing),
     }
 

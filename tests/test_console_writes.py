@@ -148,7 +148,9 @@ class WriteRouteTest(Case):
                           "/api/guest-account", "/api/guest-signin-code",
                           "/api/guest-signin-cancel", "/api/guest-account-signout",
                           "/api/guest-account-remove", "/api/release-answer",
-                          "/api/permission-answer"})
+                          "/api/permission-answer", "/api/host-alerts-save",
+                          "/api/host-alerts-switch", "/api/host-alerts-chats",
+                          "/api/host-alerts-test"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(

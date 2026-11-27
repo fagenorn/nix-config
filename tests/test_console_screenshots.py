@@ -1025,14 +1025,54 @@ def uncovered(moved, rows) -> list[str]:
     return misses
 
 
+def shot_calls(state: str, present: set) -> list[tuple[str, tuple]]:
+    calls: list[tuple[str, tuple]] = []
+
+    class Page(FixedPage):
+        def goto(self, url):
+            calls.append(("goto", (url,)))
+
+        def wait_for_selector(self, selector):
+            calls.append(("wait_for_selector", (selector,)))
+
+        def query_selector(self, selector):
+            return object() if selector in present else None
+
+        def click(self, selector):
+            calls.append(("click", (selector,)))
+
+        def evaluate(self, expression, arg=None):
+            if expression == shots.SCROLL_Y:
+                return 0.0
+            if expression == "document.documentElement.scrollWidth":
+                return 480
+            if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW, shots.SMALL_TARGETS):
+                return []
+            return 0
+
+        def screenshot(self, path, full_page, **options):
+            pass
+
+        def close(self):
+            pass
+
+    class Browser:
+        def new_page(self, viewport, **options):
+            return Page()
+
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shots, "STYLE_CHECKS", ()):
+        shots._shoot(Browser(), "http://console.test/", state, 480, Path(tmp))
+    return calls
+
+
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_sixty_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 60)
+    def test_the_set_is_sixty_one_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 61)
         self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:5],
                          ("permission-stale", "permission-card", "permission-long", "waiting-until",
                           "paused"))
         self.assertEqual(shots.STATES[shots.STATES.index("notice-post-open") + 1], "live-fault")
-        self.assertEqual(shots.STATES[-8:], ("sharing-panel", "sharing-off", "sharing-unreadable",
+        self.assertEqual(shots.STATES[-9:-1], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors", "owner-accounts"))
         self.assertIn("guest-steer", shots.SHARING_STATES)
@@ -1053,7 +1093,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(shots.STATES[shots.STATES.index("adoption-moved") + 1],
                          "adoption-failed")
         self.assertEqual(shots.ADOPTION_STATES, ("adoption-merge", "adoption-moved", "adoption-failed"))
-        self.assertEqual(shots.STATES[-34:-8], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-35:-9], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
@@ -2348,56 +2388,16 @@ class ScreenshotFixtureTest(unittest.TestCase):
             shots.guest_door(SimpleNamespace(guest_socket="/tmp/g.sock", guest_address=None)),
             "/tmp/g.sock")
 
-    @mock.patch.object(shots, "STYLE_CHECKS", ())
     def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
         for state in ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached"):
             for present, opens in (({"#sharing-open"}, True), (set(), False)):
                 with self.subTest(state=state, opens=opens):
-                    self.check_sharing_shot(state, present, opens)
-
-    def check_sharing_shot(self, state: str, present: set, opens: bool) -> None:
-        calls: list[tuple[str, tuple]] = []
-
-        class Page(FixedPage):
-            def goto(self, url):
-                calls.append(("goto", (url,)))
-
-            def wait_for_selector(self, selector):
-                calls.append(("wait_for_selector", (selector,)))
-
-            def query_selector(self, selector):
-                return object() if selector in present else None
-
-            def click(self, selector):
-                calls.append(("click", (selector,)))
-
-            def evaluate(self, expression, arg=None):
-                if expression == shots.SCROLL_Y:
-                    return 0.0
-                if expression == "document.documentElement.scrollWidth":
-                    return 480
-                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW, shots.SMALL_TARGETS):
-                    return []
-                return 0
-
-            def screenshot(self, path, full_page, **options):
-                pass
-
-            def close(self):
-                pass
-
-        class Browser:
-            def new_page(self, viewport, **options):
-                return Page()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            shots._shoot(Browser(), "http://console.test/", state, 480, Path(tmp))
-        if not opens:
-            self.assertNotIn(("click", ("#sharing-open",)), calls)
-            self.assertNotIn(("wait_for_selector", ("#sharing:not([hidden])",)), calls)
-            return
-        click = calls.index(("click", ("#sharing-open",)))
-        self.assertLess(click, calls.index(("wait_for_selector", ("#sharing:not([hidden])",))))
+                    calls = shot_calls(state, present)
+                    click, wait = ("click", ("#sharing-open",)), ("wait_for_selector", ("#sharing:not([hidden])",))
+                    if opens:
+                        self.assertLess(calls.index(click), calls.index(wait))
+                    else:
+                        self.assertFalse({click, wait} & set(calls))
 
     def test_the_guest_shot_refuses_the_owner_page(self) -> None:
         door = "#console-door"
@@ -3389,7 +3389,7 @@ class ScreenshotStyleTest(unittest.TestCase):
 
     def test_the_reading_waits_for_a_picture_that_is_still_being_fetched(self) -> None:
         import base64
-        wide = "data:image/png;base64," + base64.b64encode(shots._solid_png((9, 8, 7), 200, 100)).decode()
+        wide = "data:image/png;base64," + base64.b64encode(shots.stand_ins.solid_png((9, 8, 7), 200, 100)).decode()
         page = ('<div style="width: 300px"><img class="pic-img i" style="display: block; width: 100%; '
                 'height: auto"></div><script>setTimeout(() => '
                 f'document.querySelector(".i").src = "{wide}", 400)</script>')
@@ -3448,7 +3448,7 @@ class ScreenshotStyleTest(unittest.TestCase):
 
     def test_follows_shape_names_an_image_off_its_shape(self) -> None:
         import base64
-        wide = "data:image/png;base64," + base64.b64encode(shots._solid_png((9, 8, 7), 200, 100)).decode()
+        wide = "data:image/png;base64," + base64.b64encode(shots.stand_ins.solid_png((9, 8, 7), 200, 100)).decode()
         page = ('<div style="width: %spx"><img class="i" src="' + wide + '" style="display: block; '
                 'width: 100%%; %s"></div>')
         row = style_row("r", selector=".i", prop="height", want="follows_shape")

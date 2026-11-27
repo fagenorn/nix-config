@@ -68,7 +68,7 @@
 // other name="value" attribute (attributes) and a bare hidden (hidden); an Elem holds hidden
 // and an isConnected getter (true when its parentNode chain reaches the root). A snapshot
 // node carries hidden (bool) and expanded (its aria-expanded attribute, null when unset), and
-// the snapshot adds accounts and accounts_body (each a node or null) beside account_add, and sharing, sharing_body and sharing_open the same way,
+// the snapshot adds accounts and accounts_body (each a node or null) beside account_add, and sharing, sharing_body and sharing_open the same way, and host_alerts, host_alerts_body and host_alerts_open likewise,
 // and spend_link (#spend-link) and top_who (#top-who) likewise. A {snapshot: "page"} step also adds page: the node() tree of every
 // non-text child of root (each id'd element, as the markup makes them all direct children), else page is null.
 // A fetch of a URL starting /api/picture/ is answered by the harness itself: it is recorded
@@ -611,6 +611,9 @@ async function run() {
         sharing: byId("sharing") ? node(byId("sharing")) : null,
         sharing_body: byId("sharing-body") ? node(byId("sharing-body")) : null,
         sharing_open: byId("sharing-open") ? node(byId("sharing-open")) : null,
+        host_alerts: byId("host-alerts") ? node(byId("host-alerts")) : null,
+        host_alerts_body: byId("host-alerts-body") ? node(byId("host-alerts-body")) : null,
+        host_alerts_open: byId("host-alerts-open") ? node(byId("host-alerts-open")) : null,
         spend_link: byId("spend-link") ? node(byId("spend-link")) : null,
         top_who: byId("top-who") ? node(byId("top-who")) : null,
         page: step.snapshot === "page"
