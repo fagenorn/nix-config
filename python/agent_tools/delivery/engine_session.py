@@ -50,8 +50,13 @@ shell command is denied, so a session cannot write to the worktree through it.
 prefix patterns would preapprove, so `GIT_WRITING` is passed as
 `--disallowedTools` (a deny rule is checked before an allow rule). A role that
 needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
-one that is denied a shell command anyway is a fault (`engine_shell`), never a
-graded reply.
+one that is denied a tool call anyway ends the run at the engine's own stop
+`tool-denied` (`engine_shell`), never a graded reply.
+
+The recorded exception: under the engine only, a step that names its own `worktree` gives a
+`WHOLE_SHELL_ROLES` role the whole `Bash`, `Edit` and `Write` (`Role.whole_shell`, launched in that
+worktree, see `own_worktree`) with `WHOLE_SHELL_DENIED` as deny rules, and the lifecycle guard hook
+still judges every command. No session inherits the repository variables (`REPOSITORY_ENV`).
 
 The launcher tells the engine its choice through an answer file: the launch environment carries
 `CLAUDE_ACCOUNT_ANSWER`, the path of a file the launcher writes, and `read_answer` reads it. It holds
@@ -89,7 +94,8 @@ A session ended by a bound has no reply: its result subtype is `error_max_turns`
 names the bound the engine's own clock fires.
 
 `session_environment` drops `CLAUDE_CONFIG_DIR` and sets `CLAUDE_ACCOUNT_HOST_SETTINGS=required`, so the
-launcher starts the client only on `$HOME/.claude/settings.json`, the file `engine deliver` checked.
+launcher starts the client only on `$HOME/.claude/settings.json`, the file `engine deliver` checked. It
+also drops `CLAUDE_CODE_SIMPLE` (`BARE_SWITCH`), the client's bare-mode switch, which would skip the hooks.
 
 This module imports no `engine_core`.
 """
@@ -116,7 +122,7 @@ from agent_tools.canonical import (
 from agent_tools.delivery import engine_stop
 from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
-from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES
+from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES, TOOL_DENIED, WHOLE_SHELL_ROLES
 from agent_tools.skill_lint import parse_frontmatter
 
 FORBIDDEN_WORDS: tuple[str, ...] = (
@@ -151,6 +157,21 @@ READ_ONLY_BASH: tuple[str, ...] = tuple(
                                       "blame", "merge-base"))
 GIT_WRITING: tuple[str, ...] = tuple(
     f"Bash(git {verb}*--output*)" for verb in ("diff", "log", "show"))
+REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+                  "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
+                  "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_CONFIG",
+                  "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
+BARE_SWITCH = "CLAUDE_CODE_SIMPLE"
+WHOLE_SHELL_ALLOWED = ("Bash", "Edit", "Write")
+GIT_DENIED = ("push", "stash", "reset --hard", "clean", "checkout --", "branch -D", "branch -d")
+GH_DENIED = ("pr create", "pr merge", "release create")
+WHOLE_SHELL_DENIED: tuple[str, ...] = tuple(
+    f"Bash({form.format(verb)})"
+    for verbs, forms in ((GIT_DENIED, ("git {}", "git {} *", "git * {}", "git * {} *")),
+                         (GH_DENIED, ("gh {}", "gh {} *", "gh * {} *")))
+    for verb in verbs for form in forms)
+WORKTREE_LIST_SECONDS = 30
 DIAGNOSTIC_CHARS = 300
 _USAGE_KEYS = {"input": "input_tokens", "cache_write": "cache_creation_input_tokens",
                "cache_read": "cache_read_input_tokens", "output": "output_tokens"}
@@ -168,6 +189,7 @@ class Role:
     tools: tuple[str, ...] | None
     disallowed: tuple[str, ...] | None
     body: str
+    whole_shell: bool = False
 
 
 @dataclass(frozen=True)
@@ -272,6 +294,66 @@ class Answer:
     account: str | None
     all_out: bool
     resumes_at: str | None
+
+
+class EngineStop(Exception):
+    """A group member's session or a child run ended at one of the engine's own stops, which the
+    group or the call records once its members have ended; `step` is the member that stopped, else None."""
+
+    def __init__(self, name: str, need: str, detail: str, step: str | None = None) -> None:
+        super().__init__(detail)
+        self.name, self.need, self.detail, self.step = name, need, detail, step
+
+
+def denied_calls(reading: Reading) -> tuple[str, ...]:
+    """One text per tool call the session was denied, in order: a shell command whole, any other call
+    as its tool name and its input in compact sorted-key JSON."""
+    calls = []
+    for entry in reading.denials:
+        if not isinstance(entry, dict):
+            calls.append(json.dumps(entry, sort_keys=True))
+            continue
+        tool_input = entry.get("tool_input")
+        if (entry.get("tool_name") == "Bash" and isinstance(tool_input, dict)
+                and isinstance(tool_input.get("command"), str)):
+            calls.append(tool_input["command"])
+        else:
+            calls.append(f"{entry.get('tool_name')} "
+                         f"{json.dumps(tool_input, sort_keys=True, separators=(',', ':'))}")
+    return tuple(calls)
+
+
+def denial_detail(step: str, calls: Sequence[str]) -> str:
+    count = len(calls)
+    return (f"Step {step} was denied {count} tool call{'' if count == 1 else 's'}: "
+            + "; ".join(repr(call) for call in calls)
+            + "; its reply is not graded and the run stops at tool-denied.")
+
+
+def joined(stops: Sequence[EngineStop]) -> EngineStop:
+    """The one stop of several: `tool-denied` when any stop is, else the first stop's name."""
+    name = TOOL_DENIED if any(stop.name == TOOL_DENIED for stop in stops) else stops[0].name
+    first = next(stop for stop in stops if stop.name == name)
+    return EngineStop(name, first.need, " ".join(stop.detail for stop in stops), first.step)
+
+
+def raise_first(errors: Sequence[BaseException | None]) -> None:
+    """Raise the first error that is not an `EngineStop`, else the one stop the stops join to.
+
+    A `tool-denied` stop outranks a fault (not a stop request): the one stop is raised so the run
+    ends recorded, its detail naming each fault that came with it."""
+    stops = [error for error in errors if isinstance(error, EngineStop)]
+    others = [error for error in errors if error is not None and not isinstance(error, EngineStop)]
+    denied = any(stop.name == TOOL_DENIED for stop in stops)
+    for error in others:
+        if not denied or isinstance(error, engine_stop.Stopped):
+            raise error
+    if stops:
+        stop = joined(stops)
+        if others:
+            stop = EngineStop(stop.name, stop.need, " ".join(
+                [stop.detail, *(f"Another member faulted: {error}" for error in others)]), stop.step)
+        raise stop
 
 
 def _number(text: str) -> int | float:
@@ -387,6 +469,12 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, 
             "--model", role.model, "--effort", role.effort,
             "--max-turns", str(limits.turns), "--max-budget-usd", f"{limits.spend_usd:.2f}"]
     disallowed = list(role.disallowed or ())
+    if role.whole_shell:
+        if role.name not in WHOLE_SHELL_ROLES or role.tools is not None:
+            raise RoleError(f"the role {role.name} cannot have the whole shell")
+        argv += ["--allowedTools", ",".join(WHOLE_SHELL_ALLOWED),
+                 "--disallowedTools", ",".join([*disallowed, *WHOLE_SHELL_DENIED])]
+        return (*argv, "--append-system-prompt-file", str(system_prompt))
     if role.tools is not None:
         allowed = [entry for name in role.tools
                    for entry in (READ_ONLY_BASH if name == "Bash" else (name,))]
@@ -502,10 +590,39 @@ def reaping():
 
 
 def session_environment(environ: Mapping[str, str]) -> dict[str, str]:
-    """The environment of a session: the caller's, without its config dir, with the host-settings switch."""
-    env = {key: value for key, value in environ.items() if key != "CLAUDE_CONFIG_DIR"}
+    """The environment of a session: the caller's, without its config dir, the client's bare-mode switch
+    or any repository variable, with the host-settings switch (every session)."""
+    env = {key: value for key, value in environ.items()
+           if key not in ("CLAUDE_CONFIG_DIR", BARE_SWITCH) and key not in REPOSITORY_ENV}
     env[HOST_SETTINGS_SWITCH] = "required"
     return env
+
+
+def own_worktree(path: object, branch: object, root: str) -> str | None:
+    """The real path of `path` when it is a linked worktree of the project at `root` on `branch`, else None.
+
+    The session's working directory is trusted only when the project's own worktree list names it with
+    that branch: a sibling issue's worktree, a subdirectory, the project root or another repository is not.
+    """
+    if not (isinstance(path, str) and os.path.isabs(path) and os.path.isdir(path)
+            and isinstance(branch, str) and branch):
+        return None
+    environ = {key: value for key, value in os.environ.items() if key not in REPOSITORY_ENV}
+    try:
+        done = subprocess.run(["git", "-C", root, "worktree", "list", "--porcelain"], env=environ,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=WORKTREE_LIST_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    wanted = os.path.realpath(path)
+    for block in done.stdout.split("\n\n")[1:]:  # the first entry is the main worktree
+        entry = dict(line.partition(" ")[::2] for line in block.splitlines())
+        if ("worktree" in entry and os.path.realpath(entry["worktree"]) == wanted
+                and entry.get("branch") == f"refs/heads/{branch}"):
+            return wanted
+    return None
 
 
 def _group_alive(pid: int) -> bool:
