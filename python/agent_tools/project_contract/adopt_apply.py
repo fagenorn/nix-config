@@ -1086,9 +1086,8 @@ SIGNING_POINTER = "/bindings/vcs/commit/signed"
 def signing_pointer(worktree: Path) -> str:
     """`SIGNING_POINTER` when the worktree's contract is schema 2 and authors `signed` as true, else "".
 
-    A refused signature carries it as its violation's pointer, so a caller can tell a setting the owner
-    can change in the repository from the platform's own (schema 3 authors none) without reading the
-    checkout: the worktree is the plan's base revision, whichever branch the checkout is on.
+    A refused signature carries it as its pointer, so a caller tells a repository setting from the
+    platform's own (schema 3 authors none) without reading the checkout, which may be on another branch.
     """
     raw = read_bytes_bounded(worktree / CONTRACT_FILENAME)
     try:
