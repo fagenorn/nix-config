@@ -1435,9 +1435,8 @@ class ShippedProcedureTest(unittest.TestCase):
                 self.assertEqual(step(deliver, clear)["in"],
                                  ["run.repo", "run.issue", "plan-preflight.worktree_path", "run.holder",
                                   f"{read}.digest"])
-        for note in ("plan-note", "plan-revised-note"):
-            with self.subTest(note=note):
-                self.assertEqual(step(deliver, note)["subcommand"], "plan-note")
+        self.assertEqual([step(deliver, n)["subcommand"] for n in ("plan-note", "plan-revised-note")],
+                         ["plan-note", "plan-note"])
 
     def test_the_worktree_mismatch_is_read_before_the_claim(self):
         coverage = shipped_coverage("setup")
