@@ -34,7 +34,8 @@
 #
 # The command also names the guest socket Tailscale Serve proxies to (`--guest-socket`, #1299,
 # ADR-console-077), in a mode-0700 folder the console makes, and, when `agentConsole.tailscale`
-# is set, this host's Tailscale client.
+# is set, this host's Tailscale client, and, when `agentConsole.hostAlerts` is set, `--host-alerts`
+# (issue 1713), which shows the Host alerts panel on the owner's settings file.
 {
   config,
   lib,
@@ -51,6 +52,7 @@ let
     + lib.optionalString (
       config.agentConsole.tailscale != null
     ) " --tailscale ${lib.escapeShellArg config.agentConsole.tailscale}"
+    + lib.optionalString config.agentConsole.hostAlerts " --host-alerts"
     + lib.concatMapStrings (
       d: " --screenshots ${lib.escapeShellArg d}"
     ) config.agentConsole.screenshotDirs;
@@ -77,6 +79,11 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = "Path of this host's Tailscale client the console reads `serve status --json` and `status --json` from, the second for this host's own tailnet name (#1237, #1299, #1305, ADR-console-078); null reads nothing, so the guest door lets no guest in.";
+    };
+    hostAlerts = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Whether the console shows the Host alerts panel (`--host-alerts`, issue 1713), which writes this user's ~/.config/host-alerts/telegram.json, the file the memory watcher reads its alerts settings from.";
     };
     command = lib.mkOption {
       type = lib.types.str;

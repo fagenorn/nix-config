@@ -9,10 +9,14 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import os
 import stat
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from agent_tools.console import guest, view
+from agent_tools.console import console, guest, view
 from agent_tools.console.host_alerts_panel import (
     CHATS_PATH, DELIVERED, EMPTY_FEED, NO_TOKEN, NOT_READY, PROBLEM, SAVE_PATH, SWITCH_PATH,
     TEST_PATH, UNAVAILABLE, Panel)
@@ -208,6 +212,34 @@ class HostAlertsRouteTest(HostAlertsCase):
         self.assertEqual((status, json.loads(raw)), (200, {
             "delivered": False, "text": "Not delivered: the saved settings could not be read."}))
         self.assertEqual(self.bot.requests, [])
+
+
+class ConsoleFlagTest(unittest.TestCase):
+    """`console --host-alerts` gives the service the owner's panel on the file the watcher reads."""
+
+    class Stop(Exception):
+        pass
+
+    def kwargs_of(self, home, argv):
+        recorded = {}
+
+        def stop(*args, **kwargs):
+            recorded.update(kwargs)
+            raise self.Stop
+
+        with mock.patch.dict(os.environ, {"HOME": home}), \
+                mock.patch.object(console.service, "ConsoleService", side_effect=stop):
+            with self.assertRaises(self.Stop):
+                console.main(argv)
+        return recorded
+
+    def test_the_flag_gives_the_service_the_owners_panel(self):
+        with tempfile.TemporaryDirectory() as home:
+            shown = self.kwargs_of(home, ["--port", "0", "--host-alerts"])
+            hidden = self.kwargs_of(home, ["--port", "0"])
+            self.assertEqual(shown["host_alerts"],
+                             Panel(Path(home) / ".config/host-alerts/telegram.json"))
+            self.assertIsNone(hidden["host_alerts"])
 
 
 if __name__ == "__main__":

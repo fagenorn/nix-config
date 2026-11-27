@@ -36,6 +36,9 @@ let
   watchLog = "${home}/.omlx/logs/memory-watch.log";
 in
 {
+  # The watcher reads the settings file the console's Host alerts panel writes.
+  home-manager.users.${username}.agentConsole.hostAlerts = true;
+
   # Samples memory every minute as the owner and records the day's peaks. Its alerts go through
   # the owner's host-alerts settings file, so no secret is declared here.
   # The watcher may also restart oMLX, through the gate that waits for no request in flight.

@@ -75,6 +75,11 @@ and with `status --json` for this host's own tailnet name, the one name the gues
 which tell its own requests from another device's (ADR-console-079). Without it the console never reads Serve, shows
 the state as unchecked and its guest door shares with nobody.
 
+`--host-alerts` (#1713) gives the service the Host alerts panel (`agent_tools.console.host_alerts_panel`) on this
+user's `~/.config/host-alerts/telegram.json`, the file the memory watcher reads
+(`agent_tools.hosts.host_alerts.settings_path`, resolved from `HOME` at start); the page then offers
+the owner an Alerts button. Without it there is no panel.
+
 It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux and macOS the owner approves a ready
 plan and the console pushes its branch and opens its pull request through `gh`; elsewhere the route
 refuses.
@@ -108,8 +113,9 @@ from pathlib import Path
 import agent_tools
 from agent_tools.console import (
     account_add, activation, activation_run, account_remove, approve, inbox, manager, movement, nudge, probe,
-    guest, project_question, register, service, signin, signin_run)
+    guest, host_alerts_panel, project_question, register, service, signin, signin_run)
 from agent_tools.delivery import engine_ledger
+from agent_tools.hosts import host_alerts
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -143,6 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "to show whether Serve proxies the tailnet name to the guest socket, and "
                              "with `status --json` for this host's tailnet name; without it the guest "
                              "door shares with nobody")
+    parser.add_argument("--host-alerts", action="store_true",
+                        help="show the Host alerts panel, which writes this user's "
+                             "~/.config/host-alerts/telegram.json")
     parser.add_argument("--screenshots", type=Path, action="append", default=[], metavar="DIR",
                         help="a folder whose PNGs a manual check may show (repeatable)")
     return parser
@@ -171,7 +180,8 @@ def main(argv: list[str] | None = None) -> int:
             choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots,
             serve_reader=None if args.tailscale is None else guest.serve_reader(args.tailscale),
             status_reader=None if args.tailscale is None else guest.status_reader(args.tailscale),
-            engine_runs_root=engine_ledger.runs_root())
+            engine_runs_root=engine_ledger.runs_root(),
+            host_alerts=host_alerts_panel.Panel(host_alerts.settings_path()) if args.host_alerts else None)
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1
