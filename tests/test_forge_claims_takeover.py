@@ -113,7 +113,9 @@ def interleave(test, after_listing, action):
     test.addCleanup(patcher.stop)
 
 
-DEAD_CLAIM = claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT)
+PD = {"pid": "2165", "pstart": "976"}  # the dead holder's process, as its claim records it
+PT = {"pid": "2164", "pstart": "976"}  # the taker's running process
+DEAD_CLAIM = claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT, **PD)
 TAKEOVER = {"claim": 5, "holder": DEAD_HOLDER, "branch": BRANCH, "worktree": WT,
             "uncommitted": ["a.py", "new.txt"]}
 
@@ -156,8 +158,8 @@ class ReadingTest(unittest.TestCase):
     def raw(self, name, text):
         (self.registry / f"{name}.json").write_text(text)
 
-    def reading(self):
-        return self.ct.session_reading(DEAD, TAKER_SESSION)
+    def reading(self, pid=2165, start="976"):
+        return self.ct.session_reading(DEAD, TAKER_SESSION, pid, start)
 
     def empty(self):
         for path in self.registry.glob("*.json"):
@@ -192,6 +194,74 @@ class ReadingTest(unittest.TestCase):
         self.record(**{**GOOD, "pid": 2166, "procStart": "975"})
 
         self.assertEqual(self.reading(), self.ct.GONE)
+
+    def test_a_session_whose_id_changed_in_place_is_judged_by_its_recorded_process(self):
+        # Claude Code rewrites a running session's record with the new id: no record names the old one.
+        self.record(**{**GOOD, "pid": 2166, "sessionId": "0b0b0b0b-renamed"})
+
+        with self.subTest("the recorded process still runs"):
+            self.assertEqual(self.reading(pid=2166), self.ct.RUNNING)
+        with self.subTest("the recorded process is gone"):
+            self.assertEqual(self.reading(pid=2165), self.ct.GONE)
+        with self.subTest("the recorded start time differs"):
+            self.assertEqual(self.reading(pid=2166, start="975"), self.ct.GONE)
+        with self.subTest("no start time on a host with /proc"):
+            self.assertEqual(self.reading(pid=2165, start=None), self.ct.UNREADABLE)
+        with self.subTest("a record of the session still runs"):
+            self.record(**{**GOOD, "pid": 2166})
+            self.assertEqual(self.reading(pid=2165), self.ct.RUNNING)
+
+    def test_a_dangling_symlink_or_a_fifo_in_the_registry_reads_unreadable(self):
+        self.record(**{**GOOD, "pid": 2166})
+        with self.subTest("a dangling symlink named for the holder"):
+            (self.registry / "2166.json").unlink()
+            (self.registry / "2166.json").symlink_to(self.tmp / "missing.json")
+            self.assertEqual(self.reading(), self.ct.UNREADABLE)
+        with self.subTest("a symlink to a readable record"):
+            (self.registry / "2166.json").unlink()
+            self.record(name="target", **{**GOOD, "pid": 2166})
+            (self.registry / "2166.json").symlink_to(self.registry / "target.json")
+            self.assertEqual(self.reading(), self.ct.UNREADABLE)
+        with self.subTest("a FIFO"):
+            (self.registry / "2166.json").unlink()
+            (self.registry / "target.json").unlink()
+            os.mkfifo(self.registry / "2166.json")
+            self.assertEqual(self.reading(), self.ct.UNREADABLE)
+
+    def test_an_entry_that_vanishes_after_the_listing_is_skipped(self):
+        listed = [self.registry / "2164.json", self.registry / "2170.json"]
+        with mock.patch.object(self.ct, "_json_files", lambda directory: listed):
+            self.assertEqual(self.reading(), self.ct.GONE)
+
+    def test_process_fields_name_the_callers_running_process(self):
+        env = {"CLAUDE_CODE_SESSION_ID": TAKER_SESSION}
+        self.assertEqual(self.ct.process_fields(env), {"pid": "2164", "pstart": "976"})
+        with self.subTest("an integer start time"):
+            self.record(**{**CALLER, "procStart": 976})
+            self.assertEqual(self.ct.process_fields(env), {"pid": "2164", "pstart": "976"})
+        with self.subTest("no session"):
+            self.assertEqual(self.ct.process_fields({}), {})
+        with self.subTest("the process does not run"):
+            self.empty()
+            self.record(**{**CALLER, "pid": 2165})
+            self.assertEqual(self.ct.process_fields(env), {})
+        with self.subTest("two running records"):
+            self.fresh()
+            self.record(**{**CALLER, "pid": 2166})
+            self.assertEqual(self.ct.process_fields(env), {})
+        with self.subTest("an unreadable registry"):
+            self.fresh()
+            (self.registry / "9.json").symlink_to(self.tmp / "missing.json")
+            self.assertEqual(self.ct.process_fields(env), {})
+        with self.subTest("no procfs: the pid alone"):
+            bare = tempfile.TemporaryDirectory()
+            self.addCleanup(bare.cleanup)
+            self.empty()
+            dated = {"pid": 2164, "sessionId": TAKER_SESSION, "cwd": "/x", "procStart": "Fri Nov 27 16:45:09 2026",
+                     "pidDomain": "darwin"}
+            self.record(**dated)
+            with mock.patch.object(self.ct, "PROC", Path(bare.name)), mock.patch("os.kill"):
+                self.assertEqual(self.ct.process_fields(env), {"pid": "2164"})
 
     def test_a_registry_that_does_not_show_its_caller_running_is_unreadable(self):
         self.empty()
@@ -393,16 +463,19 @@ class ReadingTest(unittest.TestCase):
                 "claim", {"issue": "7", "holder": "eleven-m5/session-dead", "branch": BRANCH, **fields},
                 "Claimed.")})
 
-        full = {"session": DEAD, "sprint": SPRINT}
+        full = {"session": DEAD, "sprint": SPRINT, **PD}
         env = {"CLAUDE_CODE_SESSION_ID": TAKER_SESSION, "CONSOLE_SPRINT_ID": SPRINT}
         reading = mock.Mock(return_value=self.ct.GONE)
         with mock.patch.object(self.ct, "this_host", return_value="eleven-m5"), \
                 mock.patch.object(self.ct, "session_reading", reading):
             self.assertTrue(self.ct.qualifies(claim(**full), env))
-            reading.assert_called_once_with(DEAD, TAKER_SESSION)
+            reading.assert_called_once_with(DEAD, TAKER_SESSION, 2165, "976")
             cases = (
                 ("claim without session", claim(sprint=SPRINT), env, "eleven-m5"),
-                ("claim without sprint", claim(session=DEAD), env, "eleven-m5"),
+                ("claim without sprint", claim(session=DEAD, **PD), env, "eleven-m5"),
+                ("claim without a process", claim(session=DEAD, sprint=SPRINT), env, "eleven-m5"),
+                ("claim with a malformed pid", claim(**{**full, "pid": "0"}), env, "eleven-m5"),
+                ("claim with a malformed start time", claim(**{**full, "pstart": "0976"}), env, "eleven-m5"),
                 ("other host", claim(**full), env, "anis-desktop"),
                 ("taker without session", claim(**full), {"CONSOLE_SPRINT_ID": SPRINT}, "eleven-m5"),
                 ("taker without sprint", claim(**full), {"CLAUDE_CODE_SESSION_ID": TAKER_SESSION},
@@ -448,29 +521,18 @@ class UnreadableRegistryTest(unittest.TestCase):
 
     @contextlib.contextmanager
     def deny(self, name, target):
-        if name == "read_bytes":
-            real = Path.read_bytes
+        real = getattr(os, name)
 
-            def fake(path):
-                if path == target:
-                    raise denied(target)
-                return real(path)
+        def fake(path, *args, **kwargs):
+            if isinstance(path, (str, bytes, os.PathLike)) and Path(os.fsdecode(path)) == target:
+                raise denied(target)
+            return real(path, *args, **kwargs)
 
-            patch = mock.patch.object(Path, "read_bytes", fake)
-        else:
-            real = getattr(os, name)
-
-            def fake(path, *args, **kwargs):
-                if isinstance(path, (str, bytes, os.PathLike)) and Path(os.fsdecode(path)) == target:
-                    raise denied(target)
-                return real(path, *args, **kwargs)
-
-            patch = mock.patch(f"os.{name}", fake)
-        with patch:
+        with mock.patch(f"os.{name}", fake):
             yield
 
     def reading(self):
-        return self.ct.session_reading(DEAD, TAKER_SESSION)
+        return self.ct.session_reading(DEAD, TAKER_SESSION, 2165, "976")
 
     def test_an_unreadable_registry_reads_unreadable(self):
         self.assertEqual(self.reading(), self.ct.RUNNING)
@@ -479,7 +541,7 @@ class UnreadableRegistryTest(unittest.TestCase):
             ("sessions directory unreadable", "scandir", self.profile),
             ("profile unreadable", "stat", self.profile),
             ("profiles unreadable", "scandir", profiles),
-            ("record unreadable", "read_bytes", self.profile / "2166.json"),
+            ("record unreadable", "open", self.profile / "2166.json"),
             ("default directory unreadable", "scandir", self.default),
         ):
             with self.subTest(label), self.deny(name, target):
@@ -545,6 +607,21 @@ class WorktreeReportTest(unittest.TestCase):
             self.ready(origin="git@github.com:Octo/Widgets.git\n")
             self.assertEqual(self.ct.worktree_report(SLUG, BRANCH),
                              (WT, ["a.py", "new.txt", "moved.py"]))
+
+    def test_a_prunable_registration_is_never_read(self):
+        prunable = LISTING.replace("branch refs/heads/issue-7-x\0",
+                                   "branch refs/heads/issue-7-x\0prunable gitdir file points to non-existent location\0")
+        self.assertNotEqual(prunable, LISTING)
+        with self.subTest("a bare prunable line"):
+            self.world = ForgeWorld(self)
+            self.ready(listing=LISTING.replace("branch refs/heads/issue-7-x\0", "branch refs/heads/issue-7-x\0prunable\0"))
+            self.assertEqual(self.ct.worktree_report(SLUG, BRANCH), (None, None))
+            self.assertEqual(self.world.argvs("git"), [ORIGIN, LIST_WT])
+        with self.subTest("a prunable line with its reason"):
+            self.world = ForgeWorld(self)
+            self.ready(listing=prunable)
+            self.assertEqual(self.ct.worktree_report(SLUG, BRANCH), (None, None))
+            self.assertEqual(self.world.argvs("git"), [ORIGIN, LIST_WT])
 
     def test_a_report_it_cannot_read_is_null(self):
         with self.subTest("no branch"):
@@ -729,8 +806,8 @@ class TakeoverAcquireTest(TakeoverWorld):
         self.assertEqual(out["takeover"], TAKEOVER)
         self.assertEqual(self.mutations(), [
             post(fm.end_body(5, "holder-gone", successor=TAKER_SESSION, sprint=SPRINT)),
-            patch(5, claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT, released="holder-gone")),
-            post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, took="5")),
+            patch(5, claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT, **PD, released="holder-gone")),
+            post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT, took="5")),
             ENSURE, ADD])
         self.assertEqual([m.fields["holder"] for m in self.live()], [TAKER])
 
@@ -748,7 +825,7 @@ class TakeoverAcquireTest(TakeoverWorld):
 
     def test_every_other_case_keeps_the_day_and_the_owner_box(self):
         def claim(**changes):
-            fields = {"branch": BRANCH, "session": DEAD, "sprint": SPRINT, **changes}
+            fields = {"branch": BRANCH, "session": DEAD, "sprint": SPRINT, **PD, **changes}
             return claim_body(DEAD_HOLDER, **{k: v for k, v in fields.items() if v is not None})
 
         def without_taker_session():
@@ -786,6 +863,9 @@ class TakeoverAcquireTest(TakeoverWorld):
              lambda: self.registry_only(self.dead_record()), None),
             ("caller's record not running", DEAD_HOLDER, claim(),
              lambda: self.registry_only(self.dead_record(TAKER_SESSION)), None),
+            ("claim records no process", DEAD_HOLDER, claim(pid=None, pstart=None), lambda: None, None),
+            ("holder's process runs under a new session id", DEAD_HOLDER, claim(pid="2166"),
+             lambda: self.registry_only(self.taker_record(), self.running_record("0b0b0b0b-renamed")), None),
             ("claim has no session", DEAD_HOLDER, claim(session=None), lambda: None, None),
             ("claim has no sprint", DEAD_HOLDER, claim(sprint=None), lambda: None, None),
             ("taker has no session", DEAD_HOLDER, claim(), without_taker_session, None),
@@ -811,6 +891,68 @@ class TakeoverAcquireTest(TakeoverWorld):
                     self.assertEqual((code, out["verdict"], out["comment_id"], out["owner_action_comment_id"],
                                       out["owner_action_posted"]), (0, "stale", 5, 30, False))
                 self.assertEqual(self.world.argvs("git"), [])
+
+    def test_a_registry_entry_that_cannot_be_read_whole_keeps_the_day_and_the_owner_box(self):
+        for label, make in (("a dangling symlink named for the holder's session",
+                             lambda path: path.symlink_to(self.tmp / "missing.json")),
+                            ("a FIFO", os.mkfifo)):
+            with self.subTest(label):
+                self.fresh_world()
+                self.git_ready()
+                self.store(comment(5, DEAD_CLAIM, T0))
+                self.registry_only(self.taker_record())
+                make(self.registry / "2165.json")
+
+                code, out = self.acquire()
+
+                self.assertEqual((code, out["verdict"], out["by"], out["takeover"]),
+                                 (3, "held_by", DEAD_HOLDER, None))
+                self.assertEqual(self.mutations(), [])
+
+    def test_a_prunable_registration_is_not_reported_as_the_claimed_worktree(self):
+        self.takeover_world()
+        self.git_ready(listing=LISTING.replace("branch refs/heads/issue-7-x\0",
+                                               "branch refs/heads/issue-7-x\0prunable gitdir file is gone\0"))
+
+        code, out = self.acquire()
+
+        self.assertEqual((code, out["verdict"]), (0, "acquired"))
+        self.assertIsNone(out["takeover"]["worktree"])
+        self.assertIsNone(out["takeover"]["uncommitted"])
+        self.assertEqual(self.world.argvs("git"), [ORIGIN, LIST_WT])
+
+    def test_acquire_records_the_callers_own_process(self):
+        self.store(next_id=11)
+
+        run(*common("acquire", TAKER))
+
+        self.assertEqual(self.mutations()[0],
+                         post(claim_body(TAKER, session=TAKER_SESSION, sprint=SPRINT, pid="2164", pstart="976")))
+        with self.subTest("no running record names the session"):
+            self.fresh_world()
+            self.store(next_id=11)
+            self.registry_only()
+
+            run(*common("acquire", TAKER))
+
+            self.assertEqual(self.mutations()[0], post(claim_body(TAKER, session=TAKER_SESSION, sprint=SPRINT)))
+
+    def test_a_losing_replacement_claim_reports_the_takeover_only_for_its_own_winner(self):
+        batch = f"{HOST}/{HOST}-20261127-1310"
+        theirs = claim_body(batch, branch=BRANCH, session="0f0f0f0f-other", sprint=SPRINT, pid="2166",
+                            pstart="976")
+        ours = claim_body(batch, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT, took="5")
+        for label, winning, report in (("another session of the holder wins", theirs, None),
+                                       ("a claim of the caller's takeover wins", ours, TAKEOVER)):
+            with self.subTest(label):
+                self.fresh_world()
+                self.takeover_world()
+                interleave(self, 3, lambda: self.world.append_comment(comment(39, winning)))
+
+                code, out = run(*common("acquire", batch), "--branch", BRANCH)
+
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 39))
+                self.assertEqual(out["takeover"], report)
 
     def test_uncommitted_edits_are_reported_never_discarded(self):
         self.takeover_world()
@@ -857,9 +999,9 @@ class TakeoverAcquireTest(TakeoverWorld):
         self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 42))
         self.assertEqual(self.mutations(), [
             post(fm.end_body(5, "holder-gone", successor=TAKER_SESSION, sprint=SPRINT)),
-            patch(5, claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT, released="holder-gone")),
+            patch(5, claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT, **PD, released="holder-gone")),
             post(fm.end_body(30, "released")), OA_REMOVE,
-            post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, took="5")),
+            post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT, took="5")),
             ENSURE, ADD])
 
     def test_a_claim_released_before_the_fresh_listing_is_not_ended_again(self):
@@ -871,7 +1013,7 @@ class TakeoverAcquireTest(TakeoverWorld):
         self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 40))
         self.assertIsNone(out["takeover"])
         self.assertEqual(self.mutations(), [
-            post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT)), ENSURE, ADD])
+            post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT)), ENSURE, ADD])
 
     def test_a_fresh_claim_that_changed_is_not_ended(self):
         cases = {
@@ -911,7 +1053,7 @@ class TakeoverAcquireTest(TakeoverWorld):
 
         self.assertEqual((code, out["verdict"]), (0, "acquired"))
         self.assertEqual(self.mutations()[2],
-                         post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, took="5")))
+                         post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT, took="5")))
 
     def test_acquire_records_the_session_and_sprint_of_its_environment(self):
         self.store(next_id=11)
@@ -920,7 +1062,7 @@ class TakeoverAcquireTest(TakeoverWorld):
         code, out = run(*common("acquire", TAKER))
 
         self.assertEqual(self.mutations(),
-                         [post(claim_body(TAKER, session=TAKER_SESSION, sprint=SPRINT)), ENSURE, ADD])
+                         [post(claim_body(TAKER, session=TAKER_SESSION, sprint=SPRINT, **PT)), ENSURE, ADD])
         self.assertIsNone(out["takeover"])
         self.assertFalse(any("s3cret" in part for argv in self.mutations() for part in argv))
         with self.subTest("values outside their form"), mock.patch.dict(os.environ):
@@ -940,12 +1082,12 @@ class TakeoverAcquireTest(TakeoverWorld):
 
         self.assertEqual((code, out["verdict"]), (0, "renewed"))
         self.assertEqual(self.mutations()[0],
-                         patch(5, claim_body(TAKER, renewed="1", session=TAKER_SESSION, sprint=SPRINT)))
+                         patch(5, claim_body(TAKER, renewed="1", session=TAKER_SESSION, sprint=SPRINT, **PT)))
         self.assertNotIn("takeover", out)
 
     def test_a_renewal_that_cannot_name_its_session_drops_the_old_one(self):
         holder = f"{HOST}/batch-1"
-        self.store(comment(5, claim_body(holder, branch=BRANCH, session=DEAD, sprint=SPRINT), T0))
+        self.store(comment(5, claim_body(holder, branch=BRANCH, session=DEAD, sprint=SPRINT, **PD), T0))
         with mock.patch.dict(os.environ):
             os.environ.pop("CLAUDE_CODE_SESSION_ID")
             code, out = run(*common("renew", holder))
@@ -965,13 +1107,15 @@ class TakeoverAcquireTest(TakeoverWorld):
         holder = f"{HOST}/batch-1"
         cases = [
             ("the same session and sprint", {}, None,
-             claim_body(holder, branch=BRANCH, renewed="1", session=TAKER_SESSION, sprint=SPRINT, took="5")),
+             claim_body(holder, branch=BRANCH, renewed="1", session=TAKER_SESSION, sprint=SPRINT, **PT,
+                        took="5", tookbranch=BRANCH)),
             ("another session", {"CLAUDE_CODE_SESSION_ID": "0f0f0f0f-next"}, None,
              claim_body(holder, branch=BRANCH, renewed="1", session="0f0f0f0f-next", sprint=SPRINT)),
             ("no session", {}, "CLAUDE_CODE_SESSION_ID",
              claim_body(holder, branch=BRANCH, renewed="1", sprint=SPRINT)),
             ("another sprint", {"CONSOLE_SPRINT_ID": "fedcba9876543210"}, None,
-             claim_body(holder, branch=BRANCH, renewed="1", session=TAKER_SESSION, sprint="fedcba9876543210")),
+             claim_body(holder, branch=BRANCH, renewed="1", session=TAKER_SESSION, sprint="fedcba9876543210",
+                        **PT)),
         ]
         for label, environment, popped, expected in cases:
             with self.subTest(label), mock.patch.dict(os.environ, environment):
@@ -979,7 +1123,7 @@ class TakeoverAcquireTest(TakeoverWorld):
                     os.environ.pop(popped)
                 self.fresh_world()
                 self.store(comment(5, claim_body(holder, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT,
-                                                 took="5")))
+                                                 **PD, took="5", tookbranch=BRANCH)))
 
                 code, out = run(*common("renew", holder))
 
@@ -997,7 +1141,7 @@ class TakeoverAcquireTest(TakeoverWorld):
         self.assertIsNone(out["takeover"])
         self.assertEqual(self.mutations(), [
             post(fm.end_body(5, "holder-gone", successor=TAKER_SESSION, sprint=SPRINT)),
-            post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT)), ENSURE, ADD])
+            post(claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT)), ENSURE, ADD])
 
     def test_every_acquire_answer_carries_a_takeover_member(self):
         with self.subTest("held_by"):
@@ -1029,12 +1173,13 @@ class TakeoverRecoveryTest(TakeoverWorld):
         super().setUp()
         self.END = fm.end_body(5, "holder-gone", successor=TAKER_SESSION, sprint=SPRINT)
         self.OTHER_END = fm.end_body(5, "holder-gone", successor="0f0f0f0f-other", sprint=SPRINT)
-        self.RELEASED_5 = claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT, released="holder-gone")
-        self.NEW_CLAIM = claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, took="5")
+        self.RELEASED_5 = claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT, **PD, released="holder-gone")
+        self.NEW_CLAIM = claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT, took="5")
         self.BATCH = f"{HOST}/{HOST}-20261127-1310"
-        self.PLAIN = claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT)
-        self.GONE_5 = claim_body(self.BATCH, branch=BRANCH, session=DEAD, sprint=SPRINT)
-        self.HANDED = claim_body(self.BATCH, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, took="5")
+        self.PLAIN = claim_body(TAKER, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT)
+        self.GONE_5 = claim_body(self.BATCH, branch=BRANCH, session=DEAD, sprint=SPRINT, **PD)
+        self.HANDED = claim_body(self.BATCH, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT,
+                                 took="5", tookbranch=BRANCH)
         self.HANDED_REPORT = {**TAKEOVER, "holder": self.BATCH}
 
     def acquire(self, holder=TAKER):
@@ -1209,7 +1354,7 @@ class TakeoverRecoveryTest(TakeoverWorld):
         self.assertEqual(self.mutations(), [ENSURE, ADD])
 
     def test_a_handoff_follows_the_claim_that_now_holds(self):
-        plain = claim_body(self.BATCH, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT)
+        plain = claim_body(self.BATCH, branch=BRANCH, session=TAKER_SESSION, sprint=SPRINT, **PT)
         with self.subTest("released before the fresh listing"):
             self.handoff_world()
             interleave(self, 1, lambda: self.world.append_comment(comment(39, fm.end_body(5, "done"))))
@@ -1350,6 +1495,49 @@ class TakeoverRecoveryTest(TakeoverWorld):
             self.assertEqual(self.world.argvs("git"), [])
 
 
+    def test_a_handoff_keeps_reporting_the_branch_it_found_after_a_renewal_changes_the_branch(self):
+        other = "issue-7-other"
+        for label, branch_at_handoff, expected in (("a branch", BRANCH, BRANCH), ("no branch", None, None)):
+            with self.subTest(label):
+                self.fresh_world()
+                self.git_ready()
+                gone = claim_body(self.BATCH, session=DEAD, sprint=SPRINT, **PD,
+                                  **({"branch": branch_at_handoff} if branch_at_handoff else {}))
+                self.store(comment(5, gone, T0))
+                self.acquire(self.BATCH)
+
+                code, out = run(*common("renew", self.BATCH), "--branch", other)
+                self.assertEqual((code, out["verdict"]), (0, "renewed"))
+                code, out = self.acquire(self.BATCH)
+
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+                self.assertEqual(out["takeover"]["branch"], expected)
+                self.assertEqual(out["takeover"]["worktree"], WT if expected else None)
+                stored = {c["id"]: c["body"] for c in self.world.stored()}
+                self.assertIn(f"branch={other}", stored[5])
+                self.assertIn(f"tookbranch={expected or '-'}", stored[5])
+
+    def test_a_handoff_restores_the_owner_label_for_a_prompt_posted_meanwhile(self):
+        self.git_ready()
+        self.store(comment(5, self.GONE_5, OLD), comment(30, oa_body(5, self.BATCH)))
+        real_remove = forge_api.remove_label
+
+        def remove(slug, issue, name):
+            if name == "owner-action":  # a concurrent status posts and labels a new prompt
+                self.world.append_comment(comment(61, oa_body(5, self.BATCH)))
+            return real_remove(slug, issue, name)
+        patcher = mock.patch.object(forge_api, "remove_label", remove)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        code, out = self.acquire(self.BATCH)
+
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
+        self.assertEqual(self.mutations(), [patch(5, self.HANDED), post(fm.end_body(30, "renewed")), OA_REMOVE,
+                                            OA_ENSURE, OA_ADD, ENSURE, ADD])
+        self.assertEqual([m.comment_id for m in self.live("owner-action")], [61])
+
+
 class TakeoverStatusTest(TakeoverWorld):
     def status(self):
         return run(*common("status", TAKER))
@@ -1395,7 +1583,11 @@ class TakeoverStatusTest(TakeoverWorld):
              {"CONSOLE_SPRINT_ID": "fedcba9876543210"}, "held_by", None),
             ("holder still runs", (comment(5, DEAD_CLAIM, T0),),
              (self.taker_record(), self.running_record()), {}, "held_by", None),
-            ("caller not in the registry", (comment(5, DEAD_CLAIM, T0),), (), {}, "held_by", None))
+            ("caller not in the registry", (comment(5, DEAD_CLAIM, T0),), (), {}, "held_by", None),
+            ("holder's session id changed in place",
+             (comment(5, claim_body(DEAD_HOLDER, branch=BRANCH, session=DEAD, sprint=SPRINT, pid="2166",
+                                    pstart="976"), T0),),
+             (self.taker_record(), self.running_record("0b0b0b0b-renamed")), {}, "held_by", None))
         for name, comments, records, env, verdict, prompt in cases:
             with self.subTest(name), mock.patch.dict(os.environ, env):
                 self.fresh_world()
