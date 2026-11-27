@@ -80,15 +80,9 @@ heredoc body, a comment, `nohup.out` and a word handed to `xargs` or `timeout` a
 so does a slugged branch or worktree name such as `issue-7-refuse-nohup`. A commit message that names a word is
 refused; reword it or use `git commit -F`.
 
-Read-only shell sessions
-------------------------
-
-A session whose environment holds a non-empty `CLAUDE_READ_ONLY_SHELL` (the engine sets it for a role that holds
-`Bash` only as read-only shapes) has its Bash calls refused when the raw text, or its deletion copy, holds the whole
-word `xargs`, in any case and bounded as a detaching word is. The client strips a bare `xargs` before it matches a
-rule, so no allow or deny rule can see the arguments it feeds a git read from stdin (`--output=<file>` writes a
-file); the refusal names the file tools and a command that names its arguments. It runs after the detaching check
-and before the policy loads, and an unset or empty variable leaves every other session as it was.
+A session whose environment holds a non-empty `CLAUDE_READ_ONLY_SHELL` (a role holding `Bash` only as read-only
+shapes) is also refused, read the same way, the whole word `xargs` and `--output` after a `git` word: a rule sees
+neither the arguments `xargs` feeds from stdin nor `--out""put` rebuilt by the shell (`grep -e '--output'` still runs).
 
 Transmitting git invocations
 ----------------------------
@@ -676,19 +670,16 @@ shell other than the one the probe starts is not seen.
 Key files and MCP tools
 -----------------------
 
-The guard also serves the PreToolUse matchers `Edit|Write|MultiEdit|NotebookEdit`
-and `^mcp__` (issue 1150). A file tool names its file in `tool_input.file_path`
-(`tool_input.notebook_path` for NotebookEdit), a non-empty string, else the call is
-refused as invalid hook input. An MCP call's input is not read. The base and the
-detaching checks of the Bash path do not run for these tools.
+The guard also serves the PreToolUse matchers `Edit|Write|MultiEdit|NotebookEdit` and `^mcp__` (issue 1150). A file
+tool names its file in `tool_input.file_path` (`tool_input.notebook_path` for NotebookEdit), a non-empty string, else
+the call is refused as invalid hook input. An MCP call's input is not read. The base and the detaching checks of the
+Bash path do not run for these tools.
 
-An MCP call is refused by exact tool name, in any cwd and with none, when a
-project's `production.mcp_tools` lists it: the first declaring project by sorted
-slug names the refusal, and no child process runs. The sentence is
+An MCP call is refused by exact tool name, in any cwd and with none, when a project's `production.mcp_tools` lists it:
+the first declaring project by sorted slug names the refusal, and no child process runs. The sentence is
 
-    `<tool>` changes the production of <slug> (production MCP tool), so it runs
-    only through the release profile <release_profile> with release transaction
-    preview and release transaction run.
+    `<tool>` changes the production of <slug> (production MCP tool), so it runs only through the release profile
+    <release_profile> with release transaction preview and release transaction run.
 
 A write's path is resolved against `cwd` (a relative path with no absolute `cwd` is not judged). Three spellings are
 checked, each in the file system's own case: the path as named with `..` collapsed, the path with its directories
@@ -701,12 +692,11 @@ only after a glob matches a component suffix of a spelling, and the base policy 
 starts no child process and a bad base policy refuses only a key-file candidate. A repository lookup that fails (times
 out or cannot start) for a candidate refuses; a compiled policy that does not load refuses nothing. The sentence is
 
-    `<relative>` is a key file of <slug> (key file glob <glob>), so it changes only
-    through the release profile <release_profile> with release transaction preview
-    and release transaction run.
+    `<relative>` is a key file of <slug> (key file glob <glob>), so it changes only through the release profile
+    <release_profile> with release transaction preview and release transaction run.
 
-Known limits: a key file written by a Bash command, a hard link to a key file under
-another name, and an MCP tool reached under another name are not seen.
+Known limits: a key file written by a Bash command, a hard link to a key file under another name, and an MCP tool
+reached under another name are not seen.
 
 Guard policy
 ------------
@@ -728,22 +718,17 @@ documents the script, the compiler and the activation step that writes the compi
 files, so neither file is a valid instance of the other, and each member has one trust rule:
 
     authorized_owners          base policy      Store value only.
-    integration_bases          base policy      Store value only; the compiled
-                                                policy never removes or changes a
-                                                literal row.
-    git_bin, gh_bin, jq_bin    base policy      Store value only; the only
-                                                programs the guard runs besides
-                                                the row check.
-    derived_repositories       compiled policy  A candidate row per slug, used
-                                                only after the row check
+    integration_bases          base policy      Store value only; the compiled policy never removes or
+                                                changes a literal row.
+    git_bin, gh_bin, jq_bin    base policy      Store value only; the only programs the guard runs
+                                                besides the row check.
+    derived_repositories       compiled policy  A candidate row per slug, used only after the row check
                                                 confirms it in this invocation.
-    production                 compiled policy  A row's declared production rules
-                                                (commands, key_files, mcp_tools),
-                                                read unconfirmed: they only
-                                                refuse (issues 1149, 1150).
-    derivation                 compiled policy  Recorded for the reader; null or
-                                                an object; the guard does not
-                                                interpret it.
+    production                 compiled policy  A row's declared production rules (commands, key_files,
+                                                mcp_tools), read unconfirmed: they only refuse (issues
+                                                1149, 1150).
+    derivation                 compiled policy  Recorded for the reader; null or an object; the guard does
+                                                not interpret it.
 
 The guard loads the base policy on every call, after the detaching-word check. It reads the compiled policy on every
 call that passes the detaching check and the base-policy load, for the production rules (issue 1149 D4), and runs the
@@ -838,19 +823,6 @@ as `literal_conflict`: the project gets no row and the literal row stays, and ea
 compiled policy cannot subtract from the base, so a repository can carry both only when the compiled policy was edited
 or a literal row was added after the last compile, and the guard refuses it at step 1 above (issue 377 D5). What the
 guard authorizes is the base `authorized_owners` and `integration_bases` plus the derived rows the row check confirms.
-
-Tests
------
-
-`tests/test_claude_permission_guard.py` takes the built settings through `CLAUDE_SETTINGS_PATH` and the built base
-policy through `CLAUDE_GUARD_BASE_POLICY_PATH`, runs under `python3 -m unittest` with `python/` on `PYTHONPATH`, and
-passes a fixture compiled policy and a stub row check on every invocation, so it never reads this host's compiled
-policy or fleet registry, and a look check fixture that runs `look-approval judge` from source as `--look-bin`. Three
-tests, `test_a_compiled_policy_round_trips_through_the_guard`,
-`test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries` and
-`test_an_arcwave_shaped_project_is_judged_by_its_compiled_row`, run `guard-policy derive` from source as the row check
-over a fixture fleet, and `test_the_row_check_never_sees_a_hostile_shell_environment` runs the built
-`claude-guard-row-check` with `HOME` at an empty fixture fleet.
 """
 
 import argparse
@@ -1017,16 +989,17 @@ DETACHING_DEFAULT_PATTERN = re.compile(
 # quote (`no$''hup`), then every backslash, quote, brace and comma, which
 # rebuilds `no''hup`, `no\hup` and `no{,}hup`.
 DETACHING_DELETED = re.compile(r"\$(?=['\"])|[\\'\"{},]")
-# A read-only shell session (the engine's roles that hold `Bash` as read-only shapes) is refused the word that
-# hands a command its arguments on stdin, bounded as a detaching word is.
+# A read-only shell session refuses `xargs` (it feeds arguments no rule can read) and `--output` after a `git`
+# word (it writes a file), each in the raw text or its deletion copy, bounded as a detaching word is.
 READ_ONLY_SHELL_ENV = "CLAUDE_READ_ONLY_SHELL"
-ARGUMENT_FEEDER_PATTERN = re.compile(
-    r"(?:(?<![A-Za-z0-9_-])|(?<=[cs])|(?<=\$[0-9!@*]))xargs(?![A-Za-z0-9_-])",
+READ_ONLY_SHELL_PATTERN = re.compile(
+    r"(?:(?<![A-Za-z0-9_-])|(?<=[cs])|(?<=\$[0-9!@*]))xargs(?![A-Za-z0-9_-])"
+    r"|(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_-])[\s\S]*?--output(?![A-Za-z0-9_-])",
     re.IGNORECASE | re.ASCII,
 )
-ARGUMENT_FEEDER_REFUSAL = (
-    "`xargs` refused in a read-only shell session: it hands the command after it arguments from stdin that no "
-    "shell rule can read; use the file tools, or a command that names its arguments")
+READ_ONLY_SHELL_REFUSAL = (
+    "`xargs` and git `--output` refused in a read-only shell session: the first hands a command arguments from "
+    "stdin and the second writes a file, and no shell rule can read either; use the file tools")
 CD_PRELUDE_PROBLEM = (
     "the directory the verb runs in cannot be resolved: a directory change is "
     "accepted only as one leading cd <absolute directory> && before a single "
@@ -3043,9 +3016,9 @@ def detaching_word(command):
     return None
 
 
-def argument_feeder(command):
-    """True when `command`, read as `detaching_word` reads it, holds the word `xargs`."""
-    return any(ARGUMENT_FEEDER_PATTERN.search(text) for text in detaching_texts(command))
+def read_only_shell_problem(command):
+    """True when `command`, read as `detaching_word` reads it, holds `xargs` or `--output` after a `git` word."""
+    return any(READ_ONLY_SHELL_PATTERN.search(text) for text in detaching_texts(command))
 
 
 def lifecycle_words(command):
@@ -6858,8 +6831,8 @@ def main():
     word = detaching_word(command)
     if word is not None:
         return block(f"detaching command `{word}` refused: {DETACHING_ROUTES}")
-    if os.environ.get(READ_ONLY_SHELL_ENV) and argument_feeder(command):
-        return block(ARGUMENT_FEEDER_REFUSAL)
+    if os.environ.get(READ_ONLY_SHELL_ENV) and read_only_shell_problem(command):
+        return block(READ_ONLY_SHELL_REFUSAL)
 
     base, reason = load_base_policy(args.base_policy)
     if base is None:

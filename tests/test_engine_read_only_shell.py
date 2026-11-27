@@ -57,7 +57,7 @@ def launch_words(name: str) -> tuple[list[str], list[str]]:
 def read_only_admits(command: str, allowed: list[str], denied: list[str]) -> bool:
     """The client's rules, then the guard's detaching check and its read-only-shell check (the session's switch)."""
     return (client_admits(command, allowed, denied) and GUARD.detaching_word(command) is None
-            and not GUARD.argument_feeder(command))
+            and not GUARD.read_only_shell_problem(command))
 
 
 class ReadOnlyShellTest(unittest.TestCase):
@@ -142,6 +142,44 @@ class ReadOnlyShellTest(unittest.TestCase):
             with self.subTest(client_alone=command):
                 self.assertTrue(client_admits(command, *launch_words("reviewer")))
 
+    def test_a_git_output_option_the_shell_rebuilds_is_refused_to_each_read_only_role(self):
+        rebuilt = [
+            'git diff --out""put=d.patch HEAD~1',
+            "git log --outp\\ut=l.txt -1",
+            "git show --out''put=s.txt HEAD",
+            "git diff --out{,}put=d.patch HEAD~1",
+            "git diff --{output=d.patch,} HEAD~1",
+            'git diff "--output=d.patch" HEAD~1',
+            "git log -1 --OUTPUT=l.txt",
+            "git diff --output d.patch",
+        ]
+        for name in READ_ONLY_ROLES:
+            words = launch_words(name)
+            for command in rebuilt:
+                with self.subTest(role=name, command=command):
+                    self.assertFalse(read_only_admits(command, *words))
+            with self.subTest(role=name, admitted="a search for the text"):
+                self.assertTrue(read_only_admits("grep -rn -e '--output' python", *words))
+        for command in rebuilt[:3]:  # the client's rule words read the literal text only
+            with self.subTest(client_alone=command):
+                self.assertTrue(client_admits(command, *launch_words("reviewer")))
+
+    def test_the_guard_refuses_a_git_output_option_only_in_a_read_only_shell_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = real_guard(Path(tmp) / "guard")
+            for switched in (True, False):
+                env = {key: value for key, value in os.environ.items() if key != engine_session.READ_ONLY_SHELL_SWITCH}
+                if switched:
+                    env[engine_session.READ_ONLY_SHELL_SWITCH] = "1"
+                payload = json.dumps({"tool_name": "Bash",
+                                      "tool_input": {"command": 'git diff --out""put=d.patch HEAD~1'}})
+                done = subprocess.run([str(wrapper)], input=payload, env=env, capture_output=True, text=True,
+                                      cwd=tmp, timeout=60, check=False)
+                with self.subTest(switched=switched):
+                    self.assertEqual("refused in a read-only shell session" in done.stderr, switched)
+                    if switched:
+                        self.assertEqual(done.returncode, 2, done.stderr)
+
     def test_the_guard_refuses_xargs_only_in_a_read_only_shell_session(self):
         def refusal(command: str, switched: bool) -> subprocess.CompletedProcess:
             env = {key: value for key, value in os.environ.items() if key != engine_session.READ_ONLY_SHELL_SWITCH}
@@ -156,8 +194,8 @@ class ReadOnlyShellTest(unittest.TestCase):
             self.assertEqual(GUARD.READ_ONLY_SHELL_ENV, engine_session.READ_ONLY_SHELL_SWITCH)
             refused = refusal("cat args.txt | xargs git diff", True)
             self.assertEqual(refused.returncode, 2, refused.stderr)
-            self.assertIn("`xargs` refused in a read-only shell session", refused.stderr)
-            self.assertNotIn("`xargs` refused", refusal("cat args.txt | xargs git diff", False).stderr)
+            self.assertIn("`xargs` and git `--output` refused in a read-only shell session", refused.stderr)
+            self.assertNotIn("refused in a read-only", refusal("cat args.txt | xargs git diff", False).stderr)
             self.assertEqual(refusal("git log --oneline -3 | head", True).returncode, 0)
 
     def test_only_a_read_only_shell_role_gets_the_switch(self):
