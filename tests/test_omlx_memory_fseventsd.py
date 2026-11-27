@@ -217,7 +217,7 @@ class SampleTest(FakeHost):
     def sample(self, now=NOW):
         return self.run_module([
             "sample", "--state-dir", str(self.state_dir), "--floor-gib", "16", "--others-budget-gib", "46", "--unowned-alert-gib", "5",
-            "--omlx-jetsam-priority", "100", "--host", "eleven-m5",
+            "--verify-alert-gib", "2.5", "--omlx-jetsam-priority", "100", "--host", "eleven-m5",
             "--vm-stat", str(self.d / "vm_stat"), "--sysctl", str(self.d / "sysctl"),
             "--launchctl", str(self.d / "launchctl"), "--ps", str(self.d / "ps"),
             "--footprint", str(self.d / "footprint"),

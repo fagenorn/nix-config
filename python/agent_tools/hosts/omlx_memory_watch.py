@@ -1,9 +1,9 @@
 """`omlx-memory-watch`: the eleven-m5 memory watcher, one sample per run.
 
 `omlx-memory-watch sample --state-dir DIR --floor-gib N --others-budget-gib N
---unowned-alert-gib N --omlx-jetsam-priority N --host NAME [--label org.nixos.omlx] [--health-url URL] [--vm-stat PATH]
-[--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH] [--hdiutil PATH] [--slot-history FILE]
-[--colima-pid-file FILE] [--alert-settings FILE] [--alert-log FILE] [--telegram-api URL] [--census-record FILE]
+--unowned-alert-gib N --verify-alert-gib N --omlx-jetsam-priority N --host NAME [--label org.nixos.omlx]
+[--health-url URL] [--vm-stat PATH] [--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH]
+[--hdiutil PATH] [--slot-history FILE] [--colima-pid-file FILE] [--alert-settings FILE] [--alert-log FILE] [--telegram-api URL] [--census-record FILE]
 [--now ISO8601]` takes one reading of the host and
 records it. Used memory is (anonymous pages - purgeable pages + wired pages + compressor pages)
 x the page size of `vm_stat`; available is `hw.memsize` minus used. A model is loaded when the
@@ -24,10 +24,14 @@ gets one line per finished day: `day`, the peaks and minimum in GiB (null where 
 `others_budget_gib`, `over_budget`, `jetsam_exits`, `peak_ci_jobs`, `samples`,
 `loaded_samples`, `min_loaded_available_gib`, `floor_gib`, `omlx_jetsam_priority` and
 `declared_jetsam_priority`, then `peak_fseventsd_gib` and `fseventsd_restarts`, then for each of
-`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous` and `compressions` a
+`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous`, `compressions` and `verify` a
 `peak_<name>_gib` and a `peak_<name>_at` (the first sample, as ISO 8601, that held that peak; null
-where unmeasured), `peak_owners` (the day's five largest `{name, pid, gib, at}`), `census_samples`
-and `records_since`.
+where unmeasured; for `verify` the largest single verify-run tree and the run's own peak time, kept
+only on its local day; the first sample after midnight also folds a run whose peak was on the finished
+day into that day's line, where it counts as one of its `verify_runs`; a run read later whose peak
+was on another day is in its event and alert only and counts in no `verify_runs`), `peak_owners` (the day's five
+largest `{name, pid, gib, at}`), `census_samples`, `records_since` and `verify_runs` (the verify runs
+read that day).
 
 Each successful sample also appends one line to `DIR/samples/<day>.jsonl` (directory 0700, file 0600):
 `at`, `used_bytes`, `available_bytes`, `loaded`, `omlx_bytes`, `ci_jobs`, `wired_bytes`,
@@ -51,7 +55,10 @@ the census figures only from a fresh census), `peak_owners` (each `(name, pid)` 
 earliest on a tie, the five largest kept), `census_samples` (samples with a fresh census), all three
 reset each day, and `records_since`, the day of the first sample that kept them: it is set once and
 carried across days, so a day rolled over from a state without it reports null. `records_since_at`,
-that first sample's time, is kept with it for the post-deploy check. The state also keeps `last_sample`,
+that first sample's time, is kept with it for the post-deploy check. `verify_runs` (reset each day) counts
+the `verify_run` events read that day except a run whose peak is dated on another day (a run with no peak
+is counted in the day that reads it, as the line's description above says) and `verify_records_since` is the day of the first sample that kept them, set
+once and carried across days like `records_since`, so an upgrade dates them from its own day. The state also keeps `last_sample`,
 `{day, line}`, the last sample line: the state is replaced first and the line appended after, so a run
 stopped between the two leaves the line in the state, and the next run appends it if the file does not
 end with it before it reads anything else.
@@ -60,8 +67,12 @@ An alert is queued when the service's `runs` changed and its last exit reason is
 killer's (`jetsam`), and when available memory falls under the floor while a model is loaded
 (`low_memory`, once per episode). `unowned_memory` is queued once per episode when a fresh census's
 unowned memory is over `--unowned-alert-gib` (strictly); an unowned figure at or under the line closes
-the episode, and a sample without a fresh census changes nothing. The first sample only records a
-baseline for the other alerts. Each queued alert
+the episode, and a sample without a fresh census changes nothing. `verify_tree` is queued once per
+`verify_run` event whose `tree_peak_bytes` is an integer strictly over `--verify-alert-gib` (a finite
+number above 0): each history line is read once, so a run alerts once, whatever day its peak belongs
+to. It names the run's first three command words, with the value of a `NAME=value` word replaced by
+`<redacted>` and any word cut to 60 characters, and its repository cut to 100. The first sample only
+records a baseline for the other alerts. Each queued alert
 is delivered through `agent_tools.hosts.host_alerts`, in order, before the state is written;
 one that fails stays queued, is logged once and is retried by the next sample. A missing settings file
 means alerts are not configured: the queue holds its alerts (`held`), the watch logs
@@ -137,6 +148,7 @@ import argparse
 import copy
 import http.client
 import json
+import math
 import os
 import re
 import subprocess
@@ -166,11 +178,12 @@ CENSUS_TIMEOUT = 50
 CENSUS_FRESH_SECONDS = 150
 SAMPLE_DAYS = 14
 SAMPLES_DIR = "samples"
-PEAK_FIGURES = ("sys_footprint", "process_footprint", "unowned", "wired", "anonymous", "compressions")
+PEAK_FIGURES = ("sys_footprint", "process_footprint", "unowned", "wired", "anonymous", "compressions", "verify")
 CENSUS_DEFAULTS = {
     "census_peaks": {}, "peak_owners": [], "census_samples": 0, "records_since": None, "records_since_at": None,
     "unowned_open": False, "last_sample": None,
 }
+VERIFY_DEFAULTS = {"verify_runs": 0, "verify_records_since": None}
 TOP_OWNERS = 5
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
 FLOOR_DEFAULTS = {"floor_kills_seen": None, "floor_unmet_seen": None, "priority_unset_open": False, "floor_log": []}
@@ -191,6 +204,9 @@ VM_FIELDS = {
 LAUNCHCTL_FIELDS = {"runs": "runs", "pid": "pid", "jetsam priority": "jetsam_priority"}
 FOOTPRINT_LINE = re.compile(r"^\s*phys_footprint:\s*(\d+) B\s*$", re.MULTILINE)
 SEE = "See hosts/darwin/eleven-m5/README.md, Memory budget."
+ALERT_WORD = 60
+ALERT_REPOSITORY = 100
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 class ReadingError(Exception):
@@ -298,7 +314,7 @@ def fresh_day(since: str, day: str) -> dict:
         "min_loaded_available_bytes": None, "peak_ci_jobs": 0, "jetsam_exits": 0, "omlx_runs": None,
         "omlx_jetsam_priority": None, "low_memory_open": False, "pending": [],
         **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **ALERT_DEFAULTS, "floor_log": [], **copy.deepcopy(CENSUS_DEFAULTS),
-        **omlx_memory_events.EVENT_DEFAULTS,
+        **VERIFY_DEFAULTS, **omlx_memory_events.EVENT_DEFAULTS,
     }
 
 
@@ -341,6 +357,7 @@ def _day_line(state: dict, floor_bytes: int, others_budget_bytes: int, declared:
         ],
         "census_samples": state["census_samples"],
         "records_since": state["records_since"],
+        "verify_runs": state["verify_runs"],
     }
 
 
@@ -370,6 +387,69 @@ def _fold_peak(state: dict, name: str, value: int, at: str) -> None:
     held = state["census_peaks"].get(name)
     if held is None or value > held["bytes"]:
         state["census_peaks"][name] = {"bytes": value, "at": at}
+
+
+def alert_command(command: str) -> str:
+    """The first words of `command` for an alert: assignment values redacted, long words cut."""
+    words = []
+    for word in command.split()[:verify_history.COMMAND_WORDS]:
+        if ASSIGNMENT.match(word):
+            word = word.partition("=")[0] + "=<redacted>"
+        words.append(word if len(word) <= ALERT_WORD else word[:ALERT_WORD] + "…")
+    return " ".join(words) or "(no command)"
+
+
+def alert_repository(repository: str | None) -> str:
+    """The repository an alert names: the placeholder for none, a long name cut."""
+    if repository is None:
+        return verify_history.NO_REPOSITORY
+    return repository if len(repository) <= ALERT_REPOSITORY else repository[:ALERT_REPOSITORY] + "…"
+
+
+def _queue_verify_tree(state: dict, event: dict, peak: int, reading: dict, alert_bytes: int) -> None:
+    state["pending"].append({
+        "kind": "verify_tree", "logged": False,
+        "text": f"{reading['host']}: a verify run's process tree reached {peak / GIB:.1f} GiB, over the "
+                f"{alert_bytes / GIB:.1f} GiB alert line: {alert_command(event['command'])} in "
+                f"{alert_repository(event['repository'])}. {SEE}",
+    })
+
+
+def _local_day(at: str, now: datetime) -> str:
+    """The local day of the instant `at`: the host's zone with its own offset at `at`, else `now`'s zone."""
+    zone = None if now.astimezone().utcoffset() == now.utcoffset() else now.tzinfo
+    return datetime.fromisoformat(at).astimezone(zone).date().isoformat()
+
+
+def _amend_day_line(line: dict, peak: int, at: str) -> None:
+    """Count a run into the finished day's line and keep its peak there when it is the day's highest."""
+    line["verify_runs"] += 1
+    if line["peak_verify_gib"] is None or _gib(peak) > line["peak_verify_gib"]:
+        line["peak_verify_gib"], line["peak_verify_at"] = _gib(peak), at
+
+
+def _fold_verify(state: dict, events: list[dict], reading: dict, now: datetime, alert_bytes: int,
+                 line: dict | None) -> None:
+    """Alert on each tree over the line; count each `verify_run` and fold its peak into the day the peak is dated in.
+
+    That day is the state's, or the finished day's `line` when this sample rolled the day over. A run whose peak is
+    dated on any other day is in its event and alert only: counting it would give the day a run with no peak.
+    """
+    for event in events:
+        if event["kind"] != "verify_run":
+            continue
+        peak, at = event.get("tree_peak_bytes"), event.get("tree_peak_at")
+        if _is_int(peak) and peak > alert_bytes:
+            _queue_verify_tree(state, event, peak, reading, alert_bytes)
+        day = _local_day(at, now) if _is_int(peak) and isinstance(at, str) else None
+        if line is not None and day == line["day"]:
+            _amend_day_line(line, peak, at)
+            continue
+        if day is not None and day != state["day"]:
+            continue
+        state["verify_runs"] += 1
+        if day == state["day"]:
+            _fold_peak(state, "verify", peak, at)
 
 
 def _fold_owners(state: dict, owners, at: str) -> None:
@@ -537,7 +617,7 @@ def _fold_unowned(state: dict, census: dict | None, reading: dict, alert_bytes: 
 
 
 def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int,
-           unowned_alert_bytes: int):
+           unowned_alert_bytes: int, verify_alert_bytes: int):
     """Fold one reading into the state; answer the new state, the finished day's line or None, and the sample line."""
     day = now.date().isoformat()
     line = None
@@ -545,6 +625,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
         state = fresh_day(day, day)
     else:
         state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **ALERT_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS),
+                 **VERIFY_DEFAULTS,
                  **omlx_memory_events.EVENT_DEFAULTS, **state,
                  "pending": [dict(entry) for entry in state["pending"]]}
         state["floor_log"] = list(state["floor_log"])
@@ -555,12 +636,14 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
                         "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open",
                         "floor_kills_seen", "floor_unmet_seen", "priority_unset_open", "floor_log",
                         "records_since", "records_since_at", "unowned_open", "last_sample",
-                        *omlx_memory_events.EVENT_DEFAULTS):
+                        "verify_records_since", *omlx_memory_events.EVENT_DEFAULTS):
                 carried[key] = state[key]
             state = carried
     if state["records_since"] is None:
         state["records_since"] = day
         state["records_since_at"] = now.isoformat()
+    if state["verify_records_since"] is None:
+        state["verify_records_since"] = day
     used, available, loaded = reading["used_bytes"], reading["available_bytes"], reading["loaded"]
     omlx = reading["omlx_bytes"]
     footprint = "unknown" if omlx is None else f"{omlx / GIB:.1f}"
@@ -609,6 +692,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
         state["low_memory_open"] = False
     _fold_fseventsd(state, reading["fseventsd"], reading["host"])
     events = omlx_memory_events.fold_events(state, reading["observed"])
+    _fold_verify(state, events, reading, now, verify_alert_bytes, line)
     _fold_floor(state, reading["floor"], reading, events)
     _fold_unowned(state, census, reading, unowned_alert_bytes)
     return state, line, _sample_line(reading, now, census, events)
@@ -1043,7 +1127,8 @@ def sample(args) -> int:
     except OSError as error:
         print(f"{PROG}: the last sample line was not recovered ({type(error).__name__}: {error})", file=sys.stderr)
     state, line, record = decide(
-        previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB)
+        previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB,
+        int(args.verify_alert_gib * GIB))
     for entry in state["floor_log"]:
         print(entry, end="", flush=True)
     state["floor_log"] = []
@@ -1065,6 +1150,16 @@ def sample(args) -> int:
     return 3 if failed else 0
 
 
+def _alert_gib(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a finite number above 0")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description="Record the eleven-m5 memory watcher's sample.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1073,6 +1168,7 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--floor-gib", type=int, required=True)
     one.add_argument("--others-budget-gib", type=int, required=True)
     one.add_argument("--unowned-alert-gib", type=int, required=True)
+    one.add_argument("--verify-alert-gib", type=_alert_gib, required=True)
     one.add_argument("--omlx-jetsam-priority", type=int, required=True)
     one.add_argument("--host", required=True)
     one.add_argument("--label", default="org.nixos.omlx")

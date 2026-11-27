@@ -70,7 +70,7 @@ malformed file meaning list order. Serial mode keeps list order, and the report 
 list order for ties. Refresh the file from a run's `suite-runner: <wall>s wall ... <member>`
 rows when the suite's shape changes; a stale file only costs wall time.
 `tests/test_suite_runner.py` names the run the file was last refreshed from and its members
-slower than 30 s, and a refresh from a newer run replaces both.
+slower than 35 s, and a refresh from a newer run replaces both.
 
 Shards. When `SUITE_RUNNER_SHARD` is set and non-empty it reads `<index>/<count>` with
 `1 <= index <= count`, both decimal numbers without a sign or a leading zero, and the runner
@@ -86,10 +86,29 @@ before anything starts. The report of a sharded run ends with the keys `shard` a
 
 Output. In parallel mode each member's stdout and stderr are captured together and printed
 as one block when it exits, from `suite-runner: begin <member>` to
-`suite-runner: end <member> passed|failed exit=<code> <seconds>s`. A
-`suite-runner: start <member>` line marks each launch, so a run cut off by a time limit names
+`suite-runner: end <member> passed|failed exit=<code> <seconds>s`; a part's lines carry its
+label. A `suite-runner: start <member>` line marks each launch, so a run cut off by a time limit names
 the members still running. `--jobs 1` is serial mode: members run one at a time with stdin,
 stdout and stderr passed straight through, for a hang or a `breakpoint()`.
+
+Splitting. In parallel mode a `.py` member whose recorded time is above `SPLIT_SECONDS`
+(150 s) runs as parts when the unittest loader finds two or more classes with tests in it
+(`agent_tools.delivery.suite_part --list`), each part its own process and scheduled unit
+(`plan_units`). The part count is the smaller of that class count and the recorded time
+divided by the bound, rounded up; classes go to parts by their test count, largest first,
+each to the part with the fewest tests so far. Part 1 runs every test of the module whose
+class no other part names, so a test the listing missed still runs once; the other parts run
+only their named classes. A part's lines name it `<member>::<Class>[,<Class>...]` (a class
+imported from another module is `<module>:<Class>`), and a
+failed part's `failed part` line names the classes of its failing tests. Its process gets
+`SUITE_RUNNER_PART` (`<n>/<parts>`), `SUITE_RUNNER_PART_DIR`, a directory the member's parts
+share for the run, and `SUITE_RUNNER_PART_MEMBER`, the member's absolute path. A member with
+no recorded time, fewer than two such classes, a listing that fails or names a class twice, a
+suite that is a `TestSuite` subclass, a `.sh` suffix or a serial run runs whole. The parts
+join into one result per member: the sum of their wall and CPU seconds, passed only when
+every part passed, the first failing part's exit otherwise;
+the timing table, the summary and the report count members, never parts, so the committed
+timings keep one figure per member. Parts of one member always run in one runner process.
 
 Verdict. A member passes only on exit 0. Unittest's exit 5 for a module that ran no tests, a
 death by signal (`exit=signal-<n>`) and a failure to launch (`exit=launch-error`) all fail
@@ -97,7 +116,8 @@ it, and every member still runs after a failure.
 
 Timing table. Every completed run ends with one
 `suite-runner: <wall>s wall <cpu>s cpu passed|failed <member>` row per member, slowest first
-with ties in list order, then one `suite-runner: failed <member>` line per failure and
+with ties in list order, then one `suite-runner: failed <member>` line per failure, each followed by one
+`suite-runner: failed part <label>` line per failed part of a split member, and
 `suite-runner: summary members=<n> passed=<p> failed=<f> jobs=<N> wall=<seconds>s cpu=<seconds>s`.
 A row's CPU figure is the member's child CPU time: the user plus system seconds in the
 resource usage that `os.wait4` returns when the runner reaps the member. That covers the
@@ -112,6 +132,7 @@ computing. One far below it was waiting, for I/O, a sleep or a CPU it could not 
 host's CPUs. Near it, every slot was computing and the CPUs were saturated; well below it,
 the members were waiting on something else. A module whose CPU grows from a `--jobs 1` run to
 a parallel one ran on slower, shared CPUs.
+A split member's row sums the wall and CPU seconds of its parts.
 
 Timing report (issue 1385, ADR-delivery-015). When `SUITE_RUNNER_REPORT` names a path,
 relative to the working directory, every completed run also writes the report there as JSON
@@ -148,7 +169,10 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import BinaryIO, Mapping, Sequence
+from typing import BinaryIO, Callable, Mapping, Sequence
+
+from agent_tools.delivery.suite_part import FAILED_CLASSES
+from agent_tools.system.siblings import sibling_argv
 
 PREFIX = "suite-runner:"
 JOBS_ENV = "SUITE_RUNNER_JOBS"
@@ -177,6 +201,17 @@ SCRATCH_STALE_SECONDS = 24 * 3600
 # Appended to every member's GIT_CONFIG_PARAMETERS, in the form `git -c` exports
 # (issue 496).
 SUITE_GIT_CONFIG = "'maintenance.auto'='false' 'gc.auto'='0'"
+# A member recorded above this many seconds runs as parts of its test classes when it can.
+SPLIT_SECONDS = 150.0
+LIST_TIMEOUT_SECONDS = 120.0
+# What a part's process is told: its number, the member's shared directory and the member's path.
+PART_ENV = "SUITE_RUNNER_PART"
+PART_DIR_ENV = "SUITE_RUNNER_PART_DIR"
+PART_MEMBER_ENV = "SUITE_RUNNER_PART_MEMBER"
+PART_SEPARATOR = "::"
+SUITE_PART = "delivery.suite_part"
+LISTED_CLASS = re.compile(r"^(\S+) ([1-9][0-9]*)$")
+FAILED_LINE = re.compile("^" + re.escape(FAILED_CLASSES) + r"(\S+)$", re.MULTILINE)
 
 
 class UsageError(ValueError):
@@ -194,6 +229,25 @@ class MemberResult:
     @property
     def passed(self) -> bool:
         return self.returncode == 0
+
+
+@dataclass(frozen=True)
+class Unit:
+    """One scheduled process: a whole member, or the part of a split member that runs `classes`
+    (part 1 instead runs every class but `excluded`). `seconds` is the estimate, None if unknown."""
+    member_index: int
+    member: str
+    classes: tuple[str, ...] = ()
+    excluded: tuple[str, ...] = ()
+    part: int = 1
+    parts: int = 1
+    seconds: float | None = None
+
+    @property
+    def label(self) -> str:
+        if not self.classes:
+            return self.member
+        return f"{self.member}{PART_SEPARATOR}{','.join(self.classes)}"
 
 
 def default_jobs(cpu_count: int | None, environ: Mapping[str, str]) -> int:
@@ -256,6 +310,80 @@ def schedule_order(members: Sequence[str], timings: Mapping[str, float]) -> list
     return unknown + known
 
 
+def test_classes(member: str, environment: Mapping[str, str], cwd: Path) -> list[tuple[str, int]]:
+    """The `(class qualname, test count)` pairs the unittest loader finds in `member`, in order,
+    as `suite_part --list` prints them; empty when the member is not a `.py` file or the listing
+    fails, times out, prints anything else or names a class twice, so the member runs whole."""
+    if not member.endswith(".py"):
+        return []
+    try:
+        completed = subprocess.run(
+            [*sibling_argv(SUITE_PART), member, "--list"], env=environment, cwd=cwd,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=LIST_TIMEOUT_SECONDS,
+            check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if completed.returncode != 0:
+        return []
+    listed = []
+    for line in completed.stdout.decode(errors="replace").splitlines():
+        found = LISTED_CLASS.match(line)
+        if found is None:
+            return []
+        listed.append((found[1], int(found[2])))
+    if len({name for name, _ in listed}) != len(listed):
+        return []
+    return listed
+
+
+def _part_units(member_index: int, member: str, seconds: float,
+                listed: Sequence[tuple[str, int]], bound: float) -> list[Unit]:
+    """The parts of a member: classes by descending test count, each to the part with the fewest
+    tests so far, ties to the lowest part number."""
+    count = min(len(listed), math.ceil(seconds / bound))
+    groups: list[list[int]] = [[] for _ in range(count)]
+    totals = [0] * count
+    for position in sorted(range(len(listed)), key=lambda i: (-listed[i][1], i)):
+        target = min(range(count), key=lambda part: (totals[part], part))
+        groups[target].append(position)
+        totals[target] += listed[position][1]
+    elsewhere = sorted(position for group in groups[1:] for position in group)
+    excluded = tuple(listed[position][0] for position in elsewhere)
+    total = sum(totals)
+    return [Unit(member_index, member,
+                 classes=tuple(listed[position][0] for position in sorted(group)),
+                 excluded=excluded if part == 0 else (), part=part + 1, parts=count,
+                 seconds=seconds * totals[part] / total)
+            for part, group in enumerate(groups)]
+
+
+def plan_units(members: Sequence[str], timings: Mapping[str, float],
+               classes: Callable[[str], Sequence[tuple[str, int]]],
+               bound: float = SPLIT_SECONDS) -> list[Unit]:
+    """The units to run, in member order and part order: a `.py` member recorded above `bound`
+    whose `classes` lists two or more is split into parts, any other member runs whole."""
+    units: list[Unit] = []
+    for index, member in enumerate(members):
+        seconds = timings.get(member)
+        listed: Sequence[tuple[str, int]] = ()
+        if member.endswith(".py") and seconds is not None and seconds > bound:
+            listed = classes(member)
+        if seconds is None or len(listed) < 2:
+            units.append(Unit(index, member, seconds=seconds))
+        else:
+            units.extend(_part_units(index, member, seconds, listed, bound))
+    return units
+
+
+def unit_order(units: Sequence[Unit]) -> list[int]:
+    """Indexes of `units` in the order they start: unknown estimates first, in unit order, then
+    longest first, ties in unit order."""
+    unknown = [i for i, unit in enumerate(units) if unit.seconds is None]
+    known = [i for i, unit in enumerate(units) if unit.seconds is not None]
+    known.sort(key=lambda i: (-units[i].seconds, i))
+    return unknown + known
+
+
 def assign_shards(members: Sequence[str], timings: Mapping[str, float],
                   count: int) -> list[list[str]]:
     """`count` shards of `members`, shard 1 first, each in list order; every member is in
@@ -303,6 +431,26 @@ def member_command(member: str) -> list[str]:
     raise UsageError(f"{member}: a member must be a .py or a .sh file")
 
 
+def unit_command(unit: Unit) -> list[str]:
+    if not unit.classes:
+        return member_command(unit.member)
+    command = [*sibling_argv(SUITE_PART), unit.member]
+    if unit.part == 1:
+        return command + [argument for name in unit.excluded for argument in ("--except", name)]
+    return command + [argument for name in unit.classes for argument in ("--only", name)]
+
+
+def unit_environment(environment: Mapping[str, str], unit: Unit, parts_root: Path,
+                     cwd: Path) -> dict[str, str]:
+    """`environment` for a whole unit; for a part, a copy that also names the part, the
+    directory its member's parts share and the member's absolute path."""
+    if not unit.classes:
+        return dict(environment)
+    return {**environment, PART_ENV: f"{unit.part}/{unit.parts}",
+            PART_DIR_ENV: str(parts_root / str(unit.member_index)),
+            PART_MEMBER_ENV: str((cwd / unit.member).resolve())}
+
+
 def member_environment(parent: Mapping[str, str], cache: str) -> dict[str, str]:
     """A copy of `parent` whose `GIT_CONFIG_PARAMETERS` ends with
     `SUITE_GIT_CONFIG`, so every git command run with it reads
@@ -325,11 +473,16 @@ def member_environment(parent: Mapping[str, str], cache: str) -> dict[str, str]:
     member never writes to the outer run's report path (issue 1385), and so is `SHARD_ENV`, so
     a runner nested in a member runs its whole list. `parent` is not modified, and every other variable is
     copied unchanged.
+
+    The three part variables a split member's parts get are dropped as well, so a nested
+    runner's parts never read an outer run's.
     """
     environment = dict(parent)
     environment.pop("AGENT_PLATFORM_ROOT", None)
     environment.pop(REPORT_ENV, None)
     environment.pop(SHARD_ENV, None)
+    for name in (PART_ENV, PART_DIR_ENV, PART_MEMBER_ENV):
+        environment.pop(name, None)
     inherited = environment.get("GIT_CONFIG_PARAMETERS", "")
     environment["GIT_CONFIG_PARAMETERS"] = (
         f"{inherited} {SUITE_GIT_CONFIG}" if inherited else SUITE_GIT_CONFIG)
@@ -431,8 +584,35 @@ def end_line(result: MemberResult) -> str:
             f"exit={exit_field(result.returncode)} {result.seconds:.1f}s")
 
 
-def report_lines(results: Sequence[MemberResult], *, jobs: int,
-                 wall_seconds: float) -> list[str]:
+def part_failure(unit: Unit, result: MemberResult, output: bytes) -> str | None:
+    """The label a `failed part` line prints for a failed part: the member and the classes of the
+    last `suite-part: failed classes` line of its output, else the part's own label. None for a
+    passed part or a whole member."""
+    if result.passed or not unit.classes:
+        return None
+    named = FAILED_LINE.findall(output.decode(errors="replace"))
+    if not named:
+        return unit.label
+    return f"{unit.member}{PART_SEPARATOR}{named[-1]}"
+
+
+def join_results(members: Sequence[str], units: Sequence[Unit],
+                 results: Sequence[MemberResult]) -> list[MemberResult]:
+    """One result per member, in member order: the seconds and CPU of its units summed, the exit
+    0 when every unit's is, else the first failing unit's in part order."""
+    grouped: list[list[MemberResult]] = [[] for _ in members]
+    for unit, result in zip(units, results):
+        grouped[unit.member_index].append(result)
+    return [MemberResult(
+        index, member,
+        next((result.returncode for result in group if result.returncode != 0), 0),
+        sum(result.seconds for result in group),
+        sum(result.cpu_seconds for result in group))
+        for index, (member, group) in enumerate(zip(members, grouped))]
+
+
+def report_lines(results: Sequence[MemberResult], *, jobs: int, wall_seconds: float,
+                 failed_parts: Mapping[str, Sequence[str]] | None = None) -> list[str]:
     ordered = sorted(results, key=lambda result: result.index)
     lines = [f"{PREFIX} timings, slowest first"]
     for result in sorted(ordered, key=lambda r: (-round(r.seconds, 1), r.index)):
@@ -440,7 +620,10 @@ def report_lines(results: Sequence[MemberResult], *, jobs: int,
         lines.append(f"{PREFIX} {result.seconds:7.1f}s wall "
                      f"{result.cpu_seconds:7.1f}s cpu {state} {result.member}")
     failed = [result for result in ordered if not result.passed]
-    lines.extend(f"{PREFIX} failed {result.member}" for result in failed)
+    for result in failed:
+        lines.append(f"{PREFIX} failed {result.member}")
+        lines.extend(f"{PREFIX} failed part {label}"
+                     for label in (failed_parts or {}).get(result.member, ()))
     lines.append(f"{PREFIX} summary members={len(ordered)} "
                  f"passed={len(ordered) - len(failed)} failed={len(failed)} "
                  f"jobs={jobs} wall={wall_seconds:.1f}s "
@@ -557,16 +740,19 @@ def _run_serial(members: Sequence[str], environment: Mapping[str, str],
     return results
 
 
-def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
-                  environment: Mapping[str, str], out: _Output,
-                  scratch: str | None = None) -> list[MemberResult | None]:
-    """Run `members` at most `jobs` at a time. With `scratch`, a directory that exists, each
-    member runs with its own empty `TMPDIR` created in it and removed once the member has
-    ended, however it ended; one that cannot be removed fails its member."""
-    results: list[MemberResult | None] = [None] * len(members)
+def _run_parallel(units: Sequence[Unit], order: Sequence[int], jobs: int,
+                  environments: Sequence[Mapping[str, str]], out: _Output,
+                  scratch: str | None = None
+                  ) -> tuple[list[MemberResult | None], list[str | None]]:
+    """Run `units`, `jobs` at a time, in `order`: each one's result, and the `part_failure` of
+    each (None for a whole member), indexed by unit. With `scratch`, a directory that exists,
+    each unit runs with its own empty `TMPDIR` created in it and removed once the unit has
+    ended, however it ended; one that cannot be removed fails its unit."""
+    results: list[MemberResult | None] = [None] * len(units)
+    failures: list[str | None] = [None] * len(units)
     stop = threading.Event()
     next_index = 0
-    running = min(jobs, len(members))
+    running = min(jobs, len(units))
     finished = threading.Condition()
 
     def run_members() -> None:
@@ -576,23 +762,23 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
             # the output lock: members start in `order`, and no start line
             # lands inside another member's block.
             with out.lock:
-                if stop.is_set() or next_index == len(members):
+                if stop.is_set() or next_index == len(units):
                     return
                 index = order[next_index]
-                member = members[index]
+                unit = units[index]
+                label = unit.label
                 next_index += 1
-                out.write(_line(f"{PREFIX} start {member}"))
+                out.write(_line(f"{PREFIX} start {label}"))
                 started = time.monotonic()
-                env = environment
+                env = environments[index]
                 member_tmp = None
                 try:
                     if scratch is not None:
                         member_tmp = tempfile.TemporaryDirectory(
                             prefix=f"member{index}-", dir=scratch)
-                        env = {**environment, "TMPDIR": member_tmp.name}
+                        env = {**env, "TMPDIR": member_tmp.name}
                     process = subprocess.Popen(
-                        member_command(member), env=env,
-                        stdin=subprocess.DEVNULL,
+                        unit_command(unit), env=env, stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 except OSError as error:
                     process, output = None, _line(str(error))
@@ -605,7 +791,7 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
                     # interrupted (issue 497 D2).
                     with process.stdout:
                         output = process.stdout.read()
-                result = _reap(index, member, process, started)
+                result = _reap(index, label, process, started)
             finally:
                 if member_tmp is not None:
                     try:
@@ -615,13 +801,14 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
             if output and not output.endswith(b"\n"):
                 output += b"\n"
             if removal_error is not None:
-                output += _line(f"{PREFIX} {member}: {member_tmp.name} was not removed: "
+                output += _line(f"{PREFIX} {label}: {member_tmp.name} was not removed: "
                                 f"{removal_error}")
                 if result.passed:
                     result = replace(result, returncode=1)
+            failures[index] = part_failure(unit, result, output)
             # One write per block, before this worker takes its next member.
             with out.lock:
-                out.write(_line(f"{PREFIX} begin {member}") + output
+                out.write(_line(f"{PREFIX} begin {label}") + output
                           + _line(end_line(result)))
             results[index] = result
 
@@ -658,7 +845,7 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
             out.write(_line(INTERRUPTED))
         wait_for_workers()
         raise
-    return results
+    return results, failures
 
 
 def timing_report(results: Sequence[MemberResult], *, jobs: int,
@@ -707,8 +894,8 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
               timings: Mapping[str, float] | None = None,
               shard: tuple[int, int] | None = None) -> int:
     """Run every member and write the report; 0 when all passed, else 1.
-    Parallel runs start members in `schedule_order(members, timings)`, serial
-    runs in list order.
+    Parallel runs start the units of `plan_units` (a long member's parts, else the member) in
+    `unit_order`, serial runs start whole members in list order.
 
     A KeyboardInterrupt propagates after the running members have finished and
     written their blocks. Must be called from the main thread: the runner holds
@@ -744,16 +931,36 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
             if root is not None:
                 environment["TMPDIR"] = scratch
         started = time.monotonic()
+        failed_parts: dict[str, list[str]] = {}
         if jobs == 1:
             results = _run_serial(members, environment, output)
+            labels = list(members)
         else:
-            order = schedule_order(members, timings or {})
-            results = _run_parallel(members, order, jobs, environment, output, scratch)
-        missing = [member for member, result in zip(members, results) if result is None]
+            cwd = Path.cwd()
+            units = plan_units(members, timings or {},
+                               lambda member: test_classes(member, environment, cwd))
+            parts_root = Path(stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="suite-runner-parts-")))
+            for unit in units:
+                if unit.parts > 1 and unit.part == 1:
+                    (parts_root / str(unit.member_index)).mkdir()
+            environments = [unit_environment(environment, unit, parts_root, cwd)
+                            for unit in units]
+            unit_results, failures = _run_parallel(
+                units, unit_order(units), jobs, environments, output, scratch)
+            labels = [unit.label for unit in units]
+            for unit, failure in zip(units, failures):
+                if failure is not None:
+                    failed_parts.setdefault(unit.member, []).append(failure)
+            results = unit_results
+        missing = [label for label, result in zip(labels, results) if result is None]
         if missing:
             raise RuntimeError(f"members left without a result: {', '.join(missing)}")
+        if jobs != 1:
+            results = join_results(members, units, results)
         wall = time.monotonic() - started
-        report = report_lines(results, jobs=jobs, wall_seconds=wall)
+        report = report_lines(results, jobs=jobs, wall_seconds=wall,
+                              failed_parts=failed_parts)
         output.write(b"".join(_line(line) for line in report))
         if report_path is not None:
             write_report(report_path, timing_report(

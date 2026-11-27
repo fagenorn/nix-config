@@ -854,9 +854,11 @@ class RunReadsEachHostOnce(unittest.TestCase):
             self.assertEqual(refusals, "", "a reader ran a host evaluation of its own")
 
         paths = set(self.members()) | {f"tests/{path.name}" for path in (ROOT / "tests").glob("test_*.py")}
+        # The suite runner's test lists this file among the slow members; it reads no host.
+        named_only = {"tests/test_host_readings.py", "tests/test_suite_runner.py"}
         readers = {
             path for path in paths
-            if path != "tests/test_host_readings.py" and "host_readings" in (ROOT / path).read_text(encoding="utf-8")
+            if path not in named_only and "host_readings" in (ROOT / path).read_text(encoding="utf-8")
         }
         self.assertEqual(readers, {name.replace(".", "/") + ".py" for name in self.READERS})
 
