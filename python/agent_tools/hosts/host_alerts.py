@@ -228,7 +228,7 @@ def _cause(status: int, error: urllib.error.HTTPError) -> str:
     """The fixed cause an error body names, or "" (Telegram's own words are never returned)."""
     try:
         document = json.loads(error.read(MAX_RESPONSE_BYTES))
-    except (OSError, http.client.HTTPException, ValueError):
+    except (OSError, http.client.HTTPException, ValueError, RecursionError):
         return ""
     description = document.get("description") if isinstance(document, dict) else None
     if not isinstance(description, str):
@@ -254,7 +254,7 @@ def _call(token: str | None, method: str, payload: dict, api: str, timeout: floa
             body = json.loads(response.read(MAX_RESPONSE_BYTES))
     except urllib.error.HTTPError as error:
         return None, f"HTTP {error.code}", _cause(error.code, error)
-    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as error:
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, RecursionError) as error:
         return None, type(error).__name__, ""
     if code != 200:
         return None, f"HTTP {code}", ""

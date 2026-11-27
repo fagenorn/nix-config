@@ -67,7 +67,7 @@ class Bot:
                     "content_type": self.headers.get("Content-Type"),
                     "body": json.loads(raw),
                 })
-                payload = json.dumps(bot.body).encode()
+                payload = bot.body if isinstance(bot.body, bytes) else json.dumps(bot.body).encode()
                 self.send_response(bot.status)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -286,6 +286,20 @@ class ChatListTest(HostAlertsCase):
         self.assertEqual(third, ((), "URLError"))
         for shown in (first[1], second[1], third[1]):
             self.assertNotIn("SECRET-TOKEN", shown)
+
+    def test_a_deeply_nested_answer_is_a_reason_not_a_raise(self):
+        self.bot.body = b"[" * 60000
+        live = Settings(True, TOKEN, "-1")
+        for status in (409, 200):
+            self.bot.status = status
+            chats, reason = list_chats(TOKEN, api=self.bot.api)
+            sent, why = send_message(live, "t", api=self.bot.api)
+            self.assertEqual(chats, ())
+            self.assertTrue(reason)
+            self.assertFalse(sent)
+            self.assertTrue(why)
+            for shown in (reason, why):
+                self.assertNotIn("SECRET-TOKEN", shown)
 
     def test_a_malformed_token_is_refused_without_a_request(self):
         self.assertEqual(list_chats("123:a/../x", api=self.bot.api), ((), "bad token"))
