@@ -10,6 +10,10 @@ match, the stage's hint file, the records the changed files cite, a one-line ind
 of each matching context-map area, each shard's rule ids, the platform revision and the total
 size in bytes. A wide change is never cut. Exit 0 with that line, 2 with one `router: <reason>`
 line on stderr and nothing on stdout for a misuse.
+
+`routed(root, stage, paths, platform_dir, diff=None)` is the same document in process, for the
+sorted distinct `paths`; it raises `ValueError` (no bar, a stack shard the platform lacks) and
+`OSError` where the command exits 2.
 """
 
 from __future__ import annotations
@@ -114,7 +118,12 @@ def must_read(root: Path, project: routing.Project, paths: list[str]) -> list[di
 
 
 def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
-    paths = change_paths(args, root)
+    return routed(root, args.stage, change_paths(args, root), platform_dir, args.diff)
+
+
+def routed(root: Path, stage: str, paths: Sequence[str], platform_dir: Path,
+           diff: str | None = None) -> dict:
+    paths = sorted(set(paths))
     platform = routing.load_platform(platform_dir)
     project = routing.read_project(project_files(root, paths))
     names = sorted({name for path in paths for name in routing.routed_stacks(project, path)})
@@ -131,7 +140,7 @@ def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
             content = project.files[shard.path]
             shards.append({"layer": "project", "path": str(root / shard.path),
                            "bytes": len(content), "rules": rules(content)})
-    hint_path = root / hint_phases.HINT_DIR / hint_phases.hint_file(args.stage)
+    hint_path = root / hint_phases.HINT_DIR / hint_phases.hint_file(stage)
     size = regular_size(hint_path)
     hint = None if size is None else {"path": str(hint_path), "bytes": size}
     required = must_read(root, project, paths)
@@ -143,8 +152,8 @@ def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
     total = (sum(s["bytes"] for s in shards) + (hint["bytes"] if hint else 0)
              + sum(m["bytes"] for m in required) + index_size)
     return {
-        "schema_version": SCHEMA_VERSION, "stage": args.stage,
-        "change": {"diff": args.diff, "paths": paths},
+        "schema_version": SCHEMA_VERSION, "stage": stage,
+        "change": {"diff": diff, "paths": paths},
         "platform_revision": revision["rev"] if revision else None,
         "shards": shards, "hint": hint, "must_read": required, "index": index,
         "index_bytes": index_size, "total_bytes": total}

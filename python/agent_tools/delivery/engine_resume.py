@@ -19,16 +19,18 @@ no new visit and no new child run. Each named child that is not done or at a sto
 continued as a run of its own (with its own procedure copy) and walked again under the same name; one that
 ended keeps its end. A walked-again child owes the first-visit checks of a rewound call as its first walk did.
 A call visit whose result file a killed engine published before it appended `result_stored` records that file
-as its result and runs no child.
+as its result and runs no child. A call's result also carries the members its `returns` names, read from its done
+child run's final replay state (`returned`), so a rewound child never yields a discarded visit's value.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_tools.delivery import engine_ledger, engine_session, engine_stop, procedure_terms
+from agent_tools.delivery import engine_core, engine_ledger, engine_session, engine_stop, procedure_terms
 
 DONE = "done"
 ENGINE_STOPS = (*procedure_terms.ENGINE_STOPS, engine_stop.STOPPED_BY_REQUEST)
@@ -148,6 +150,27 @@ def published_ends(run_dir: Path, ledger: list[dict], step: str, visit: int) -> 
                                               for item in items):
         raise engine_ledger.LedgerError(f"results/{step}.{visit}.json is not a call result")
     return items
+
+
+def returned(step: Mapping, ends: Sequence[Mapping], visits_of: Callable[[str], Mapping[str, int]]) -> dict:
+    """The members a call's `returns` names, read from its done child run; `{}` for no `returns` or a stop.
+
+    `visits_of(run)` is the child's final replay state (`engine_core.result_visits`): each `X.m` is member m of
+    the visit it holds for X, which a rewind may leave earlier than the last one stored. A missing visit, file
+    or member is a ledger fault, never a silent gap."""
+    if not step.get("returns") or engine_core.call_outcome([e["end"] for e in ends]) != DONE:
+        return {}
+    child = engine_ledger.runs_root() / ends[0]["run"]
+    visits = visits_of(ends[0]["run"])
+    members: dict = {}
+    for path in step["returns"]:
+        name, member = path.split(".", 1)
+        try:
+            document = json.loads((child / f"results/{name}.{visits[name]}.json").read_text(encoding="utf-8"))
+            members[member] = document[member]
+        except (KeyError, OSError, ValueError, TypeError) as error:
+            raise engine_ledger.LedgerError(f"the child run {ends[0]['run']} stores no {path}: {error!r}") from error
+    return members
 
 
 def ended(child_dir: Path) -> str | None:

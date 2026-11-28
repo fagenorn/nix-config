@@ -104,7 +104,8 @@ Calls
     `{"items": [{"end": <end>, ...}, ...]}`, one entry per item (one entry for
     a call without `each`). The outcome must be `call_outcome` of those ends:
     `done` when every end is `done` (and for no ends), else the first end that
-    is not `done`, in list order.
+    is not `done`, in list order. The result may carry other members beside
+    `items` (those the call's `returns` names), readable as `<call>.<member>`.
 
 `CoreError` is raised for: an event that is not a dict or whose type is not in
 `EVENT_TYPES`, at any position; an `entered` naming a step but the pending one
@@ -547,6 +548,19 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
         stop = procedure["stops"][walk.position]
         action = Stop(walk.position, stop["need"], stop["reenter"])
     return Replay(action, transitions, tuple(graded))
+
+
+def group_ids(procedure: Mapping) -> frozenset[str]:
+    """The steps the core grades itself: the groups."""
+    return frozenset(item["id"] for item in procedure["steps"] if item["kind"] == "group")
+
+
+def result_visits(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping]) -> dict[str, int]:
+    """Step -> the visit whose result the walk holds for it after every rewind; a step with none is absent.
+
+    A rewind returns the stored results to their values at the arrival it rewinds to, so a later visit of a step
+    that the rewind discarded is not the one held."""
+    return {name: visit for name, (_, visit, _) in _walk(procedure, inputs, events, []).produced.items()}
 
 
 def reentry(
