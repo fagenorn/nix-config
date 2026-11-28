@@ -302,6 +302,7 @@
  "tests/test_console_event_log.py": 0.3,
  "home/common/agent-skills/tests/test_deliver_batch_lane_rule.py": 0.3,
  "tests/test_lint_time.py": 0.2,
+ "tests/test_job_time.py": 0.2,
  "tests/test_console_question_records.py": 0.2,
  "tests/test_console_deliveries.py": 0.2,
  "tests/test_console_permission_check.py": 0.2,

@@ -54,6 +54,9 @@ _Avoid_: track, tier
 **Lint-time issue**:
 An issue the `lint-time` command files when the median total lint time of the last 20 completed Conformance runs on the integration branch is over 60 seconds, naming the slowest lint by its own median: at most one open per project, counted apart from the cleanup issue. Its body carries the marker `<!-- agent:lint-time v1 -->`, which alone identifies it when a trusted author wrote it (ADR-delivery-020).
 
+**Job-time issue**:
+An issue the `job_time` reader files when the median wall time of the `.NET Solution` CI job over its last 10 green push runs on the integration branch is not under 240 seconds: at most one open per project, identified by the marker `<!-- agent:job-time v1 -->` when a trusted author wrote it.
+
 **Live-fault lane**:
 The route of an issue with a standing live-fault declaration (ADR-console-099), selected by that declaration and with no plan. One implementer gives a failing-then-passing test, and the lane refuses a diff over 80 changed lines outside tests or over 3 files, or one touching authentication, secrets or a guard. One diff review follows, where only a critical finding blocks and the rest become follow-up issues. Everything is bound to one commit, and the time from declaration to a green pull request is recorded (ADR-delivery-013).
 _Avoid_: hotfix lane

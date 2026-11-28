@@ -351,6 +351,7 @@ agent-workflow-tests *args:
     tests/test_comment_lint.py \
     tests/test_cleanup_issue.py \
     tests/test_lint_time.py \
+    tests/test_job_time.py \
     tests/test_ruff_lint.py \
     tests/test_suite_source.py \
     tests/test_skipped_test_lint.py \
