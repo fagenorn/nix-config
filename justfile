@@ -136,6 +136,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
+    home/common/agent-skills/tests/test_deliver_direct_engine_entry.py \
     home/common/agent-skills/tests/test_codex_review_effort.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
@@ -192,6 +193,7 @@ agent-workflow-tests *args:
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
     tests/test_engine_check.py \
+    tests/test_engine_check_returns.py \
     tests/test_engine_check_process.py \
     tests/test_engine_direct_procedures.py \
     tests/test_engine_graders.py \
@@ -221,7 +223,9 @@ agent-workflow-tests *args:
     tests/test_engine_fixture.py \
     tests/test_engine_stubbed_run.py \
     tests/test_engine_stubbed_guard.py \
+    tests/test_engine_stubbed_findings.py \
     tests/test_engine_stubbed_world.py \
+    tests/test_engine_plan_facts.py \
     tests/test_proof_run.py \
     tests/test_bound_issues.py \
     tests/test_engine_step_coverage.py \
@@ -290,6 +294,8 @@ agent-workflow-tests *args:
     tests/test_program_bridge.py \
     tests/test_look_gate_end_to_end.py \
     tests/test_forge_claim.py \
+    tests/test_forge_claims_takeover.py \
+    tests/test_claim_takeover_readings.py \
     tests/test_forge_issue.py \
     tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
@@ -434,6 +440,12 @@ agent-workflow-tests *args:
     tests/test_console_cleanup_check.py \
     tests/test_adopt_hook_check.py \
     tests/test_console_lock_wait_check.py \
+    tests/test_console_lock_bump_tree.py \
+    tests/test_console_lock_bump_build.py \
+    tests/test_console_lock_bump_forge.py \
+    tests/test_console_lock_bump.py \
+    tests/test_console_lock_bump_service.py \
+    tests/test_console_lock_bump_observed.py \
     tests/test_console_serve_probe_check.py \
     tests/test_console_run_line_check.py \
     tests/test_verify_engine_past_implement.py \
@@ -489,6 +501,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_warnings.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
+    tests/test_console_manager_resume.py \
     tests/test_console_launch_short_id.py \
     tests/test_console_permission.py \
     tests/test_console_manager_service.py \

@@ -43,7 +43,7 @@ The owner is not an engineer, so every status line, card and question you write 
 
 ## After a restart or a takeover
 
-1. When the console tells you that it restarted this session, or your first prompt says you take over a sprint whose manager is gone, run `sprint recap`, then `sprint inbox`, and act on what `sprint inbox` prints first.
+1. When the console tells you that it restarted this session, or your first prompt says you take over a sprint whose manager is gone, run `sprint recap`, then `sprint inbox`, and act on what `sprint inbox` prints first. When your first prompt says the console resumed this conversation, you are the same manager and go on from what was said here, after `sprint recap` and `sprint inbox`. When your first prompt says you start fresh, say so in the status line of your first report. When a prompt lists deliveries no running session holds any more, name each in your next report before anything else: say in its status line, in plain words and without their numbers, that they stopped, and in its next step how you resume each one.
 2. `sprint recap` prints the goal, the latest brief with its decision and the owner's reply, the last report and how many of the owner's messages are unread. The console keeps this record; nothing was handed over to you.
 3. The latest brief's decision comes before the last report, because a newer brief does not remove an older report:
    - No brief: draft one, as Drafting the brief says.

@@ -37,11 +37,33 @@ that are `ok` and `back`. A wake has failed when `not (ok and back)`.
 
 `stall_reason(state)` is the last revival's `reason` when that revival is not ok and has one, else
 `GONE_AGAIN_TEXT`.
+
+`unheld(state, runs, live, engine=())` is what the service calls when it prepares a takeover launch.
+It returns, ascending, an `(issue, stage)` for each issue of `state.report.issues` whose effective
+stage (`view.effective_stages` with the sprint's engine runs: the stage the console shows, so a run
+seen after the report or a moving engine run counts) is not `queued`, `landed`, `held`, `dropped` or
+`closed out` and that no holder holds; `stage` is that effective stage. With no report it returns
+`()`. A holder is a session run in `runs` that lists the issue while its `project` is the sprint's
+`project_id` and its `session_id` is in `live`, or an engine run in `engine` for the issue with the
+sprint's project whose `engine_runs.reading` is `moving` or `waiting` (a live engine process that is
+neither done nor stopped).
+
+`unheld_block(found)` is the text a takeover prompt carries about those `(issue, stage)` pairs: `""`
+for none; else `UNHELD_HEAD`, one `UNHELD_LINE` per pair in the given order, then `UNHELD_TAIL`,
+joined by newlines. No line holds `The goal: `, which the prompt's goal parsing looks for.
 """
 
-from agent_tools.console import sprints, view
-from agent_tools.console.sprints import SprintState
+from collections.abc import Collection, Iterable, Sequence
 
+from agent_tools.console import deliveries, engine_runs, sprints, view
+from agent_tools.console.sprints import SprintState
+from agent_tools.delivery.engine_ledger import RunState
+
+UNHELD_HEAD = "No running session holds these deliveries any more, though your sprint lists them as in work:"
+UNHELD_LINE = "- issue {issue} at stage {stage}"
+UNHELD_TAIL = ("Before anything else, name each of them in your next report: say in its status line, "
+               "in plain words and without their numbers, that they stopped, and in its next step "
+               "how you resume each one.")
 GONE_AFTER_MS = 120_000
 LIMIT = 3
 WINDOW_MS = 3_600_000
@@ -96,6 +118,30 @@ def next_step(state: SprintState, waiting: int, last_listed_ms: int, now_ms: int
         # (#1278); with none, the sprint waits for the reset.
         return sprints.TAKEOVER if room_elsewhere else None
     return sprints.WAKE
+
+
+def unheld(state: SprintState, runs: Iterable[deliveries.DeliveryState], live: Collection[str],
+           engine: Iterable[RunState] = ()) -> tuple[tuple[int, str], ...]:
+    if state.report is None:
+        return ()
+    engine = tuple(engine)
+    held = {stage.issue for run in runs
+            if run.project == state.project_id and run.session_id in live
+            for stage in run.issues}
+    held |= {run.issue for run in engine if run.project == state.project_id
+             and engine_runs.reading(run) in ("moving", "waiting")}
+    shown = engine_runs.sprint_engine(engine, state.project_id,
+                                      {issue for issue, _ in state.report.issues}, None)
+    idle = (deliveries.QUEUED, sprints.LANDED, sprints.HELD, sprints.DROPPED, sprints.CLOSED_OUT)
+    return tuple((issue, stage) for issue, stage, _ in view.effective_stages(state, shown)
+                 if stage not in idle and issue not in held)
+
+
+def unheld_block(found: Sequence[tuple[int, str]]) -> str:
+    if not found:
+        return ""
+    lines = [UNHELD_LINE.format(issue=issue, stage=stage) for issue, stage in found]
+    return "\n".join([UNHELD_HEAD, *lines, UNHELD_TAIL])
 
 
 def stall_reason(state: SprintState) -> str:

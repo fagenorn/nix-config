@@ -24,6 +24,7 @@ WHOLE_SHELL_ROLES = ("implementer",)
 WAITS = ("usage-limit", "host-slot", "lock", "checks")
 EXHAUSTED = "exhausted"
 OUT_OF_BOUNDS = "out-of-bounds"
+REFUSAL_MEMBERS = ("reason", "verdict")  # all a refused command step stores (`engine_commands._refused`)
 NO_REPLY = "no-reply"
 CLAIM_LOST = "claim-lost"
 QUOTA_WAIT = "quota-wait"

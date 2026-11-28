@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.delivery import router, routing, standards_lint
 from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
@@ -84,6 +85,11 @@ def project_text(*references: str) -> str:
 
 
 class RouterTest(World):
+    def test_routed_in_process_is_the_document_the_command_prints(self):
+        with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": str(self.root)}):
+            doc = router.routed(self.repo, "planning", ["tools/run.py", "web/page.html"], self.platform)
+        self.assertEqual(doc, json.loads(self.plan().stdout))
+
     def test_one_extension_and_one_governed_path_route_exactly_the_bar_and_their_two_shards(self):
         done = self.plan()
         self.assertEqual(done.returncode, 0, done.stderr)

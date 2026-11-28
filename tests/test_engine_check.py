@@ -1229,7 +1229,7 @@ UNNAMED = {"findings": [{"severity": "critical", "file": "", "failing_input": ""
 SHIPPED_MEMBERS = {
     "contract": ({"capabilities": {"review.code": {"state": "available"}, "review.plan": {"state": "available"}}},
                  {"capabilities": {"review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}),
-    **{pre: ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t", "plan": "p"},)
+    **{pre: ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t", "plan": "p", "routed": None, "route_detail": ""},)
        for pre in ("preflight", "plan-preflight")},
     "plan": ({"evidence": "p", "task_numbers": [1]},),
     **{read: ({"text": "p", "digest": "d"},) for read in ("plan-read", "plan-reread")},
@@ -1467,7 +1467,7 @@ class DeclarationTest(unittest.TestCase):
             "acquire": ("acquired", "already_held", "held_by", "lost_to", "error"),
             "release": ("released", "not_held", "error"),
             "renew": ("renewed", "not_held", "error"),
-            "status": ("free", "held_by", "stale", "error")}))
+            "status": ("free", "held_by", "stale", "takeover-eligible", "error")}))
         self.assertEqual(commands["diff-scope"].outcomes(None), ("ok", "failed"))
         self.assertIsNone(commands["diff-scope"].outcomes("x"))
         self.assertEqual(commands["forge-claim"].outcomes("acquire"),

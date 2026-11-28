@@ -101,6 +101,8 @@
         else
           inputs.nixpkgs.legacyPackages.${system};
 
+      dotnetSolution = system: import ./lib/agent-tools-dotnet.nix { pkgs = platformPkgs system; };
+
       myvars = import ./vars;
       stateVersion = "25.05";
       libx = import ./lib {
@@ -125,6 +127,7 @@
             lastModified = self.lastModified;
           };
         };
+        agent-tools-dotnet = (dotnetSolution system).package;
       });
 
       checks = inputs.nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" ] (
@@ -145,6 +148,7 @@
             standards = ./home/common/agent-skills/standards;
             manifest = ./home/common/agent-skills/platform-manifest.json;
           };
+          agent-tools-dotnet-tests = (dotnetSolution system).tests;
           # Required through the `Nix Eval` job: the global agent corpus stays project-agnostic.
           agnostic-lint = pkgs.runCommand "agnostic-lint" { nativeBuildInputs = [ pkgs.python3 ]; } ''
             PYTHONPATH=${self}/python python3 -m agent_tools.delivery.agnostic_lint --root ${self}

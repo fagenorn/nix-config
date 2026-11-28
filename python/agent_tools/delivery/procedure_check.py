@@ -31,8 +31,10 @@ requires one and no other step carries one); `agent`: `role`,
 `outcome_from` and optional `worktree` (an object of exactly `path` and `branch`, each one of the step's
 `in` paths, only on a step whose `role` is in `WHOLE_SHELL_ROLES`); `decide`: `grader`; `group`: `members`, a non-empty list of
 objects with exactly `step` and `pass` (distinct strings); `call`: `procedure`,
-optional `each` (one of the step's `in` paths) and `parallel` (an integer >= 1,
-only with `each`). A member a level does not define is `undefined_field`.
+optional `each` (one of the step's `in` paths), `parallel` (an integer >= 1,
+only with `each`) and `returns` (only without `each`: a non-empty list of distinct `<step>.<member>` paths of the child
+procedure, never `run.<input>`, no two with the same member name and none named `items`; each member is published under its
+bare name on the call's result when the call ends `done`). A member a level does not define is `undefined_field`.
 
 Groups. A group member is a step of the same list, listed by exactly one group, not a group, not the first step and never an
 `on` target or a stop's `reenter`. The first step is the entry. Command ids and verdicts are declared in
@@ -82,12 +84,26 @@ it maps `no-reply` to produces none of its members, and a reader reached through
 schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
 consumed; a step ended by a bound (`out-of-bounds`) produces none of its members, so a read of `<X>.<m>` is refused on a
 route where `X` ended by the bound, unless the route reenters `X` and passes a normal outcome before the reader (the `exhausted` entry of a step on a cycle follows an earlier visit and keeps that visit's reply, unless the bound route leads back to the step); `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
-declares no schema and is not member-checked), `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
+declares no schema and is not member-checked; a call step publishes `items` and the members its `returns` names, and a read of
+any other member is `unknown_member`), `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
 its `in` paths; skipped when the prompt is missing) and `each_not_a_list` (a `call` step's `each` path that resolved with
 no refusal above and reads a value that is not a list: a run input, a decide step's `verdict`, an agent reply member
 whose property schema has no `"type": "array"`, or a member of a platform command's output that
 `PLATFORM_LISTS` does not name (or, for a subcommand `SUBCOMMAND_LISTS` names, that its own list does not name); a path that did not resolve keeps its own refusal alone, and a producer of any other
 kind, a project command, or an agent whose reply did not resolve, declares no schema and is not list-checked).
+
+Phase C, returns (after the data-flow checks of a file whose graph checks ran, and after every file resolved, so a child
+later in name order is known): each path `X.m` of a call's `returns`, against the child. `unproduced_input` at the call: `X`
+is no step of the child, or its result is not stored on every route from the child's start to its `done` (the route graph
+is `result_flow_graph` of the child with `done` made a step, so the no-reply, bound and exhaustion rules of data flow hold; a
+child whose `done` is unreachable is skipped, it carries its own `unreachable_done`). `unknown_member` at the call: `X` is
+no agent or command step outside a group (a decide verdict and a group grade are never stored), or `X` is an agent step whose
+reply resolved and `m` is not both in its `properties` and its `required` list. A parent step that reads `C.m` of a call `C`
+with `returns` needs `C(returned)`, the call ended `done`, among its dominators: a route through a stop of `C` carries
+no returned member. The `exhausted` entry of a bounded call whose `done` runs it again keeps the previous `done` visit's
+returned members, so its target is reached through `C(returned)` unless another outcome of `C` loops back to `C`. A
+returned member of a command step that is not `reason` or `verdict`, the only members a refusal stores, is also
+`unproduced_input` at the call when the step's `refused` target leads to the child's `done` without entering the step again.
 
 Command. `python -m agent_tools.delivery.procedure_check --procedures=<dir> [--project-command=<id>]... [--without-caps]`
 checks a procedure directory and prints one line of compact sorted-key JSON. `--procedures` is required;
@@ -108,20 +124,21 @@ variable."""
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.resources
 import json
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from agent_tools.delivery import engine_graders, size_caps
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.engine_reply import schema_problem
 from agent_tools.delivery.procedure_terms import (
     CLAIM_LOST, EXHAUSTED, FORMAT, INPUT_RE, NAME_RE, NEEDS, NO_REPLY, OUT_OF_BOUNDS, PLACEHOLDER_RE, QUOTA_WAIT,
-    ROLES, STAGES, SUPERSEDED, TOOL_DENIED, WAITS, WHOLE_SHELL_ROLES, CommandDeclaration, DeclarationError, _inside, _strict_load, load_commands,
+    REFUSAL_MEMBERS, ROLES, STAGES, SUPERSEDED, TOOL_DENIED, WAITS, WHOLE_SHELL_ROLES, CommandDeclaration, DeclarationError, _inside, _strict_load, load_commands,
     readable_format)
 
 ENGINE_DIR = Path(importlib.resources.files("agent_tools.delivery"))
@@ -170,7 +187,7 @@ KIND_MEMBERS = {
     "agent": (("role", "prompt", "reply", "outcome_from"), ("worktree",)),
     "decide": (("grader",), ()),
     "group": (("members",), ()),
-    "call": (("procedure",), ("each", "parallel")),
+    "call": (("procedure",), ("each", "parallel", "returns")),
 }
 
 
@@ -389,6 +406,29 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid("each must be one of the step's in paths.")
         if "parallel" in item and not (_is_int(item["parallel"]) and item["parallel"] >= 1 and "each" in item):
             invalid("parallel must be an integer >= 1 and needs each.")
+        if "returns" in item:
+            _returns_shape(item, invalid)
+
+
+def _returns_shape(item: dict, invalid: Callable[[str], None]) -> None:
+    """A call step's `returns`: distinct child-step member paths whose bare names are distinct and not `items`."""
+    paths = item["returns"]
+    if not (_distinct_strings(paths) and paths):
+        invalid("returns must be a non-empty list of distinct paths.")
+        return
+    if "each" in item:
+        invalid("returns does not go with each.")
+    names: list[str] = []
+    for path in paths:
+        match = PATH_RE.fullmatch(path)
+        if match is None or match.group(1) == "run":
+            invalid(f"returns path {path!r} must be a <step>.<member> path of the child procedure.")
+        elif match.group(2) == "items":
+            invalid("returns cannot name 'items', which a call already publishes.")
+        else:
+            names.append(match.group(2))
+    if len(set(names)) != len(names):
+        invalid("returns names one member twice.")
 
 
 def _check_member(item: dict, label: str | None, found: _Findings) -> None:
@@ -687,15 +727,96 @@ def check_directory(directory: Path,
                    if not found}
     refusals: list[Refusal] = []
     resolved: dict[str, Resolved] = {}
+    referenced: dict[str, list[Refusal]] = {}
+    for name, (doc, found) in loaded.items():
+        if not found:
+            referenced[name], resolved[name] = check_references(name, doc, directory, commands, child_stops)
+    # A call's returns read its child's graph, so every file resolves before any file's graph checks run.
+    walkable = {name: loaded[name][0] for name, found in referenced.items()
+                if not any(r.defect == "unknown_target" for r in found)}
     for name, (doc, found) in loaded.items():
         if found:
             refusals.extend(found)
             continue
-        found, resolved[name] = check_references(name, doc, directory, commands, child_stops)
-        refusals.extend(found)
-        if not any(r.defect == "unknown_target" for r in found):
+        refusals.extend(referenced[name])
+        if name in walkable:
             refusals.extend(check_graph(name, doc, resolved[name]))
+            refusals.extend(check_returns(name, doc, walkable, resolved))
     return CheckResult(tuple(p.stem for p in files), tuple(refusals), resolved)
+
+
+def _done_graph(child: dict) -> dict[str, tuple[str, ...]]:
+    """`result_flow_graph` of the child with every `done` target replaced by the step `(done)`, a sink."""
+    ended = copy.deepcopy(child)
+    for item in ended["steps"]:
+        if "on" in item:
+            item["on"] = {outcome: "(done)" if target == "done" else target
+                          for outcome, target in item["on"].items()}
+    ended["steps"].append({"id": "(done)", "kind": "decide", "on": {}})
+    return result_flow_graph(ended)
+
+
+def _refusal_reaches_done(graph: Mapping[str, tuple[str, ...]], producer: str, target: str | None) -> bool:
+    """Whether a route from the `refused` target of `producer` reaches `(done)` without entering `producer` again.
+
+    A later entry of `producer` replaces what its refusal stored, so only a route that skips it keeps the refusal's
+    result as the one a returned member is read from. `graph` is `_done_graph`'s, whose nodes for the producer are
+    its own and its `(result)`."""
+    if target is None:
+        return False
+    target = "(done)" if target == "done" else target
+    barred = {producer, f"{producer}(result)"}
+    seen: set[str] = set()
+    pending = [target]
+    while pending:
+        node = pending.pop()
+        if node == "(done)":
+            return True
+        if node not in seen and node not in barred:
+            seen.add(node)
+            pending.extend(graph.get(node, ()))
+    return False
+
+
+def check_returns(name: str, doc: dict, walkable: Mapping[str, dict],
+                  resolved: Mapping[str, Resolved]) -> list[Refusal]:
+    """Phase C, returns: each path of a call's `returns` is a result its child stores on every route to `done`."""
+    found = _Findings(name)
+    for item in doc["steps"]:
+        child = walkable.get(item["procedure"]) if item["kind"] == "call" and "returns" in item else None
+        if child is None:
+            continue
+        by_id = {step["id"]: step for step in child["steps"]}
+        members = _members_of(child)
+        graph = _done_graph(child)
+        dom = dominators(graph, START)
+        for path in item["returns"]:
+            producer, member = path.split(".", 1)
+            if producer not in by_id:
+                found.add("unproduced_input", f"{path!r}: the child {item['procedure']!r} has no step {producer!r}.",
+                          item["id"])
+                continue
+            if by_id[producer]["kind"] not in ("agent", "command") or producer in members:
+                found.add("unknown_member",
+                          f"{path!r}: the result of {producer!r} is not stored, only an agent or command step outside "
+                          "a group stores one.", item["id"])
+                continue
+            node = f"{producer}(result)" if f"{producer}(result)" in graph else producer
+            if "(done)" in dom and node not in dom["(done)"]:
+                found.add("unproduced_input",
+                          f"{path!r} is not stored on every route to the done of {item['procedure']!r}.", item["id"])
+            elif (by_id[producer]["kind"] == "command" and member not in REFUSAL_MEMBERS
+                  and _refusal_reaches_done(graph, producer, by_id[producer]["on"].get(REFUSED))):
+                found.add("unproduced_input",
+                          f"{path!r}: a refusal of {producer!r} stores only {', '.join(REFUSAL_MEMBERS)} and a route "
+                          f"from it reaches the done of {item['procedure']!r}.", item["id"])
+            known = resolved[item["procedure"]].steps[producer]
+            if (by_id[producer]["kind"] == "agent" and known.reply_properties is not None
+                    and known.reply_required is not None
+                    and (member not in known.reply_properties or member not in known.reply_required)):
+                found.add("unknown_member",
+                          f"{path!r} is not a member the reply of {producer!r} always carries.", item["id"])
+    return found.refusals
 
 
 def outcomes_of(step: dict, resolved: Resolved) -> tuple[str, ...] | None:
@@ -820,6 +941,11 @@ def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     kept until the next one replaces it, so it hangs on `<id>(result)`: the previous visit ended by a normal outcome.
     It hangs on the step's own node too only when its `out-of-bounds` or `no-reply` target leads back to the step
     through steps, the one way the previous visit can have ended with no member stored.
+
+    A call step with `returns` goes to `<id>(returned)` for its `done` target, so only the `done` outcome carries the
+    returned members; the node keeps the call's other outcome edges. Its `exhausted` edge hangs on `<id>(returned)`
+    (the previous visit ended `done` and the engine kept its result), and on the node itself only when another
+    outcome's target leads back to the call, the one way the previous visit can have ended with no member returned.
     """
     members = _members_of(procedure)
     cyclic = exhaustible(procedure)
@@ -848,6 +974,19 @@ def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
         graph[result_node] = renewing(tuple(
             target for outcome, target in item["on"].items()
             if outcome not in bare | {EXHAUSTED} and target != "done") + exhausted)
+    for item in procedure["steps"]:
+        if item["id"] in members or item["kind"] != "call" or "returns" not in item:
+            continue
+        name = item["id"]
+        returned = f"{name}(returned)"
+        others = tuple(target for outcome, target in item["on"].items()
+                       if outcome not in ("done", EXHAUSTED) and target != "done")
+        exhausted = tuple(target for outcome, target in item["on"].items()
+                          if outcome == EXHAUSTED and target != "done" and name in cyclic)
+        other_returns = any(target == name or name in _reach(steps_only, target) for target in others)
+        done = item["on"].get("done", "done")
+        graph[name] = renewing(others + (exhausted if other_returns else ())) + (returned,)
+        graph[returned] = renewing(((done,) if done != "done" else ()) + exhausted)
     return graph
 
 
@@ -879,6 +1018,8 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                 if item["kind"] == "group" for member in item["members"]}
     dom = dominators(graph, START)
     inputs = set(procedure["inputs"])
+    returned = {item["id"]: tuple(PATH_RE.fullmatch(path).group(2) for path in item["returns"])
+                for item in procedure["steps"] if item["kind"] == "call" and "returns" in item}
 
     def check_path(path: str, step: dict | None) -> bool:
         """Report a path that does not resolve; true when it resolved."""
@@ -896,6 +1037,8 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                 node = group_of.get(producer, producer)
                 if f"{node}(result)" in graph:
                     node = f"{node}(result)"
+                elif f"{producer}(returned)" in graph and member in returned.get(producer, ()):
+                    node = f"{producer}(returned)"
                 if producer not in by_id or node not in before:
                     found.add("unproduced_input",
                               f"{path!r} is not produced on every route to the step.", label)
@@ -906,6 +1049,11 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                 and (member not in known.reply_properties or member not in known.reply_required)):
             found.add("unknown_member",
                       f"{path!r} is not a member the reply of {producer!r} always carries.", label)
+        elif (producer in by_id and by_id[producer]["kind"] == "call" and member != "items"
+              and member not in returned.get(producer, ())):
+            found.add("unknown_member",
+                      f"{path!r} is not a member the result of {producer!r} carries; "
+                      "a call publishes 'items' and the members its returns names.", label)
         elif producer in by_id and by_id[producer]["kind"] == "decide" and member != "verdict":
             found.add("unknown_member",
                       f"{path!r} is not a member the result of {producer!r} carries; a decide step publishes only 'verdict'.",

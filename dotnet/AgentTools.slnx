@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Hosts/Hosts.csproj" />
+  <Project Path="System/System.csproj" />
+  <Project Path="Hosts.Tests/Hosts.Tests.csproj" />
+</Solution>
