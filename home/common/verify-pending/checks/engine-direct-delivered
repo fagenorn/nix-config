@@ -1,0 +1,4 @@
+#!/bin/sh
+# Verify check: a direct-lane engine delivery after activation ended done with its pull request merged within 14 days.
+# verify-pending runs it from the repository root at the commit the block names. Exit 0 met, 1 not met, 75 not yet.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks engine-direct-delivered "$@"
