@@ -399,7 +399,7 @@ class DeliverTest(unittest.TestCase):
         procedures = project.procedures([step(
             "a", "forge-claim", None, subcommand="status",
             on={"free": "needs-owner", "held_by": "needs-owner", "stale": "needs-owner",
-                "error": "done", "refused": "needs-owner"})])
+                "takeover-eligible": "needs-owner", "error": "done", "refused": "needs-owner"})])
         done = project.deliver(procedures)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         run = project.runs()[0]
