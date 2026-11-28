@@ -72,13 +72,14 @@ class ShippedSchemaTest(unittest.TestCase):
             steps.setdefault(step["id"], []).append((step, schema, prompt))
         for name in FIX_STEPS:
             with self.subTest(step=name):
-                self.assertEqual(len(steps[name]), 1)
-                schema = steps[name][0][1]
-                self.assertIn("declines", schema["required"])
-                self.assertEqual(schema["properties"]["declines"], DECLINES)
+                self.assertGreaterEqual(len(steps[name]), 1)  # `outline-build` copies the direct review half
+                for _, schema, _ in steps[name]:
+                    self.assertIn("declines", schema["required"])
+                    self.assertEqual(schema["properties"]["declines"], DECLINES)
         renders_findings = {step["id"] for step, schema, prompt in agent_steps()
                             if FINDINGS_PLACEHOLDER.search(prompt) and "findings" not in schema["properties"]}
-        self.assertLessEqual(renders_findings, set(FIX_STEPS))
+        # `outline-revise` returns the whole outline in the ruled `outline.reply.json`, which has no declines member
+        self.assertLessEqual(renders_findings, set(FIX_STEPS) | {"outline-revise"})
 
     def test_a_re_review_finding_may_name_the_finding_it_restates(self):
         schema = json.loads((PROCEDURES / "direct-rereview.reply.json").read_text("utf-8"))

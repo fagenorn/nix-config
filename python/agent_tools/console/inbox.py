@@ -195,6 +195,7 @@ from agent_tools.claims import forge_owner_action as foa
 from agent_tools.claims import owner_actions
 from agent_tools.canonical import telemetry_digest
 from agent_tools.delivery import look_marker
+from agent_tools.delivery.acceptance_criteria import Criterion, ac_id, acceptance_criteria
 from agent_tools.console import pictures
 from agent_tools.console.sprints import MAX_ASK_CHARS, MAX_PICTURE_LINE_CHARS, MAX_PICTURES, NOW_WAIT_TEXT, cut
 from agent_tools.system import forge_api
@@ -316,101 +317,12 @@ def _comments(node: dict) -> list[dict]:
     return nodes
 
 
-_FENCE_OPEN = re.compile(r"^([ \t]*)(`{3,}|~{3,})")
-_LIST_ITEM = re.compile(r"^([ \t]*)(?:[-*+]|\d{1,9}[.)])([ \t]+)")
-_FENCE_RUN = re.compile(r"(`{3,}|~{3,})")
-_HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
-_AC_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+Acceptance criteria\s*#*\s*$", re.IGNORECASE)
-_CRITERION = re.compile(r"^\s*[-*+][ \t]+\[( |x|X)\][ \t]+(.*)$")
-_KIND = re.compile(r"\[(code|evidence|human|note)\]\s*(.*)$")
-
-
-def _list_prefixes(line: str) -> tuple[list[int], str]:
-    """The content column of each list marker that opens `line` (`- - x` has two), and the text after them."""
-    columns: list[int] = []
-    position = 0
-    while True:
-        item = _LIST_ITEM.match(line[position:])
-        if not item:
-            return columns, line[position:]
-        position += item.end()
-        columns.append(len(line[:position].expandtabs(4)))
-
-
-def _fence(run: str, column: int) -> tuple[re.Pattern, int, int]:
-    """A fence opened by `run` inside a container whose content column is `column`: its closer, the widest indent
-    that closer may have and the column below which a line ends the fence."""
-    return (re.compile(r"^([ \t]*)" + re.escape(run[0]) + "{" + str(len(run)) + r",}[ \t]*$"), column + 3, column)
-
-
-@dataclass(frozen=True)
-class Criterion:
-    index: int
-    ticked: bool
-    kind: str | None
-    text: str
-    line: int
-
-
-def acceptance_criteria(body: str) -> list[Criterion]:
-    """The checkbox lines of the first `Acceptance criteria` section of an issue body, outside fences."""
-    criteria: list[Criterion] = []
-    inside = False
-    fence: tuple[re.Pattern, int, int] | None = None
-    containers: list[int] = []
-    for number, raw in enumerate(body.split("\n")):
-        line = raw.removesuffix("\r")
-        indent = len(re.match(r"[ \t]*", line).group().expandtabs(4))
-        if fence is not None:
-            closer, limit, column = fence
-            closing = closer.match(line)
-            if line.strip() and indent < column:
-                fence = None
-            else:
-                if closing and len(closing.group(1).expandtabs(4)) <= limit:
-                    fence = None
-                continue
-        if line.strip():
-            while containers and indent < containers[-1]:
-                containers.pop()
-        base = containers[-1] if containers else 0
-        opened = _FENCE_OPEN.match(line)
-        if opened and indent - base <= 3:
-            run = opened.group(2)
-            fence = _fence(run, base)
-            continue
-        columns, rest = _list_prefixes(line)
-        containers.extend(columns)
-        sheltered = _FENCE_RUN.match(rest) if columns else None
-        if sheltered:
-            fence = _fence(sheltered.group(1), columns[-1])
-            continue
-        if not inside:
-            inside = bool(_AC_HEADING.match(line))
-            continue
-        if _HEADING.match(line) and not containers:
-            break
-        box = _CRITERION.match(line)
-        if not box:
-            continue
-        rest = box.group(2)
-        tagged = _KIND.match(rest)
-        kind, rest = (tagged.group(1), tagged.group(2)) if tagged else (None, rest)
-        criteria.append(Criterion(len(criteria) + 1, box.group(1) != " ", kind, " ".join(rest.split()), number))
-    return criteria
-
-
 def criterion_version(issue: int, criterion: Criterion) -> str:
     return telemetry_digest({"issue": issue, "index": criterion.index, "kind": criterion.kind,
                              "text": criterion.text})
 
 
 MET_KINDS = ("code", "human", "note")
-
-
-def ac_id(criterion: Criterion) -> str:
-    """The id a verify block's `ac` uses for the criterion: `AC` and its 1-based index."""
-    return f"AC{criterion.index}"
 
 
 def review_criteria(criteria: Sequence[Criterion], asked: Collection[str] = ()) -> list[Criterion]:

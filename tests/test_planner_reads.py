@@ -54,6 +54,15 @@ class PlannerReadsTest(unittest.TestCase):
             read_line("/r/a.py")])
         self.assertEqual(planner_reads.read_files(path), ["/r/a.py"])
 
+    def test_a_read_path_holding_a_unicode_line_separator_stays_one_record(self):
+        for separator in (" ", " ", "\x85"):
+            with self.subTest(separator=repr(separator)):
+                path = f"/r/a{separator}b.py"
+                literal = json.dumps(json.loads(read_line(path)), ensure_ascii=False)
+                transcript = self.transcript("-x", "s1", [literal, read_line("/r/after.py")])
+                self.assertIn(separator, transcript.read_text(encoding="utf-8"))
+                self.assertEqual(planner_reads.read_files(transcript), [path, "/r/after.py"])
+
     def test_a_session_with_no_transcript_adds_nothing(self):
         (self.projects / "-y" / "s3.jsonl").unlink()
         self.assertEqual(planner_reads.planner_reads(self.run, [self.projects]), ["/r/a.py", "/r/b.py"])

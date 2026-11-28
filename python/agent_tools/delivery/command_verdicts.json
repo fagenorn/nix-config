@@ -98,6 +98,11 @@
         "posted",
         "error"
       ],
+      "outline-note-check": [
+        "posted",
+        "absent",
+        "error"
+      ],
       "outline-preflight": [
         "clear",
         "error"

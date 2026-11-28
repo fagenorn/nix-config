@@ -23,7 +23,8 @@ STEPS = [
     {"id": "outline-note", "kind": "command", "command": "issue-setup", "subcommand": "outline-note"},
     {"id": "build", "kind": "call"},
 ]
-SLICE_STEPS = [{"id": "build", "kind": "command", "command": "issue-setup", "subcommand": "outline-slice"}]
+SLICE_STEPS = [{"id": "slice", "kind": "command", "command": "issue-setup", "subcommand": "outline-slice"},
+               {"id": "build", "kind": "command", "command": "issue-setup", "subcommand": "outline-slice"}]
 
 
 def reply(second: str) -> dict:
@@ -102,9 +103,10 @@ class OutlineRecordTest(unittest.TestCase):
         self.tree.call(self.root, "build", 1, b1, 0, 2)
         self.tree.call(self.root, "build", 1, b2, 1, 2)
 
-        def slice_run(parent, item, index, *, done, build=None):
+        def slice_run(parent, item, index, *, done, build=None, digest="D"):
             child = self.tree.run("outline-slice", SLICE_STEPS, issue=7, parent=parent.name,
                                   inputs={**INPUTS, "item": item})
+            self.tree.result(child, "slice", 1, {"verdict": "read", "digest": digest})
             if build is not None:
                 self.tree.result(child, "build", 1, build)
             if done:
@@ -120,7 +122,22 @@ class OutlineRecordTest(unittest.TestCase):
         self.tree.result(stray, "build", 1, {"status": "stray"})
         self.tree.done(stray)
 
-        self.assertEqual(outline_record.built(self.root), {1: x1, 2: x2})
+        self.assertEqual(outline_record.built(self.root, "D"), {1: x1, 2: x2})
+
+    def test_built_takes_only_the_slices_built_under_the_approved_digest(self):
+        old, new = {"status": "done", "commit": "old"}, {"status": "done", "commit": "new"}
+        build = self.tree.run("outline-build", STEPS, issue=7, inputs=INPUTS, parent=self.root.name)
+        self.tree.call(self.root, "build", 1, build, 0, 3)
+        for item, digest, result in ((1, "OLD", old), (2, "OLD", old), (2, "NEW", new)):
+            child = self.tree.run("outline-slice", SLICE_STEPS, issue=7, parent=build.name,
+                                  inputs={**INPUTS, "item": item})
+            self.tree.result(child, "slice", 1, {"verdict": "read", "digest": digest})
+            self.tree.result(child, "build", 1, result)
+            self.tree.done(child)
+            self.tree.call(build, "slices", 1, child, item - 1, 3)
+
+        self.assertEqual(outline_record.built(self.root, "NEW"), {2: new})
+        self.assertEqual(outline_record.built(self.root, "OTHER"), {})
 
     def test_render_writes_the_outline_template_exactly(self):
         outline = {**A, "questions": [],

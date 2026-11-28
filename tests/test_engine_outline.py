@@ -160,7 +160,12 @@ class OutlineBuildTest(OutlineScenario):
             self.assertIn('[{"closes":false,"number":5}]', prompt)
             for path in READS:
                 self.assertIn(path.replace("<worktree>", str(run.worktree_path)), prompt)
-        self.assertIn("SECOND SLICE CHANGE", builds[1]["prompt"])
+        selected = [next(line for line in launch["prompt"].splitlines() if "Build only this slice" in line)
+                    for launch in builds]
+        self.assertIn(SLICE_ONE["change"], selected[0])
+        self.assertNotIn(SLICE_TWO["change"], selected[0])
+        self.assertIn(SLICE_TWO["change"], selected[1])
+        self.assertNotIn(SLICE_ONE["change"], selected[1])
         self.assertNotIn("diff --git a/fixture/one.txt", builds[0]["prompt"])
         self.assertIn("diff --git a/fixture/one.txt", builds[1]["prompt"])
         sessions = [session_of(launch) for launch in builds]
@@ -216,6 +221,33 @@ class OutlineBuildTest(OutlineScenario):
         resumed = builds[2]["argv"]
         self.assertIn("--resume", resumed)
         self.assertEqual(resumed[resumed.index("--resume") + 1], second[second.index("--session-id") + 1])
+
+    def test_a_slice_reply_with_no_commit_is_not_kept_as_built_and_is_built_again_when_continued(self):
+        blank = {"reply": dict(IMPLEMENTED["reply"], start_head=SHA, commit="")}
+        run = self.outlined({"build#1": blank, "build#2": building("fixture/one.txt", "ONE\n")})
+        self.finish(run, "task", "owner-decision")
+
+        (child,) = self.named(run, "outline-slice")
+        self.assertIn(("slice-built", "not-done"), run.transitions(child))
+        self.assertEqual(len(self.launched(run, "build")), 1)
+
+        self.finish(run, "done")
+
+        self.assertEqual(len(self.launched(run, "build")), 2)
+        self.assertEqual(len(self.committed(run, "fixture/one.txt")), 1)
+
+    def test_an_issue_with_no_acceptance_criteria_builds_with_an_empty_acceptance_through_review_and_landing(self):
+        body = "Add a greet() function to the fixture module, next to `secrets/x.yaml`.\n"
+        free = dict(OUTLINE, criteria=[])
+        implemented = {"reply": dict(IMPLEMENTED["reply"], acceptance=[]), "commit": IMPLEMENTED["commit"]}
+        run = self.outlined({"outline": free, "build": implemented}, body=body)
+
+        self.finish(run, "hold", "owner-decision")  # the close-out then holds the issue: it has nothing to close on
+
+        edges = run.transitions(self.named(run, "outline-build")[0])
+        for edge in (("implemented", "lite"), ("lite-tally", "clean")):
+            self.assertIn(edge, edges)
+        self.assertEqual([pull["state"] for pull in run.pulls()], ["MERGED"])
 
     def first_slice_children(self, run: StubbedRun) -> set[str]:
         """The children the `outline-build` run's `call` events of `build-slices` name at index 0."""
@@ -349,6 +381,30 @@ class OutlineRevisionTest(OutlineScenario):
 
         self.assertIn(("outline-revised-note", "posted"), run.transitions(run.runs()[0]))
         self.assertEqual(len(self.launched(run, "build")), 1)
+
+    def test_both_design_reviews_are_given_the_issue_checkout_and_the_rereview_the_reviewed_outline_too(self):
+        run = self.outlined({"outline": dict(OUTLINE, approach="FIRST APPROACH"), "design-review": DESIGN_FINDINGS,
+                             "outline-revise": dict(OUTLINE, approach="REVISED APPROACH"),
+                             "design-rereview": DESIGN_PASS})
+
+        self.finish(run, "done")
+
+        (review,), (rereview,) = (self.launched(run, key) for key in ("design-review", "design-rereview"))
+        for prompt in (review["prompt"], rereview["prompt"]):
+            self.assertIn(f"Worktree: {run.worktree_path}", prompt)
+        self.assertIn("FIRST APPROACH", rereview["prompt"])
+        self.assertIn("REVISED APPROACH", rereview["prompt"])
+        self.assertIn("FIRST APPROACH", review["prompt"])
+        self.assertNotIn("REVISED APPROACH", review["prompt"])
+
+    def test_the_claim_is_renewed_before_the_outline_note_is_published(self):
+        run = self.outlined()
+
+        self.finish(run, "done")
+
+        events = [(e["event"], e["step"]) for e in run.events(run.runs()[0])
+                  if e["event"] in ("keep_alive_ran", "step_entered") and e["step"] == "outline-note"]
+        self.assertEqual(events, [("keep_alive_ran", "outline-note"), ("step_entered", "outline-note")])
 
 
 class OutlineReviewHalfTest(OutlineScenario):

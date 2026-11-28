@@ -87,6 +87,8 @@ LANE_RESULTS = {"issue.body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "issue
 
 OUTLINE_ISSUE = ("# t\n\nbody\n\n## Acceptance criteria\n\n- [ ] [code] one\n- [ ] [code] two\n\n"
                  "## Comment 1\n\n- [ ] [code] not a criterion\n")
+COLON_ISSUE = "# t\n\nbody\n\n## Acceptance criteria:\n\n- [ ] [code] one\n"
+TITLED_ISSUE = "# Acceptance criteria\n\nbody\n\n## Acceptance criteria\n\n- [ ] [code] one\n"
 S1 = {"n": 1, "change": "c", "files": ["a.py"], "test": "t", "assertion": "a"}
 S2 = dict(S1, n=2, change="d")
 
@@ -103,6 +105,11 @@ class GraderTest(unittest.TestCase):
     GRADER_CASES = [
         ("outline-mapped", mapping([S1, S2], on(["AC1", "AC2"], lambda i: i)), "mapped"),
         ("outline-mapped", mapping([S1], on(["AC1", "AC2"], lambda i: i)), "unmapped"),
+        ("outline-mapped", mapping([S1], [], issue=COLON_ISSUE), "unmapped"),
+        ("outline-mapped", mapping([S1], on(["AC1"]), issue=COLON_ISSUE), "mapped"),
+        ("outline-mapped", mapping([S1], [], issue=TITLED_ISSUE), "unmapped"),
+        ("outline-mapped", mapping([S1], on(["AC1"]), issue=TITLED_ISSUE), "mapped"),
+        ("outline-mapped", mapping([S1], [], issue="# t\n\nno criteria here\n"), "mapped"),
         ("outline-proven", {"outline.slices": [S1]}, "proven"),
         ("outline-proven", {"outline.slices": []}, "unproven"),
         ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "approve"}, "accept"),
@@ -119,6 +126,13 @@ class GraderTest(unittest.TestCase):
         ("direct-implemented", implemented(acceptance=[]), "task"),
         ("direct-implemented", implemented(sensitive=True), "full"),
         ("direct-implemented", implemented(), "lite"),
+        ("outline-implemented", implemented(ineligible=True, status="blocked"), "ineligible"),
+        ("outline-implemented", implemented(status="blocked"), "task"),
+        ("outline-implemented", implemented(commit=""), "task"),
+        ("outline-implemented", implemented(acceptance="none"), "task"),
+        ("outline-implemented", implemented(acceptance=[]), "lite"),
+        ("outline-implemented", implemented(acceptance=[], sensitive=True), "full"),
+        ("outline-implemented", implemented(), "lite"),
         ("direct-lite-tally", lite(verdict=None), "no-review"),
         ("direct-lite-tally", lite(findings=[UNNAMED]), "unusable"),
         ("direct-lite-tally", lite(escalate=True), "escalate"),

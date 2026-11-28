@@ -10,9 +10,10 @@ function reads the worktree or derives a branch: the store is the only source.
 - `snapshot` is the setup facts the build reads, `SNAPSHOT`: the latest result of each named step, flattened.
 - `approved` is the latest result of the note step that posted. It never reads a later outline reply, so the
   approved outline is the one the note stored.
-- `built` maps a slice number to the `build` result of the latest `SLICE_PROCEDURE` run that ended `done`. The
-  runs are those named by the `call` events of the `BUILD_PROCEDURE` children the root's own `call` events name;
-  a later `call` event wins.
+- `built(run, digest)` maps a slice number to the `build` result of the latest `SLICE_PROCEDURE` run that ended
+  `done` and whose `SLICE_READ` step was given the approved outline of `digest`, so a slice built under an earlier
+  approved outline is never taken for one of this outline. The runs are those named by the `call` events of the
+  `BUILD_PROCEDURE` children the root's own `call` events name; a later `call` event wins.
 - `render` writes an outline as the text the design review reads and the forge comment carries.
 """
 
@@ -28,6 +29,7 @@ OUTLINE_REPLY = "outline.reply.json"
 NOTE_SUBCOMMAND = "outline-note"
 BUILD_PROCEDURE = "outline-build"
 SLICE_PROCEDURE = "outline-slice"
+SLICE_READ = "slice"
 OUTLINE_MEMBERS = ("approach", "rejected", "slices", "criteria", "risks", "questions")
 SNAPSHOT = (("start", ("details", "merged_refs")),
             ("plan-preflight", ("branch", "worktree_path", "integration_branch", "issue_text", "routed",
@@ -134,15 +136,16 @@ def _called(run_dir: Path, procedure: str) -> list[Path]:
     return children
 
 
-def built(run_dir: Path) -> dict[int, dict]:
+def built(run_dir: Path, digest: str) -> dict[int, dict]:
     slices: dict[int, dict] = {}
     for build_run in _called(Path(run_dir), BUILD_PROCEDURE):
         for child in _called(build_run, SLICE_PROCEDURE):
             if engine_resume.ended(child) != engine_resume.DONE:
                 continue
+            read = latest(child, lambda step: step.get("id") == SLICE_READ)
             stored = latest(child, lambda step: step.get("id") == "build")
             item = engine_ledger.read_run(child)["inputs"].get("item")
-            if stored is not None and isinstance(item, int):
+            if stored is not None and isinstance(item, int) and read is not None and read.get("digest") == digest:
                 slices[item] = stored
     return slices
 

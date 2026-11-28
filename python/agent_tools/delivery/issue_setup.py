@@ -73,19 +73,25 @@ with `error` `plan_changed` when its digest is not `<d>`, and with `error` `plan
 forge's limit, applied only at publication); neither posts. Else it posts the text once per run under the plan marker
 (a retry finds the run's own comment) and prints the approved record `{verdict: "posted", comment_id, digest, text,
 outline, reads, ...snapshot}`: the reply, the files the planner sessions read and the setup facts the build is given.
-It writes nothing in the worktree.
+It writes nothing in the worktree. `outline-note-check` takes the same arguments, posts nothing and prints the same
+record when the run's own comment of this outline exists, else `{verdict: "absent"}` (the check of the mutating
+`outline-note` step: the claim is renewed before the comment is published).
 
 `outline-preflight --holder <h> --issue <n>` prints `{verdict: "clear", worktree_path, branch, integration_branch,
 slices}`, `slices` the approved slices' numbers in order. The location is the approved record's, never derived again.
 
-`outline-slice --holder <h> --issue <n> --item <k>` prints `{verdict: "built"}` when slice `k` has a done build, else
-`{verdict: "read", worktree_path, branch, integration_branch, slice, outline, details, merged_refs, routed,
+`outline-slice --holder <h> --issue <n> --item <k>` prints `{verdict: "built"}` when slice `k` has a done build made
+under the approved outline's digest (a build made under an earlier approved outline never counts), else
+`{verdict: "read", digest, worktree_path, branch, integration_branch, slice, outline, details, merged_refs, routed,
 route_detail, reads, diff}` from the approved record (`diff` is `git diff origin/<integration>...HEAD` in the
 worktree); a `k` the approved outline lacks is `error` `slice_unknown`.
 
 `outline-built --holder <h> --issue <n>` prints the build result of all slices, `{verdict: "built", status: "done",
 start_head, commit, acceptance, sensitive, ineligible: false, notes, tests}`: the first slice's start, the last slice's
-commit and acceptance; a slice without a done build is `error` `slice_unbuilt`.
+commit and, for each approved criterion in order, its acceptance entry from the build of the slice the outline
+assigns it to (none at all for an outline with no criterion); a slice without a done build is `error`
+`slice_unbuilt`, and a criterion whose slice returned no entry for it is `error` `acceptance_missing`. Git output is
+decoded as UTF-8 with undecodable bytes replaced.
 
 `preflight` prints `plan` too: with `--holder <h>`, the text of the plan the run `<h>` approved, else `""`. The
 implementer is given that text, never a comment it picks by its marker: `plan` is the body of the comment
@@ -483,9 +489,8 @@ def plan_note(args: argparse.Namespace) -> dict:
     return posted
 
 
-def _post_plan(repo: str, issue: int, holder: str, digest: str, text: str) -> dict:
-    """Post `text` under the marker of `digest` and `holder` once per run: a retry finds its own comment."""
-    body = f"{_plan_marker(digest, holder)}\n\n{text}"
+def _own_plan(repo: str, issue: int, holder: str, body: str) -> dict | None:
+    """The run's own comment of exactly `body` as `{verdict: posted, comment_id}`, else None."""
     try:
         comments = _comments(repo, issue)
     except forge_api.ForgeError as error:
@@ -497,7 +502,13 @@ def _post_plan(repo: str, issue: int, holder: str, digest: str, text: str) -> di
             and first.endswith(f"{PLAN_RUN}{holder} -->")]
     if mine and str(mine[-1].get("body") or "").strip() == body.strip():
         return {"verdict": "posted", "comment_id": mine[-1]["id"]}
-    return _post(repo, issue, body)
+    return None
+
+
+def _post_plan(repo: str, issue: int, holder: str, digest: str, text: str) -> dict:
+    """Post `text` under the marker of `digest` and `holder` once per run: a retry finds its own comment."""
+    body = f"{_plan_marker(digest, holder)}\n\n{text}"
+    return _own_plan(repo, issue, holder, body) or _post(repo, issue, body)
 
 
 def _approved_slice(record: Mapping, item: int) -> dict:
@@ -515,6 +526,15 @@ def outline_read(args: argparse.Namespace) -> dict:
 
 def outline_note(args: argparse.Namespace) -> dict:
     """Post the outline the review read, once for this run, and print the record the build is given."""
+    return _outline_record(args, post=True)
+
+
+def outline_note_check(args: argparse.Namespace) -> dict:
+    """`outline-note` without posting: the record when the run's own comment of this outline exists, else `absent`."""
+    return _outline_record(args, post=False)
+
+
+def _outline_record(args: argparse.Namespace, *, post: bool) -> dict:
     run = outline_record.root_run(args.holder, args.issue)
     reply = outline_record.outline(run)
     text = outline_record.render(args.issue, reply)
@@ -523,9 +543,14 @@ def outline_note(args: argparse.Namespace) -> dict:
         raise Failure("plan_changed", f"the outline now renders {digest}, the one that was reviewed is {args.digest}")
     if len(text) > PLAN_LIMIT:
         raise _too_large(len(text))
+    if post:
+        posted = _post_plan(args.repo, args.issue, args.holder, digest, text)
+    else:
+        posted = _own_plan(args.repo, args.issue, args.holder, f"{_plan_marker(digest, args.holder)}\n\n{text}")
+        if posted is None:
+            return {"verdict": "absent"}
     facts = outline_record.snapshot(run)
     reads = planner_reads.planner_reads(run, planner_reads.projects_roots(os.environ, Path.home()))
-    posted = _post_plan(args.repo, args.issue, args.holder, digest, text)
     return {**posted, "digest": digest, "text": text, "outline": reply, "reads": reads, **facts}
 
 
@@ -538,29 +563,45 @@ def outline_preflight(args: argparse.Namespace) -> dict:
 
 def outline_slice(args: argparse.Namespace) -> dict:
     run = outline_record.root_run(args.holder, args.issue)
-    if args.item in outline_record.built(run):
-        return {"verdict": "built"}
     record = outline_record.approved(run)
+    if args.item in outline_record.built(run, record["digest"]):
+        return {"verdict": "built"}
     chosen = _approved_slice(record, args.item)
     path, integration = record["worktree_path"], record["integration_branch"]
     diff = _git(path, "diff", f"origin/{integration}...HEAD").stdout
-    return {"verdict": "read", "worktree_path": path, "branch": record["branch"],
+    return {"verdict": "read", "digest": record["digest"], "worktree_path": path, "branch": record["branch"],
             "integration_branch": integration, "slice": chosen, "outline": record["text"],
             "details": record["details"], "merged_refs": record["merged_refs"], "routed": record["routed"],
             "route_detail": record["route_detail"], "reads": record["reads"], "diff": diff}
 
 
 def outline_built(args: argparse.Namespace) -> dict:
-    """The slices' builds as one build result: the first slice's start, the last slice's commit and acceptance."""
+    """The slices' builds as one build result: the first slice's start and the last slice's commit.
+
+    The acceptance is each approved criterion's entry from the build of the slice the outline assigns it to, in the
+    outline's order; a criterion whose slice returned none is `error` `acceptance_missing`.
+    """
     run = outline_record.root_run(args.holder, args.issue)
-    numbers = [s["n"] for s in outline_record.approved(run)["outline"]["slices"]]
-    done = outline_record.built(run)
+    record = outline_record.approved(run)
+    numbers = [s["n"] for s in record["outline"]["slices"]]
+    done = outline_record.built(run, record["digest"])
     missing = [n for n in numbers if n not in done]
     if not numbers or missing:
         raise Failure("slice_unbuilt", f"no built slice {missing or 'in an outline with no slice'}")
     results = [done[n] for n in numbers]
+    acceptance, absent = [], []
+    for criterion in record["outline"]["criteria"]:
+        entries = done[criterion["slice"]].get("acceptance")
+        found = [e for e in entries if isinstance(e, Mapping) and str(e.get("id")).upper() == criterion["id"].upper()
+                 ] if isinstance(entries, list) else []
+        if found:
+            acceptance.append(found[0])
+        else:
+            absent.append(criterion["id"])
+    if absent:
+        raise Failure("acceptance_missing", f"the build of the slice assigned to {absent} returned no acceptance for it")
     return {"verdict": "built", "status": "done", "start_head": results[0]["start_head"],
-            "commit": results[-1]["commit"], "acceptance": results[-1]["acceptance"],
+            "commit": results[-1]["commit"], "acceptance": acceptance,
             "sensitive": any(r["sensitive"] for r in results), "ineligible": False,
             "notes": "\n\n".join(r["notes"] for r in results),
             "tests": list(dict.fromkeys(t for r in results for t in r["tests"]))}
@@ -589,7 +630,7 @@ def approved_plan(worktree_path: str, issue: int, holder: str, comments: Sequenc
 def _git(root: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if k not in REPOSITORY_ENV}
     try:
-        done = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True,
+        done = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=GIT_TIMEOUT, check=False, env=env, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         raise Failure("git_failed", "timeout") from None
@@ -772,11 +813,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--holder", required=True)
     sub.add_argument("--digest", required=True)
     sub.add_argument("--task-numbers", required=True, type=task_numbers)
-    for name in ("outline-read", "outline-note", "outline-preflight", "outline-slice", "outline-built"):
+    for name in ("outline-read", "outline-note", "outline-note-check", "outline-preflight", "outline-slice",
+                 "outline-built"):
         sub = commands.add_parser(name)
         sub.add_argument("--holder", required=True)
         sub.add_argument("--issue", required=True, type=number)
-        if name == "outline-note":
+        if name.startswith("outline-note"):
             sub.add_argument("--repo", required=True)
             sub.add_argument("--digest", required=True)
         if name == "outline-slice":
@@ -795,7 +837,8 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {"preflight": preflight, "plan-preflight": plan_preflight, "worktree": worktree,
             "worktree-check": worktree_check, "note": note, "plan-read": plan_read,
             "plan-note": plan_note, "read": read, "lane": lane, "outline-read": outline_read,
-            "outline-note": outline_note, "outline-preflight": outline_preflight,
+            "outline-note": outline_note, "outline-note-check": outline_note_check,
+            "outline-preflight": outline_preflight,
             "outline-slice": outline_slice, "outline-built": outline_built}
 
 

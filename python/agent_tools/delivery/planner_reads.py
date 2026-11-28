@@ -1,7 +1,8 @@
 """The files a run's planner sessions read (D8), found in the Claude Code transcripts the sessions left.
 
 A planner session is one named by a record `sessions/<step>.<visit>*.json` of a step whose role is `planner` in the
-run's own procedure copy. Its transcript is the first `<projects root>/*/<session>.jsonl` that exists, where the
+run's own procedure copy. A transcript record is a physical line (ended by a newline, never by another Unicode
+line break a JSON string may hold). Its transcript is the first `<projects root>/*/<session>.jsonl` that exists, where the
 roots are `$CLAUDE_CONFIG_DIR/projects` when set, then `<home>/.claude/projects`. A transcript line is JSON whose
 `message.content` lists items; an item of type `tool_use` named `Read` carries its path in `input.file_path`. A line
 of any other shape is skipped. A session with no transcript adds nothing. Paths are distinct, in first-read order.
@@ -32,7 +33,7 @@ def projects_roots(environ: Mapping[str, str], home: Path) -> tuple[Path, ...]:
 def read_files(transcript: Path) -> list[str]:
     paths: list[str] = []
     try:
-        lines = Path(transcript).read_text(encoding="utf-8").splitlines()
+        lines = Path(transcript).read_text(encoding="utf-8").split("\n")  # a record ends at a newline only
     except (OSError, ValueError):
         return paths
     for line in lines:

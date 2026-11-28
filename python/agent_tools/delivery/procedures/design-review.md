@@ -2,6 +2,8 @@ Mode: design review. You review one plan outline before any code exists.
 Issue {{run.issue}} of {{run.repo}}. The issue, with its comments:
 {{plan-preflight.issue_text}}
 
+Worktree: {{plan-preflight.worktree_path}} (branch {{plan-preflight.branch}}, integration branch {{plan-preflight.integration_branch}}). Your current directory is the project root, not that worktree: read the files of the issue branch by their absolute path under {{plan-preflight.worktree_path}}, where a test or convention the branch already holds may be. Use your shell only to read, never a command that changes the tree, the index, HEAD or a branch.
+
 The outline:
 {{outline-read.text}}
 

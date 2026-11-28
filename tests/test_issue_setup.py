@@ -758,7 +758,8 @@ OUTLINE_STEPS = [
     {"id": "outline-note", "kind": "command", "command": "issue-setup", "subcommand": "outline-note"},
     {"id": "build", "kind": "call"},
 ]
-SLICE_STEPS = [{"id": "build", "kind": "command", "command": "issue-setup", "subcommand": "outline-slice"}]
+SLICE_STEPS = [{"id": "slice", "kind": "command", "command": "issue-setup", "subcommand": "outline-slice"},
+               {"id": "build", "kind": "command", "command": "issue-setup", "subcommand": "outline-slice"}]
 OUTLINE_SLICES = [{"n": 1, "change": "first", "files": ["a.py"], "test": "t1", "assertion": "a1"},
                   {"n": 2, "change": "second", "files": ["b.py"], "test": "t2", "assertion": "a2"}]
 REPLY = {"approach": "Do it.", "rejected": "Not that.", "slices": OUTLINE_SLICES,
@@ -767,7 +768,8 @@ REPLY = {"approach": "Do it.", "rejected": "Not that.", "slices": OUTLINE_SLICES
 SNAPSHOT_FACTS = {"details": "SETUP FACT", "merged_refs": [{"closes": False, "number": 5}],
                   "integration_branch": "main", "issue_text": "# t", "routed": None, "route_detail": "why"}
 OUTLINE_BRANCH = "issue-7-earlier-title"
-OUTLINE_SUBCOMMANDS = ("outline-read", "outline-note", "outline-preflight", "outline-slice", "outline-built")
+OUTLINE_SUBCOMMANDS = ("outline-read", "outline-note", "outline-note-check", "outline-preflight", "outline-slice",
+                       "outline-built")
 
 
 class OutlineCommandsTest(unittest.TestCase):
@@ -821,8 +823,9 @@ class OutlineCommandsTest(unittest.TestCase):
         return self.command("outline-note", "--repo", SLUG, *self.holder_issue(),
                             "--digest", digest or self.read_digest())
 
-    def build_slice(self, item, build):
-        """A done `outline-slice` child for `item` holding `build`, under an `outline-build` child of the root."""
+    def build_slice(self, item, build, digest="d"):
+        """A done `outline-slice` child for `item` holding `build` made under `digest`, under an `outline-build`
+        child of the root."""
         parents = [c for c in self.built_parents if c]
         if not parents:
             parent = self.tree.run("outline-build", OUTLINE_STEPS, issue=7, inputs={"issue": 7},
@@ -832,6 +835,7 @@ class OutlineCommandsTest(unittest.TestCase):
         parent = self.built_parents[0]
         child = self.tree.run("outline-slice", SLICE_STEPS, issue=7, parent=parent.name,
                               inputs={"issue": 7, "item": item})
+        self.tree.result(child, "slice", 1, {"verdict": "read", "digest": digest})
         self.tree.result(child, "build", 1, build)
         self.tree.done(child)
         self.tree.call(parent, "slices", 1, child, item - 1, 2)
@@ -856,7 +860,20 @@ class OutlineCommandsTest(unittest.TestCase):
         for member in ("details", "merged_refs", "routed", "route_detail", "reads"):
             self.assertEqual(report[member], self.record[member], member)
         self.assertEqual(report["outline"], "TEXT")
+        self.assertEqual(report["digest"], "d")
         self.assertIn("fixture/one.txt", report["diff"])
+
+    def test_outline_slice_reads_the_diff_of_an_earlier_slice_that_changed_a_latin_1_file(self):
+        self.store_note()
+        (self.worktree / "fixture" / "latin.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+        self.world.git(self.worktree, "add", "fixture/latin.txt")
+        self.world.git(self.worktree, "commit", "--quiet", "-m", "latin")
+
+        code, report = self.command("outline-slice", *self.holder_issue(), "--item", "2")
+
+        self.assertEqual((code, report["verdict"]), (0, "read"), report)
+        self.assertIn("fixture/latin.txt", report["diff"])
+        self.assertIn("caf", report["diff"])
 
     def test_outline_read_renders_the_latest_outline_with_no_length_refusal(self):
         reply = {**REPLY, "approach": "x" * (issue_setup.PLAN_LIMIT + 1)}
@@ -925,25 +942,108 @@ class OutlineCommandsTest(unittest.TestCase):
         code, report = self.command("outline-slice", *self.holder_issue(), "--item", "3")
         self.assertEqual((code, report["error"]), (1, "slice_unknown"), report)
 
+    def test_outline_slice_of_a_slice_built_under_an_earlier_approved_outline_is_built_again(self):
+        self.store_note()
+        self.built_parents = []
+        self.build_slice(1, {"status": "done", "commit": "b"}, digest="an-earlier-outline")
+
+        code, report = self.command("outline-slice", *self.holder_issue(), "--item", "1")
+
+        self.assertEqual((code, report["verdict"], report["slice"]), (0, "read", OUTLINE_SLICES[0]), report)
+        self.build_slice(1, {"status": "done", "commit": "b"})
+        self.assertEqual(self.command("outline-slice", *self.holder_issue(), "--item", "1"),
+                         (0, {"verdict": "built"}))
+
+    def test_outline_built_of_slices_built_under_an_earlier_approved_outline_is_refused(self):
+        self.store_note()
+        self.built_parents = []
+        for item in (1, 2):
+            self.build_slice(item, {"status": "done", "start_head": "a", "commit": "b", "acceptance": [],
+                                    "sensitive": False, "notes": "n", "tests": []}, digest="an-earlier-outline")
+
+        code, report = self.command("outline-built", *self.holder_issue())
+
+        self.assertEqual((code, report["error"]), (1, "slice_unbuilt"), report)
+
+    def build_both(self, first, second):
+        self.built_parents = []
+        base = {"status": "done", "sensitive": False, "tests": []}
+        self.build_slice(1, {**base, "start_head": "a", "commit": "b", "notes": "n1", "tests": ["t1", "t2"],
+                             "sensitive": False, "acceptance": first})
+        self.build_slice(2, {**base, "start_head": "b", "commit": "c", "notes": "n2", "tests": ["t2", "t3"],
+                             "sensitive": True, "acceptance": second})
+
     def test_outline_built_sums_the_slices_up(self):
         self.store_note()
         self.built_parents = []
-        self.build_slice(1, {"status": "done", "start_head": "a", "commit": "b", "acceptance": "acc1",
+        self.build_slice(1, {"status": "done", "start_head": "a", "commit": "b", "acceptance": [],
                              "sensitive": False, "notes": "n1", "tests": ["t1", "t2"]})
 
         code, report = self.command("outline-built", *self.holder_issue())
         self.assertEqual((code, report["error"]), (1, "slice_unbuilt"), report)
 
-        self.build_slice(2, {"status": "done", "start_head": "b", "commit": "c", "acceptance": "acc2",
-                             "sensitive": True, "notes": "n2", "tests": ["t2", "t3"]})
+        entry = {"id": "AC1", "text": "one", "kind": "code", "result": "from slice one"}
+        self.build_both([entry], [{**entry, "result": "slice two only repeats it"}])
         code, report = self.command("outline-built", *self.holder_issue())
         self.assertEqual((code, report), (0, {
-            "verdict": "built", "status": "done", "start_head": "a", "commit": "c", "acceptance": "acc2",
+            "verdict": "built", "status": "done", "start_head": "a", "commit": "c", "acceptance": [entry],
             "sensitive": True, "ineligible": False, "notes": "n1\n\nn2", "tests": ["t1", "t2", "t3"]}))
+
+    def test_outline_built_keeps_the_evidence_of_the_slice_each_criterion_is_assigned_to(self):
+        two = {**REPLY, "criteria": [{"id": "AC1", "kind": "code", "slice": 1, "text": "one"},
+                                     {"id": "ac2", "kind": "code", "slice": 2, "text": "two"}]}
+        self.store_note()
+        self.tree.result(self.run_dir, "outline-note", 2, {**self.record, "outline": two})
+        first = {"id": "AC1", "text": "one", "kind": "code", "result": "one passes"}
+        second = {"id": "AC2", "text": "two", "kind": "code", "result": "two passes"}
+        self.build_both([first, {"id": "AC2", "text": "two", "kind": "code", "result": "not built yet"}], [second])
+
+        code, report = self.command("outline-built", *self.holder_issue())
+
+        self.assertEqual((code, report["acceptance"]), (0, [first, second]), report)
+
+    def test_outline_built_refuses_a_slice_that_returned_no_acceptance_for_a_criterion_it_is_assigned(self):
+        two = {**REPLY, "criteria": [{"id": "AC1", "kind": "code", "slice": 1, "text": "one"},
+                                     {"id": "AC2", "kind": "code", "slice": 2, "text": "two"}]}
+        self.store_note()
+        self.tree.result(self.run_dir, "outline-note", 2, {**self.record, "outline": two})
+        self.build_both([{"id": "AC1", "result": "r"}], [{"id": "AC1", "result": "only the first again"}])
+
+        code, report = self.command("outline-built", *self.holder_issue())
+
+        self.assertEqual((code, report["error"]), (1, "acceptance_missing"), report)
+        self.assertIn("AC2", report["detail"])
+
+    def test_outline_built_of_an_outline_with_no_criterion_has_an_empty_acceptance(self):
+        free = {**REPLY, "criteria": []}
+        self.store_note()
+        self.tree.result(self.run_dir, "outline-note", 2, {**self.record, "outline": free})
+        self.build_both([], [])
+
+        code, report = self.command("outline-built", *self.holder_issue())
+
+        self.assertEqual((code, report["acceptance"]), (0, []), report)
+
+    def test_outline_note_check_is_absent_until_the_run_has_posted_this_outline_and_never_posts(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+        self.store_setup()
+        digest = self.read_digest()
+        args = ("outline-note-check", "--repo", SLUG, *self.holder_issue(), "--digest", digest)
+
+        self.assertEqual(self.command(*args), (0, {"verdict": "absent"}))
+        self.assertEqual(self.forge.stored(), [])
+        posted = self.note(digest)[1]
+        code, found = self.command(*args)
+
+        self.assertEqual((code, found), (0, posted))
+        self.assertEqual(len(self.forge.stored()), 1)
+        code, report = self.command("outline-note-check", "--repo", SLUG, *self.holder_issue(), "--digest", "0" * 16)
+        self.assertEqual((code, report["error"]), (1, "plan_changed"), report)
 
     def test_outline_commands_refuse_an_unknown_holder_or_another_issue(self):
         self.store_note()
-        extra = {"outline-note": ["--repo", SLUG, "--digest", "d"], "outline-slice": ["--item", "1"]}
+        extra = {"outline-note": ["--repo", SLUG, "--digest", "d"], "outline-slice": ["--item", "1"],
+                 "outline-note-check": ["--repo", SLUG, "--digest", "d"]}
         for name in OUTLINE_SUBCOMMANDS:
             for holder, issue in (("h/nope", "7"), (self.holder, "8")):
                 with self.subTest(name, holder=holder, issue=issue):

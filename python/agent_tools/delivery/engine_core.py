@@ -422,8 +422,10 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
         if step["kind"] == "call":
             wanted = 1 if pending.items is None else len(pending.items)
             entries = result.get("items")
+            if step.get("sequential") and isinstance(entries, list) and not all(
+                    isinstance(e, dict) and e.get("end") == "done" for e in entries[:-1]):
+                raise CoreError(f"call {step['id']!r} is sequential and reported an item after one that did not end 'done'")
             halted = (step.get("sequential") and isinstance(entries, list) and 0 < len(entries) < wanted
-                      and all(isinstance(e, dict) and e.get("end") == "done" for e in entries[:-1])
                       and isinstance(entries[-1], dict) and entries[-1].get("end") != "done")
             if not isinstance(entries, list) or (len(entries) != wanted and not halted):
                 raise CoreError(f"call {step['id']!r} must report {wanted} entries in 'items'")

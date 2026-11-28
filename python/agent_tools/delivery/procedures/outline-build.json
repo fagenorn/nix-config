@@ -21,7 +21,7 @@
     {"id": "implement", "stage": "building", "kind": "command", "command": "issue-setup", "subcommand": "outline-built", "holds": "run",
      "in": ["run.holder", "run.issue"],
      "on": {"built": "implemented", "error": "task", "refused": "task"}},
-    {"id": "implemented", "stage": "building", "kind": "decide", "grader": "direct-implemented", "holds": "run",
+    {"id": "implemented", "stage": "building", "kind": "decide", "grader": "outline-implemented", "holds": "run",
      "in": ["implement.ineligible", "implement.status", "implement.start_head", "implement.commit", "implement.acceptance", "implement.sensitive"],
      "on": {"ineligible": "ineligible", "task": "task", "lite": "lite-group", "full": "full-group"}},
     {"id": "lite-group", "stage": "final review", "kind": "group", "holds": "run", "max_visits": 2,

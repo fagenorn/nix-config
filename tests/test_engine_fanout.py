@@ -20,12 +20,15 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from unittest import mock
 
 from agent_tools.delivery import (
     engine_commands, engine_ledger, engine_resume, engine_session, engine_shell, engine_stop,
 )
 from agent_tools.delivery.engine_admission import Admission
+from tests.test_engine_check import SHIPPED_OK, broken_copy, editing, run_check
+from tests.test_engine_check import step as check_step
 from tests.test_engine_deliver import EngineProject, step
 from tests.test_engine_session import (
     DRAFT_REPLY, RESULT_NORMAL, canned_result, copy_roles, install_stub,
@@ -1350,6 +1353,42 @@ class HandlerTest(unittest.TestCase):
             self.assertIs(handler, engine_session._terminate)
         self.assertIs(after_group, sentinel)
         self.assertIs(after_call, sentinel)
+
+
+def _sequential_call(sequential: object, each: bool, parallel: int | None) -> Callable[[dict], None]:
+    """The toy's `children` call with `sequential` set, and with `each` and `parallel` as given."""
+    def change(toy: dict) -> None:
+        children = check_step(toy, "children")
+        children["sequential"] = sequential
+        if not each:
+            del children["each"]
+        if parallel is None:
+            del children["parallel"]
+        else:
+            children["parallel"] = parallel
+    return change
+
+
+class SequentialCallCheckTest(unittest.TestCase):
+    def test_sequential_needs_true_each_and_no_parallel(self):
+        refused = [
+            ("yes", True, None, "sequential must be true."),
+            (True, False, None, "sequential needs each."),
+            (True, True, 2, "sequential does not go with parallel."),
+        ]
+        for sequential, each, parallel, detail in refused:
+            with self.subTest(detail):
+                directory = broken_copy(editing("toy", _sequential_call(sequential, each, parallel)))
+                code, out, _ = run_check("--procedures", str(directory))
+                document = json.loads(out)
+                self.assertEqual((code, document["verdict"]), (1, "refused"))
+                self.assertEqual([(r["step"], r["defect"], r["detail"]) for r in document["refusals"]],
+                                 [("children", "invalid_field", detail)])
+
+    def test_a_sequential_call_over_each_without_parallel_is_accepted(self):
+        directory = broken_copy(editing("toy", _sequential_call(True, True, None)))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
 
 if __name__ == "__main__":

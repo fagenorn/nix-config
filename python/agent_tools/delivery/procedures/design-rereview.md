@@ -2,12 +2,17 @@ Mode: design review. You review one plan outline its planner revised once after 
 Issue {{run.issue}} of {{run.repo}}. The issue, with its comments:
 {{plan-preflight.issue_text}}
 
+Worktree: {{plan-preflight.worktree_path}} (branch {{plan-preflight.branch}}, integration branch {{plan-preflight.integration_branch}}). Your current directory is the project root, not that worktree: read the files of the issue branch by their absolute path under {{plan-preflight.worktree_path}}, where a test or convention the branch already holds may be. Use your shell only to read, never a command that changes the tree, the index, HEAD or a branch.
+
+The outline your earlier review read:
+{{outline-read.text}}
+
 The earlier findings: {{design-review.findings}}
 
 The revised outline:
 {{outline-reread.text}}
 
-Judge only whether each earlier finding is resolved and whether the revision added a defect of the rubric below; report nothing else.
+Judge only whether each earlier finding is resolved and whether the revision added a defect of the rubric below (a defect the earlier outline already held and no earlier finding named is not new); report nothing else.
 The rubric, four defects only:
 - an approach that breaks a documented convention or decision of the project (its standards, its docs, its recorded decisions);
 - a proving test that cannot fail (it passes without the slice's change, or asserts nothing the slice adds);

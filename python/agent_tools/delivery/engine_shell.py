@@ -538,7 +538,7 @@ def deliver(issue: int, procedures_dir: Path, *, entry: str = ENTRY,
 
     def stage(staged: Path) -> None:
         # The copy that runs is the copy checked; the lock is held before the run is visible.
-        if _validate(staged / "procedure", table, True, entry)["inputs"] != procedure["inputs"]:
+        if _validate(staged / "procedure", table, caps=True, entry=entry)["inputs"] != procedure["inputs"]:
             raise Refused(f"the {entry} procedure changed while its run was created")
         held.append(_take_run_lock(staged, holder["started"]))
         if replaced is not None:
@@ -559,7 +559,7 @@ def deliver(issue: int, procedures_dir: Path, *, entry: str = ENTRY,
             # A new run's set is judged before the runs root or the issue's creation lock
             # exists; when either exists the judgement waits for the lock, so a running
             # or open run answers first.
-            checked = _validate(procedures_dir, table, True, entry)
+            checked = _validate(procedures_dir, table, caps=True, entry=entry)
     except (engine_ledger.LedgerError, OSError, KeyError) as error:
         raise Refused(str(error)) from error
     try:
@@ -585,7 +585,7 @@ def deliver(issue: int, procedures_dir: Path, *, entry: str = ENTRY,
                 continued = True
             else:
                 procedure = checked if checked is not None else _validate(
-                    procedures_dir, table, True, entry)
+                    procedures_dir, table, caps=True, entry=entry)
                 now = datetime.now(timezone.utc)
                 token = "".join(secrets.choice(engine_ledger.TOKEN_ALPHABET) for _ in range(4))
                 host = _host()
