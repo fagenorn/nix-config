@@ -898,8 +898,7 @@ def _record_core_transitions(run_dir: Path, ledger: list[dict], walk: engine_cor
         if (transition.step, transition.visit) not in taken:
             engine_ledger.append_event(run_dir, {
                 "event": "transition_taken", "at": _now(), "step": transition.step,
-                "visit": transition.visit, "outcome": transition.outcome,
-                "to": transition.target,
+                "visit": transition.visit, "outcome": transition.outcome, "to": transition.target,
                 **({"dropped": list(transition.dropped)} if transition.dropped else {})})
 
 
