@@ -75,13 +75,12 @@ never None. The checks run in this order, the first that applies deciding:
   the release pull request's run (`SHARED_ISSUE` for an issue in `others`, whatever it is); for an own
   issue's branch, no pull request among the run's whose `read_pr` has the slug as repository and the
   run's branch is `NOT_OWN_RUN`; the pull request's head (the release pull request's too) other than
-  the run's head is `STALE_RUN`. A release run's checks are the default branch's. A run with no
-  failed job (a job of its latest attempt, all pages, whose conclusion is in `FAILED_CONCLUSIONS`), or
-  none named by `read_required(slug, base)`, is `NOT_CHECK_RUN`, and a run with no failed job is
-  refused before `read_required` is read; GitHub's failed-jobs rerun reruns every failed job of the
-  run together and cannot pick one, so the run is judged whole and a failed job that is no required
-  check reruns beside a required one. A run (a sprint run too) with a job that has no conclusion yet is
-  `RUN_PENDING`, judged before that. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
+  the run's head is `STALE_RUN`. A run with no failed
+  job (a job of its latest attempt, all pages, whose conclusion is in `FAILED_CONCLUSIONS`) is
+  `NO_FAILED_JOB`; a failed job need not be a required check, because starting a job again changes no
+  code and no production state, and a project whose one required check is a gate over other jobs would
+  otherwise never have a rerunnable run; the required checks are not read. A run (a sprint run
+  too) with a job that has no conclusion yet is `RUN_PENDING`, judged before that. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
   `RERUN_LIMIT`, which names the two reruns, each by run and failing members (ADR-console-106); the
   release pull request run and the candidate's push run share that one head's cap, and the refusal
   names the release pull request (the branch, for a tip candidate). Else `ALLOW` with target `{"run", "pr", "head", "count", "members"}`:
@@ -195,7 +194,7 @@ DEPLOY_RERUN = "Run {run} is a {event} run, not a pull request check run, so it 
 NOT_OWN_RUN = "Run {run} is not a check run of this sprint's own pull request."
 STALE_RUN = "Run {run} is not at the head of its pull request."
 RUN_PENDING = "Run {run} has a job that has not finished, so it has no failed job to rerun yet."
-NOT_CHECK_RUN = "Run {run} has no failed job that is a required check, so it is not rerun."
+NO_FAILED_JOB = "Run {run} has no failed job, so it is not rerun."
 RERUN_LIMIT = ("Pull request {pr} has had its head {head} rerun twice, by {reruns}, and a third rerun is "
                "refused: the head must be reported or fixed.")
 RERUN_LIMIT_TIP = ("The head {head} of {branch} has had its release rerun twice, by {reruns}, and a third "
@@ -885,7 +884,7 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
         pull = _release_pull(grant, forge, run)
         if pull is None or pull["head"] != run["head"]:
             return _deny(RERUN, DEPLOY_RERUN.format(run=run_id, event="push"))
-        number, base, release = pull["pr"], pull["base"], "push"
+        number, release = pull["pr"], "push"
     else:
         if run["event"] != "pull_request":
             return _deny(RERUN, DEPLOY_RERUN.format(run=run_id, event=run["event"]))
@@ -909,12 +908,10 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
                 return _deny(RERUN, not_own)
         if pull["head"] != run["head"]:
             return _deny(RERUN, STALE_RUN.format(run=run_id))
-        base = pull["base"]
     if run.get("pending"):
         return _deny(RERUN, RUN_PENDING.format(run=run_id))
-    failed = set(run["failed"])
-    if not failed or not failed & forge.read_required(slug, base):
-        return _deny(RERUN, NOT_CHECK_RUN.format(run=run_id))
+    if not run["failed"]:
+        return _deny(RERUN, NO_FAILED_JOB.format(run=run_id))
     done = grant.reruns.get(run["head"], ())
     if len(done) >= MAX_RERUNS:
         reruns = " and ".join(rerun.describe() for rerun in done)

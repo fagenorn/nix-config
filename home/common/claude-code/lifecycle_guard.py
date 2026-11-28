@@ -640,11 +640,10 @@ One spelling of that rerun is not a production change, though the project declar
 rerun <id> --failed --repo <owner>/<repo>`, single-spaced, after at most one credential-scrub prefix, which is the
 form the console permit grants. The guard then reads the forge, and the narrowed hits of the named project are dropped
 only when every read shows a failed pull request check run of that project's own open pull request at its head: the
-run (an Actions run the pull request triggered, of the project's repository), its jobs (complete, with a failed job
-that is a required check), every pull request the run lists (each readable and a pull request document, one of them
+run (an Actions run the pull request triggered, of the project's repository), its jobs (complete, with a failed job,
+whether or not that job is a required check), every pull request the run lists (each readable and a pull request document, one of them
 open, from the project's repository into the row's integration branch, from a branch that is neither long-lived
-branch, at the run's head and branch) and the required checks. The required set is the forge's protection of the
-integration branch, read as the console permit reads it, not the checks the contract declares. The reads inherit the
+branch, at the run's head and branch). The required checks are not read, as the console permit does not read them. The reads inherit the
 session's environment minus the token variables, with `GH_HOST` pinned to github.com (where a host-less `--repo`
 rerun goes), and the jobs are read page by page. The rerun runs in the session's shell, so the guard asks that shell
 (the user's `$SHELL`, as a login, interactive shell) for `$GH_HOST`, `$GH_CONFIG_DIR` and `$XDG_CONFIG_HOME` once per
@@ -4048,10 +4047,8 @@ def gh_named_repository(run, cut):
 
 PULL_REQUEST_RERUN = re.compile(
     r"gh run rerun ([1-9][0-9]{0,17}) --failed --repo ([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)")
-# The permit's FAILED_CONCLUSIONS, ANY_APP and ACTIONS_APP, copied: the guard imports nothing
-# from `agent_tools`. A check bound to no app (None) counts as the permit counts it.
+# The permit's FAILED_CONCLUSIONS, copied: the guard imports nothing from `agent_tools`.
 JOB_FAILED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
-REQUIRED_CHECK_APPS = (None, -1, 15368)
 
 
 def pull_request_rerun_form(command):
@@ -4083,28 +4080,6 @@ def forge_read(gh_bin, path, deadline, child_timeout, paged=False):
 
 def is_count(value):
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def required_check_names(document):
-    """The names of the checks a branch's protection requires, as the console permit reads them, else None."""
-    if not isinstance(document, dict):
-        return None
-    checks, contexts = document.get("checks"), document.get("contexts")
-    if not isinstance(checks, list) or not isinstance(contexts, list):
-        return None
-    required, bound = set(), set()
-    for check in checks:
-        if not isinstance(check, dict) or not isinstance(check.get("context"), str):
-            return None
-        app = check.get("app_id")
-        if app is not None and not is_count(app):
-            return None
-        bound.add(check["context"])
-        if app in REQUIRED_CHECK_APPS:
-            required.add(check["context"])
-    if not all(isinstance(context, str) for context in contexts):
-        return None
-    return required | {context for context in contexts if context not in bound}
 
 
 def run_document_facts(document, slug):
@@ -4202,10 +4177,10 @@ def is_pull_request_document(document):
 
 def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, memo):
     """Whether run `run_id` of `slug` is a pull request check run of its own open issue pull
-    request at that pull request's head whose failed job is a check the forge requires of the
-    row's integration branch. Any read that fails, or any other shape, is False. The row's
-    declared `required_checks` are never consulted. `memo`, a dict shared by the calls of one
-    command, holds each read once."""
+    request at that pull request's head with a failed job, required or not, as the console permit
+    judges it. Any read that fails, or any other shape, is False. Neither the row's declared
+    `required_checks` nor the forge's protection of the integration branch is read. `memo`, a dict
+    shared by the calls of one command, holds each read once."""
     hook_host = os.environ.get("GH_HOST", "").strip().lower()
     if hook_host not in ("", "github.com"):
         return False
@@ -4230,11 +4205,7 @@ def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, m
     pulls = [read(f"pulls/{number}") for number in numbers]
     if not all(is_pull_request_document(pull) for pull in pulls):
         return False
-    if any(is_own_open_pull_request(pull, slug, head, branch, row) for pull in pulls):
-        required = required_check_names(
-            read(f"branches/{row['integration_branch']}/protection/required_status_checks"))
-        return bool(required and failed & required)
-    return False
+    return any(is_own_open_pull_request(pull, slug, head, branch, row) for pull in pulls)
 
 
 def add_production_hit(hits, hit, named, by_checkout):

@@ -2046,8 +2046,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
     def test_the_permits_rerun_of_an_own_open_pull_request_check_run_at_its_head_is_not_a_production_change(self):
         """A `gh run rerun <id> --failed --repo <slug>` of a pull request check run of the
-        project's own open issue pull request, at its head, whose failed job is a check the
-        forge requires, is not a production change, though the project declares a rerun rule."""
+        project's own open issue pull request, at its head, with a failed job, is not a production change,
+        though the project declares a rerun rule; no required check is asked and no branch protection read."""
         guard_args, prod, _own, other = self.rerun_world()
         command, log = self.CHECK_RERUN, Path(self.fixture_dir.name) / "rerun.log"
         two = self.production_args({self.OWN: NODO_ROW, PROD: {**self.RERUN_ROW, "production": rerun_production(("deploy-rerun", ["gh", "run", "rerun"]), ("deploy-rerun-failed", ["gh", "run", "rerun", "--failed"]))}})
@@ -2076,9 +2076,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             self.assertEqual("", log.read_text(encoding="utf-8"))
 
     def test_a_rerun_of_any_other_run_or_an_unread_one_still_meets_the_production_rule(self):
-        """A rerun that is not exactly the permit's form, or whose run, jobs, pull request or
-        required checks the forge does not show to be the project's own pull request check run
-        at its head, or that cannot be read, stays a production change."""
+        """A rerun that is not exactly the permit's form, or whose run, jobs or pull request
+        the forge does not show to be the project's own pull request check run at its head, or
+        that cannot be read, stays a production change."""
         _args, prod, _own, _other = self.rerun_world()
         both = rerun_production(("deploy-rerun", ["gh", "run", "rerun"]), ("deploy-run", ["gh", "run"]))
         default = check_run_forge(PROD, self.CHECK_HEAD)
