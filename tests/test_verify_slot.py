@@ -36,8 +36,10 @@ import os, sys, time
 directory, name = sys.argv[1], sys.argv[2]
 code = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 def put(suffix, text):
-    with open(os.path.join(directory, name + "." + suffix), "w") as handle:
+    target = os.path.join(directory, name + "." + suffix)
+    with open(target + ".part", "w") as handle:
         handle.write(text)
+    os.replace(target + ".part", target)
 put("pid", str(os.getpid()))
 put("start", repr(time.time()))
 release = os.path.join(directory, name + ".release")
@@ -184,6 +186,31 @@ class SlotHarness:
     def history(self):
         text = (self.slots / "history.jsonl").read_text()
         return [json.loads(line) for line in text.splitlines()]
+
+
+class ChildMarkTest(unittest.TestCase):
+    """A mark the test child writes is never visible before its content is whole."""
+
+    def test_a_mark_is_never_visible_while_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "x.release").write_text("")
+            real_open = open
+            empty_marks = []
+
+            def watching_open(*args, **kwargs):
+                handle = real_open(*args, **kwargs)
+                empty_marks.extend(
+                    mark for mark in ("x.pid", "x.start", "x.end")
+                    if Path(directory, mark).exists() and Path(directory, mark).stat().st_size == 0)
+                return handle
+
+            namespace = {"__name__": "child"}
+            with mock.patch.object(sys, "argv", ["-c", directory, "x"]), \
+                    mock.patch("builtins.open", watching_open), self.assertRaises(SystemExit):
+                exec(CHILD, namespace)
+            self.assertEqual(empty_marks, [])
+            self.assertTrue(float(Path(directory, "x.start").read_text()) <=
+                            float(Path(directory, "x.end").read_text()))
 
 
 class VerifySlotTest(SlotHarness, unittest.TestCase):
