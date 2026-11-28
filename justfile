@@ -230,6 +230,8 @@ agent-workflow-tests *args:
     tests/test_engine_step_coverage.py \
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
+    tests/test_outline_record.py \
+    tests/test_planner_reads.py \
     tests/test_closing.py \
     tests/test_holding.py \
     tests/test_landing.py \
