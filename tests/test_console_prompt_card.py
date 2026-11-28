@@ -487,6 +487,59 @@ class CommandSummaryTest(unittest.TestCase):
         command = "bash 3<<'B'\nrm -rf /etc/b\nB" + self.PAD
         self.assertEqual(self.summary(command), self.want(["bash"], [], ["/etc/b"]))
 
+    def test_a_feeder_with_several_standard_input_texts_leaves_the_script_unknown_because_zsh_joins_them(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            "cat <<'A' <<'B' | bash\nrm -rf /etc/a\nA\nrm -rf /etc/b\nB",
+            "cat <<'A' <<< 'rm -rf /etc/b' | bash\nrm -rf /etc/a\nA",
+            "cat <<< 'rm -rf /etc/a' <<< 'rm -rf /etc/b' | bash",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+                self.assertEqual(result["outside"], ["/etc/a", "/etc/b"])
+
+    def test_a_script_read_through_an_explicit_descriptor_is_unknown_not_missing(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            ("bash /dev/fd/3 3<<'EOF'\nrm -rf /etc/nginx\nEOF", "bash"),
+            ("bash /proc/self/fd/3 3<<'EOF'\nrm -rf /etc/nginx\nEOF", "bash"),
+            ("bash /proc/thread-self/fd/3 3<<'EOF'\nrm -rf /etc/nginx\nEOF", "bash"),
+            ("bash /dev/fd/10 {v}<<'EOF'\nrm -rf /etc/nginx\nEOF", "bash"),
+            ("bash /dev/fd/3 3<<< 'rm -rf /etc/nginx'", "bash"),
+            ("python3 /dev/fd/3 3<<'EOF'\nrm -rf /etc/nginx\nEOF", "python3"),
+        ]
+        for command, program in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [{**unknown, "program": program}])
+                self.assertIn("/etc/nginx", result["outside"])
+
+    def test_a_heredoc_on_standard_output_disconnects_the_feeder_from_the_pipe(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            "cat <<'A' 1<<'B' | bash\nrm -rf /etc/a\nA\nrm -rf /etc/b\nB",
+            "cat <<'A' 1<<< 'rm -rf /etc/b' | bash\nrm -rf /etc/a\nA",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_procfs_alias_of_standard_output_leaves_the_script_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        for alias in ("/proc/thread-self/fd/1", "/proc/1234/fd/1", "/proc/self/task/1234/fd/1",
+                      "/proc/self/fd/../fd/1"):
+            command = f"tee {alias} <<'EOF' | bash\nrm -rf /etc/nginx\nEOF"
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+
     def test_a_tee_operand_that_may_name_standard_output_leaves_the_script_text_unknown(self):
         unknown = {"program": "bash", "lines": None, "paths": []}
         body = "rm -rf /etc/nginx"

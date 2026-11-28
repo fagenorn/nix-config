@@ -89,7 +89,11 @@ _PATTERN_FILE_READERS = frozenset({"grep", "egrep", "fgrep"})
 _PROGRAM_FILE_READERS = frozenset({"jq", "yq"})
 _STDIN_FILES = frozenset({"-", "/dev/stdin"})
 _STDOUT_FILES = frozenset({"/dev/stdout", "/dev/fd/1", "/proc/self/fd/1", "/dev/tty"})
-_JQ_OPTION_VALUES = {"--arg": 2, "--argjson": 2, "--slurpfile": 2, "--rawfile": 2, "--indent": 1, "-L": 1}
+# Linux names a process's descriptors under /proc as well as /dev/fd: `fd/1` is standard output whatever the
+# process (`self`, `thread-self`, a pid) or task, and any `fd/N` operand can be a script on that descriptor.
+_STDOUT_ALIAS = re.compile(r"/proc/[^/]+(?:/task/[^/]+)?/fd/1")
+_DESCRIPTOR_FILE = re.compile(r"/(?:dev/fd|proc/[^/]+(?:/task/[^/]+)?/fd)/[^/]+")
+_JQ_OPTION_VALUES ={"--arg": 2, "--argjson": 2, "--slurpfile": 2, "--rawfile": 2, "--indent": 1, "-L": 1}
 _VERSIONED_NAME = re.compile(r"([A-Za-z]+)(?:[-_]?[0-9][0-9._]*(?:-?dbg|[dmtu])?|-dbg)")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
 _COPIERS = frozenset({"cp", "mv", "ln", "install"})
@@ -571,6 +575,9 @@ class _Reader:
             if any(item.kind == "redir" and (item.op in _READING_REDIRECTS or item.op in _WRITING_REDIRECTS
                                              or item.op == ">&") for item in items):
                 return False
+            # A here-document or here-string written on descriptor 1 replaces the pipe as standard output.
+            if any((item.kind == "heredoc" or item.op == "<<<") and item.fd == 1 for item in items):
+                return False
             words = [item for item in items if item.kind == "word"]
             first = self.program_at(words)
             if first >= len(words):
@@ -582,11 +589,30 @@ class _Reader:
                     return False
             elif name == "tee":
                 if any(item.word.option or item.word.expanded or item.word.brace or item.word.glob
-                       or self.place(item.word.value, False) in (None, *_STDOUT_FILES) for item in arguments):
+                       or self.stdout_alias(self.place(item.word.value, False)) for item in arguments):
                     return False
             else:
                 return False
         return True
+
+    @staticmethod
+    def stdout_alias(placed):
+        """True for a placed path that is, or cannot be told from, the process's standard output."""
+        return placed is None or placed in _STDOUT_FILES or bool(_STDOUT_ALIAS.fullmatch(placed))
+
+    def descriptor_script(self, arguments, items):
+        """True when a shell or interpreter is given a file operand that may be a descriptor (`/dev/fd/3`) and
+        a here-document or here-string is written on a descriptor other than standard input: the text may be
+        the script it reads."""
+        if not any(not item.on_stdin and (item.kind == "heredoc" or item.op == "<<<") for item in items):
+            return False
+        for item in arguments:
+            if item.word.option:
+                continue
+            placed = self.place(item.word.value, item.word.expanded)
+            if placed is None or _DESCRIPTOR_FILE.fullmatch(placed):
+                return True
+        return False
 
     def unknown_script(self, text=None):
         """Record a script row with no line count and no path, and scan `text` (a body) for outside paths."""
@@ -620,11 +646,14 @@ class _Reader:
                            if not feeders[at][1] and self.stdin_texts(feeders[at][0])), None)
             if source is None:
                 raise _Refuse("a program fed standard input the console cannot read")
-            text, lines = self.stdin_texts(feeders[source][0])[-1]
-            if source == 0 and not merged and self.passes_on(feeders):
-                self.script(self.interpreter, text, lines)
+            texts = self.stdin_texts(feeders[source][0])
+            # Several texts on one standard input: bash keeps the last, zsh (MULTIOS) joins them all.
+            if len(texts) == 1 and source == 0 and not merged and self.passes_on(feeders):
+                self.script(self.interpreter, *texts[0])
             else:
                 self.unknown_script()
+        elif self.script_input and self.descriptor_script(arguments, items):
+            self.unknown_script()
         if program is not None:
             if program.expanded or program.value in _RESERVED:
                 raise _Refuse("a program the console cannot read")
