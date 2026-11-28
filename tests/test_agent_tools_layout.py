@@ -24,6 +24,7 @@ SHARED = "system"
 ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "claims": frozenset({
         "agent_tools.project_contract.agent_platform",  # owner_actions
+        "agent_tools.console.sessions",  # claim_takeover
     }),
     "console": frozenset({
         "agent_tools.project_contract.agent_platform",  # service, permission

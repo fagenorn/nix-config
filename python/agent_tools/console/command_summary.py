@@ -28,9 +28,10 @@ expanded program word, and the programs `if then else elif fi for while until do
 function eval source . { } [[ ]]`.
 
 Standard input is a script unless a known plain-data reader takes it. One closed allowlist names the
-readers of data (`cat tee head tail wc sort uniq cut tr grep` without `-f`, `jq yq less base64 gzip` and
-their close kin, `git`); `xargs`, a wrapper (`sudo`, `env`) and every program not on it are not on it, named
-in a table or not. Standard input that reaches any other program from a here-document, a here-string or a
+readers of data (`cat tee head tail wc sort uniq cut tr grep` without `-f`, `jq yq` unless their program
+file is standard input, `less base64 gzip` and their close kin); `git`, `xargs`, a wrapper (`sudo`, `env`)
+and every program not on it are not on it, named in a table or not. Standard input that reaches any other
+program from a here-document, a here-string or a
 pipe is a script that program may run, whatever options or operands it is given (`awk -f -`,
 `sed -f /dev/stdin`, `pwsh -Command -`): the card shows its script line, named by the program word as
 written. The one exception is a shell given `-c` code and no `s` in its short options, whose input is data.
@@ -76,6 +77,9 @@ _DATA_READERS = frozenset(
     "bunzip2 bzcat xz unxz xzcat tac rev nl fold fmt column paste comm diff od xxd hexdump md5sum sha1sum "
     "sha256sum shasum cksum".split())
 _PATTERN_FILE_READERS = frozenset({"grep", "egrep", "fgrep"})
+_PROGRAM_FILE_READERS = frozenset({"jq", "yq"})
+_STDIN_FILES = frozenset({"-", "/dev/stdin"})
+_JQ_OPTION_VALUES = {"--arg": 2, "--argjson": 2, "--slurpfile": 2, "--rawfile": 2, "--indent": 1, "-L": 1}
 _VERSIONED_NAME = re.compile(r"([A-Za-z]+)(?:[-_]?[0-9][0-9._]*(?:-?dbg|[dmtu])?|-dbg)")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
 _COPIERS = frozenset({"cp", "mv", "ln", "install"})
@@ -452,7 +456,8 @@ class _Reader:
     @staticmethod
     def reads_data(program, arguments):
         """True for a program on the closed allowlist of plain-data readers of standard input; `grep` and
-        its kin only without a pattern file (`-f`, `--file`), which is code-like input."""
+        its kin only without a pattern file (`-f`, `--file`), and `jq` and `yq` unless their program file
+        (`-f`, `--from-file`) is standard input, which is code-like input."""
         name = posixpath.basename(program)
         if name not in _DATA_READERS:
             return False
@@ -462,7 +467,36 @@ class _Reader:
                 if value.startswith("--file") or (value.startswith("-") and not value.startswith("--")
                                                   and value != "-" and "f" in value.split("=", 1)[0]):
                     return False
+        if name in _PROGRAM_FILE_READERS and _Reader.program_file_is_stdin(name, arguments):
+            return False
         return True
+
+    @staticmethod
+    def program_file_is_stdin(name, arguments):
+        """True when a `jq` or `yq` command loads its program from standard input: `-f` or `--from-file`
+        makes the first operand that is not an option or an option's value the program file, so options may
+        come between (`jq -f -n /dev/stdin`); `yq` also takes the word right after `-f`."""
+        values = [item.word.value for item in arguments]
+        from_file = False
+        ended = False
+        index = 0
+        while index < len(values):
+            value = values[index]
+            index += 1
+            if not ended and value == "--":
+                ended = True
+            elif not ended and value.startswith("--from-file="):
+                return value.split("=", 1)[1] in _STDIN_FILES
+            elif not ended and value.startswith("-") and value != "-":
+                if value == "--from-file" or (not value.startswith("--") and "f" in value):
+                    from_file = True
+                    if name == "yq" and values[index:index + 1] and values[index] in _STDIN_FILES:
+                        return True
+                else:
+                    index += _JQ_OPTION_VALUES.get(value, 0)
+            else:
+                return from_file and value in _STDIN_FILES
+        return False
 
     @staticmethod
     def code_only(name, rest):

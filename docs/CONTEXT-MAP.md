@@ -1,4 +1,3 @@
-# Context Map
 ## Areas
 | Area | Context file | Gist | governs |
 |---|---|---|---|
@@ -50,6 +49,7 @@
 | Detaching word | Guard |
 | Digest | Console |
 | Drafted contract | Console |
+| Early takeover | Claims |
 | Enforcer | Delivery |
 | Engine | Delivery |
 | Excluded profile | Console |
