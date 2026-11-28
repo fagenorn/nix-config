@@ -626,8 +626,8 @@ class ReturnedAfterRewindTest(unittest.TestCase):
         ends = [{"end": "done", "item": None, "run": run.name}]
 
         with mock.patch.object(engine_ledger, "runs_root", return_value=root):
-            visits = engine_shell.child_result_visits(run.name)
-            returned = engine_resume.returned(step, ends, visits)
+            visits = engine_shell.child_visits(run.name)
+            returned = engine_resume.returned(step, ends, engine_shell.child_visits)
 
         self.assertEqual(visits, {"produce": 1, "gate": 3})
         self.assertEqual(returned, {"argv": ["first"]})

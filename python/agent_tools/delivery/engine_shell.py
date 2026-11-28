@@ -341,13 +341,13 @@ def core_events(run_dir: Path, ledger: list[dict],
     return events
 
 
-def child_result_visits(run: str) -> dict[str, int]:
+def child_visits(run: str) -> dict[str, int]:
     """The visit of each step's result a child run holds at the end of its walk, after every rewind."""
     child = engine_ledger.runs_root() / run
     document = engine_ledger.read_run(child)
     procedure = _load(child / "procedure" / f"{document['procedure']}.json")
-    ledger = engine_ledger.replay(child / "events.jsonl")
-    return engine_core.result_visits(procedure, document["inputs"], core_events(child, ledger, _computed(procedure)))
+    events = core_events(child, engine_ledger.replay(child / "events.jsonl"), engine_core.group_ids(procedure))
+    return engine_core.result_visits(procedure, document["inputs"], events)
 
 
 def read_head(root: str) -> str | None:
@@ -626,17 +626,12 @@ def _end_leftover(run_dir: Path) -> None:
         engine_stop.end_leftover(state.process["pid"])
 
 
-def _computed(procedure: dict) -> frozenset[str]:
-    """The steps the core grades itself: the groups."""
-    return frozenset(item["id"] for item in procedure["steps"] if item["kind"] == "group")
-
-
 def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     """Record where the run's next walk re-enters; a stored but ungraded visit is graded first."""
     _end_leftover(run_dir)
     procedure = _load(run_dir / "procedure" / f"{engine_ledger.read_run(run_dir)['procedure']}.json")
     steps = {item["id"]: item for item in procedure["steps"]}
-    computed = _computed(procedure)
+    computed = engine_core.group_ids(procedure)
     members = {member["step"] for name in computed for member in steps[name]["members"]}
     ledger = engine_ledger.replay(run_dir / "events.jsonl")
     for entry in [e for e in ledger if e["event"] == "step_entered" and e["step"] not in computed]:
@@ -689,7 +684,7 @@ def _unchanged(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict
         recorded = next((e.get("outcome") for e in ledger if e["event"] == "result_stored"
                          and (e["step"], e["visit"]) == (name, visit)), None)
         pending = engine_core.replay(procedure, inputs,
-                                     core_events(run_dir, ledger[:entered[-1]], _computed(procedure))).action
+                                     core_events(run_dir, ledger[:entered[-1]], engine_core.group_ids(procedure))).action
         if not isinstance(pending, engine_core.RunCommand) or pending.step != name:
             return False
         ran = engine_commands.run(table, pending.command, pending.subcommand, pending.args, guard=_guard(),
@@ -803,7 +798,7 @@ def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
     procedure = _load(run_dir / "procedure" / f"{name}.json")
     stop = scope.stop
     steps = {item["id"]: item for item in procedure["steps"]}
-    computed = _computed(procedure)
+    computed = engine_core.group_ids(procedure)
     ran = 0
     while True:
         ledger = engine_ledger.replay(run_dir / "events.jsonl")
@@ -1125,7 +1120,7 @@ def _owed_at_entry(run_dir: Path, run: dict, action: engine_core.RunCall) -> boo
     if cut is None:
         return False
     pending = engine_core.replay(procedure, run["inputs"],
-                                 core_events(run_dir, ledger[:cut], _computed(procedure))).action
+                                 core_events(run_dir, ledger[:cut], engine_core.group_ids(procedure))).action
     return isinstance(pending, engine_core.RunCall) and pending.recheck
 
 
@@ -1253,9 +1248,8 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
                     "the engine is ending")
     ends = [entries[index] for index in range(len(items))]
     outcome = engine_core.call_outcome([entry["end"] for entry in ends])
-    visits = child_result_visits(ends[0]["run"]) if step.get("returns") and outcome == "done" else {}
     engine_ledger.store_result(run_dir, step=action.step, visit=action.visit,
-                               result={"items": ends, **engine_resume.returned(step, ends, visits)}, at=_now(),
+                               result={"items": ends, **engine_resume.returned(step, ends, child_visits)}, at=_now(),
                                wall_seconds=time.monotonic() - started, turns=0,
                                tokens=dict(NO_TOKENS), spend_usd=0, outcome=outcome)
     _graded(run_dir, step, action.visit, outcome)

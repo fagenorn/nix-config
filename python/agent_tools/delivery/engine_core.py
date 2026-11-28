@@ -546,6 +546,11 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
     return Replay(action, transitions, tuple(graded))
 
 
+def group_ids(procedure: Mapping) -> frozenset[str]:
+    """The steps the core grades itself: the groups."""
+    return frozenset(item["id"] for item in procedure["steps"] if item["kind"] == "group")
+
+
 def result_visits(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping]) -> dict[str, int]:
     """Step -> the visit whose result the walk holds for it after every rewind; a step with none is absent.
 
