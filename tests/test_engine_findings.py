@@ -128,6 +128,10 @@ BLANK_EVIDENCE = dict(IMPORTANT, file="", failing_input="", summary="AC5 has no 
 MINOR_RESTATING = {"verdict": "findings", "findings": [dict(MINOR, restates="lite-review:1")]}
 EVIDENCE_RESTATING = {"verdict": "findings", "findings": [
     dict(IMPORTANT, summary="AC5 has no evidence", restates="lite-review:1")]}
+DROPPED_REVIEW = ("lite-review", {"verdict": "findings", "findings": [
+    dict(IMPORTANT, summary="AC5 has no evidence", restates="AC5")]})
+RESTATING_DROPPED = {"verdict": "findings", "findings": [
+    dict(IMPORTANT, summary="still unresolved", restates="lite-review:1")]}
 MERGE = ("merge-review", {"verdict": "findings", "findings": [IMPORTANT]})
 MERGED = Round((MERGE,), FIX, ("merge-rereview", PASS))
 CASES = [
@@ -194,6 +198,18 @@ CASES = [
     ("an evidence-worded restatement of a blocker is kept and holds the blocker open",
      [Round((REVIEWED,), FIX, ("lite-rereview", EVIDENCE_RESTATING), acceptance=ACCEPTANCE)],
      [(1, "lite-review:1", "open")]),
+    ("a restatement of a finding dropped by kind is dropped and closes the round",
+     [Round((DROPPED_REVIEW,), FIX, ("lite-rereview", RESTATING_DROPPED), acceptance=ACCEPTANCE)],
+     [(1, "lite-review:1", "dropped"), (1, "lite-rereview:1", "dropped")]),
+    ("a blank-file restatement of a finding dropped by kind is dropped, not asked again",
+     [Round((DROPPED_REVIEW,), FIX, ("lite-rereview", {"verdict": "findings", "findings": [
+         dict(RESTATING_DROPPED["findings"][0], file="", failing_input="")]}), acceptance=ACCEPTANCE)],
+     [(1, "lite-review:1", "dropped"), (1, "lite-rereview:1", "dropped")]),
+    ("a new finding of another kind than other mentioning an evidence criterion is kept",
+     [Round((REVIEWED,), FIX, ("lite-rereview", {"verdict": "findings", "findings": [
+         dict(IMPORTANT, kind="security", summary="shells out; AC5 evidence does not exercise it")]}),
+         acceptance=ACCEPTANCE)],
+     [(1, "lite-review:1", "fixed"), (1, "lite-rereview:1", "open")]),
 ]
 
 
@@ -230,6 +246,29 @@ class DispositionTest(unittest.TestCase):
         for reply in ({}, None, {"verdict": "unavailable", "findings": []}, {"verdict": "pass", "findings": "x"}):
             with self.subTest(reply=reply):
                 self.assertFalse(usable(reply))
+
+    def test_usable_with_the_earlier_findings_is_the_re_review_routes_own_rule(self):
+        dropped = dict(IMPORTANT, summary="AC5 has no evidence", restates="AC5")
+        replies = [{"verdict": "findings", "findings": [dict(BLANK_EVIDENCE, summary=summary, restates=restates,
+                                                              **extra)]}
+                   for summary, restates, extra in (
+                       ("s", "lite-review:1", {}), ("s", "lite-review:2", {}), ("s", "lite-review:3", {}),
+                       ("s", "lite-review:1 lite-review:2", {}), ("AC1 fails", "lite-review:1", {}),
+                       ("s", "lite-review:1", {"kind": "security"}), ("s", "lite-independent:1", {}),
+                       ("s", "lite-review:" + "9" * 5000, {}))]
+        earliers = ({}, {"lite-review:1": dropped}, {"lite-review:1": dropped, "lite-review:2": IMPORTANT},
+                    {"lite-review:1": dropped, "lite-review:3": dict(dropped, restates="lite-review:1")})
+        for earlier in earliers:
+            held = {"lite-review.findings": [earlier.get(f"lite-review:{i}") for i in (1, 2, 3)]}
+            for reply in replies:
+                with self.subTest(reply=reply, earlier=sorted(earlier)):
+                    results = {"lite-rereview.verdict": "findings", "lite-rereview.findings": reply["findings"],
+                               "implement.acceptance": ACCEPTANCE, **held}
+                    # the reply's one finding has no file and no failing input: usable only when dropped
+                    self.assertIs(usable(reply, ACCEPTANCE, earlier),
+                                  GRADERS["direct-settled"].grade(results) != "unusable")
+                    self.assertIs(usable(reply, ACCEPTANCE, earlier),
+                                  bool(GRADERS["direct-settled"].drops(results)))
 
     def test_the_merge_re_review_is_judged_by_the_landing_route_not_the_direct_one(self):
         landing = json.loads((PROCEDURES / "land-attempt.json").read_text("utf-8"))

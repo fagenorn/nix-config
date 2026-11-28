@@ -42,12 +42,12 @@ def tearDownModule() -> None:
 
 
 class NonCodeFindingTest(Scenario):
-    def run_with(self, rereview_finding: dict):
+    def run_with(self, rereview_finding: dict, review_findings: tuple = (FINDING,)):
         reply = dict(IMPLEMENTED["reply"], sensitive=True,
                      acceptance=[*IMPLEMENTED["reply"]["acceptance"], EVIDENCE_CRITERION])
         return self.stubbed(body=EVIDENCE_BODY, replies={
             "implement": dict(IMPLEMENTED, reply=reply),
-            "full-review": dict(CLEAN_FULL, verdict="findings", findings=[FINDING]),
+            "full-review": dict(CLEAN_FULL, verdict="findings", findings=list(review_findings)),
             "full-fix": committing("fixture/second.py", "SECOND = 2\n"),
             "full-rereview": {"verdict": "findings", "findings": [rereview_finding]}})
 
@@ -73,6 +73,28 @@ class NonCodeFindingTest(Scenario):
         self.assertTrue(held_label(run))
         block = {"v": 1, "merge": run.pulls()[0]["mergeCommit"]["oid"], "checks": [EVIDENCE_CHECK]}
         self.assertEqual(verify_block.parse_block(hold_comments(run)[0]["body"]), (block, []))
+
+    def test_a_re_review_finding_restating_the_dropped_evidence_finding_by_its_place_is_dropped_too(self):
+        dropped = {key: value for key, value in EVIDENCE_FINDING.items() if key != "restates"}
+        restating = dict(EVIDENCE_FINDING, restates="full-review:2", summary="still unresolved")
+
+        run = self.run_with(restating, (FINDING, dropped))
+
+        self.finish(run, "done")
+        self.assertIn(("full-settled", "clean"), run.transitions(self.child(run, "direct")))
+        self.assertEqual(self.settled_event(run)["dropped"],
+                         [{"finding": "full-rereview:1", "criteria": ["AC2"]}])
+
+    def test_a_new_defect_of_the_re_review_that_mentions_an_evidence_criterion_still_stops_direct_review(self):
+        defect = {"severity": "critical", "kind": "security", "file": "fixture/farewell.py:2",
+                  "failing_input": "farewell('$(rm -rf ~)')",
+                  "summary": "new defect: farewell passes its argument to a shell; AC2's evidence run does not exercise it"}
+
+        run = self.run_with(defect)
+
+        self.finish(run, "direct-review", "owner-decision")
+        self.assertEqual(run.transitions(self.child(run, "direct"))[-1], ("full-settled", "findings"))
+        self.assertNotIn("dropped", self.settled_event(run))
 
     def test_a_re_review_finding_on_a_code_criterion_still_stops_direct_review(self):
         run = self.run_with(dict(EVIDENCE_FINDING, summary="AC1 has no evidence", restates="AC1"))

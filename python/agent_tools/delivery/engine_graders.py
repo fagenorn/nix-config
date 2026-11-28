@@ -15,12 +15,15 @@ may be `None` (a group member that sent no reply reads as `None`, D6).
   the suffixes).
 - `plan-settled`: a plan review's reply, as `direct-settled` grades it, except that a `findings` verdict with no
   finding at all is unusable.
-- The drop rule: a finding naming at least one criterion of `implement.acceptance` (its id in `restates` or
-  `summary`, with no ASCII letter, digit or underscore beside it) and only criteria whose kind is in
-  `NON_CODE_KINDS` is dropped, whatever its severity. A finding whose `restates` names an earlier finding
-  (`<step>:<n>`) names no criterion, and an id declared with two kinds has no kind, so both are kept. The four
-  review graders above (the tallies and `direct-settled`) grade as if it were absent, and their `drops` lists each
-  one as `<step>:<place>`.
+- The drop rule: a finding of kind `other` (a missing kind reads as `other`) naming at least one criterion of
+  `implement.acceptance` (its id in `restates` or `summary`, with no ASCII letter, digit or underscore beside it)
+  and only criteria whose kind is in `NON_CODE_KINDS` is dropped, whatever its severity. A finding of any other
+  kind (security included) is a defect in code and is kept. A finding whose `restates` names earlier findings
+  (`<step>:<n>`) is dropped only when every one of them is in the results and is itself dropped by that rule
+  (a settled step reads the earlier reviews' findings for this); otherwise it is kept. An id declared with two
+  kinds has no kind, so its findings are kept. The four review graders above (the tallies and `direct-settled`)
+  grade as if a dropped finding were absent, and their `drops` lists, for the steps whose `.verdict` they read,
+  each one as `<step>:<place>`.
 - `verify-fixed`: a verify fix reply -> unrelated (a test and its evidence), not-done or done.
 - `verify-narrowing`: the fix review (read by the suffixes `.findings`, `.whitespace_insignificant` and
   `.whitespace_evidence`, so a second ask of the review is graded the same), the round and the fix's range -> unusable (a finding that is not minor
@@ -64,17 +67,24 @@ def _names(text: str, cid: str) -> bool:
     return False
 
 
-def _restates_a_finding(text: str) -> bool:
-    """Whether `text` holds a finding name, `<step>:<n>`: a step name (a lowercase letter first) and a place of 1 or more."""
+def _refs(text: str) -> list[tuple[str, int]]:
+    """Each finding name `<step>:<n>` in `text`: a step name (a lowercase letter in it) and a place of 1 or more (0 when too long to be one)."""
+    refs = []
     for place, ch in enumerate(text):
         if ch != ":" or text[place + 1:place + 2] not in tuple("123456789"):
             continue
-        start = place
+        start, end = place, place + 1
         while start and (text[start - 1] in "-0123456789" or "a" <= text[start - 1] <= "z"):
             start -= 1
+        while text[end:end + 1] != "" and text[end] in "0123456789":
+            end += 1
         if any("a" <= c <= "z" for c in text[start:place]):
-            return True
-    return False
+            refs.append((text[start:place], int(text[place + 1:end]) if end - place <= 10 else 0))
+    return refs
+
+
+def _restates_a_finding(text: str) -> bool:
+    return bool(_refs(text))
 
 
 def _kinds(acceptance: object) -> dict[str, object]:
@@ -89,38 +99,68 @@ def _kinds(acceptance: object) -> dict[str, object]:
 
 
 def _named(finding: Mapping[str, object], kinds: Mapping[str, object]) -> list[str]:
-    """The criteria a finding is about: those its `restates` or `summary` names, none when it restates a finding."""
-    restates = finding.get("restates")
-    if isinstance(restates, str) and _restates_a_finding(restates):
-        return []
     texts = [finding[m] for m in ("restates", "summary") if isinstance(finding.get(m), str)]
     return [cid for cid in kinds if any(_names(text, cid) for text in texts)]
 
 
-def _drops(finding: Mapping[str, object], kinds: Mapping[str, object]) -> bool:
+def _own(finding: Mapping[str, object], kinds: Mapping[str, object]) -> list[str]:
+    """The criteria a finding of kind `other`, restating none, names in its `restates` or `summary`, when all are non-code."""
+    restates = finding.get("restates")
+    if finding.get("kind", "other") != "other" or (isinstance(restates, str) and _restates_a_finding(restates)):
+        return []
     named = _named(finding, kinds)
-    return bool(named) and all(kinds[cid] in NON_CODE_KINDS for cid in named)
+    return named if all(kinds[cid] in NON_CODE_KINDS for cid in named) else []
+
+
+def _about(finding: Mapping[str, object], results: Mapping[str, object], kinds: Mapping[str, object]) -> list[str]:
+    """The criteria a finding is dropped for, none when it is kept: its own (`_own`), or, when it restates findings
+    (kind `other` only, naming no code criterion itself), those of each finding it restates that `results` holds
+    and `_own` drops."""
+    restates = finding.get("restates")
+    refs = _refs(restates) if isinstance(restates, str) else []
+    if not refs:
+        return _own(finding, kinds)
+    if any(kinds[cid] not in NON_CODE_KINDS for cid in _named(finding, kinds)):
+        return []
+    found: list[str] = []
+    for step, place in refs:
+        earlier = results.get(f"{step}.findings")
+        original = earlier[place - 1] if isinstance(earlier, list) and 1 <= place <= len(earlier) else None
+        about = _own(original, kinds) if isinstance(original, Mapping) else []
+        if finding.get("kind", "other") != "other" or not about:
+            return []
+        found += [cid for cid in about if cid not in found]
+    return found
 
 
 def dropped(results: Mapping[str, object]) -> tuple[dict, ...]:
-    """Each finding naming only criteria of other kinds than code, as `<step>:<place>` and the criteria named."""
+    """Each finding of a step with a `.verdict` in `results` that is dropped, as `<step>:<place>` and its criteria;
+    the findings of a step without one (a settled step reads the earlier reviews that way) only resolve `restates`."""
     kinds = _kinds(results.get("implement.acceptance"))
     found = []
     for path, value in results.items():
-        if not path.endswith(".findings") or not isinstance(value, list):
+        step = path[:-len(".findings")]
+        if not path.endswith(".findings") or not isinstance(value, list) or f"{step}.verdict" not in results:
             continue
         for place, finding in enumerate(value, 1):
-            if isinstance(finding, Mapping) and _drops(finding, kinds):
-                found.append({"finding": f"{path[:-len('.findings')]}:{place}", "criteria": _named(finding, kinds)})
+            about = _about(finding, results, kinds) if isinstance(finding, Mapping) else []
+            if about:
+                found.append({"finding": f"{step}:{place}", "criteria": about})
     return tuple(found)
 
 
 def _kept(results: Mapping[str, object]) -> dict[str, object]:
     """A copy of `results` whose `.findings` lists omit the findings `dropped` lists."""
     kinds = _kinds(results.get("implement.acceptance"))
-    return {path: [f for f in value if not (isinstance(f, Mapping) and _drops(f, kinds))]
+    return {path: [f for f in value if not (isinstance(f, Mapping) and _about(f, results, kinds))]
             if path.endswith(".findings") and isinstance(value, list) else value
             for path, value in results.items()}
+
+
+def _own_findings(results: Mapping[str, object]) -> object:
+    """The findings of the step whose `.verdict` the results hold (the first), `None` when none."""
+    path = next((p for p in results if p.endswith(".verdict")), None)
+    return None if path is None else results.get(f"{path[:-len('.verdict')]}.findings")
 
 
 def _toy_tally(results: Mapping[str, object]) -> str:
@@ -223,7 +263,7 @@ def _direct_fixed(results: Mapping[str, object]) -> str:
 
 def _direct_settled(results: Mapping[str, object]) -> str:
     results = _kept(results)
-    verdict, findings = _suffixed(results, ".verdict"), _suffixed(results, ".findings")
+    verdict, findings = _suffixed(results, ".verdict"), _own_findings(results)
     if _absent(verdict, findings):
         return "findings"
     if _unusable(findings):
@@ -233,7 +273,7 @@ def _direct_settled(results: Mapping[str, object]) -> str:
 
 def _plan_settled(results: Mapping[str, object]) -> str:
     """`direct-settled`, except that a `findings` verdict naming no finding at all is `unusable`, never `clean`."""
-    if _suffixed(results, ".verdict") == "findings" and _suffixed(results, ".findings") == []:
+    if _suffixed(results, ".verdict") == "findings" and _own_findings(results) == []:
         return "unusable"
     return _direct_settled(results)
 

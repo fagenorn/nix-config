@@ -75,13 +75,13 @@
      "in": ["full-fix.start_head", "full-fix.commit", "full-fix.notes", "implement.acceptance", "full-review.findings", "full-review.acceptance", "full-independent.findings", "full-fix.declines"],
      "on": {"pass": "full-settled", "findings": "full-settled", "no-reply": "direct-review", "out-of-bounds": "direct-review", "exhausted": "direct-review"}},
     {"id": "lite-settled", "stage": "final review", "kind": "decide", "holds": "run", "grader": "direct-settled", "max_visits": 2,
-     "in": ["lite-rereview.verdict", "lite-rereview.findings", "implement.acceptance"],
+     "in": ["lite-rereview.verdict", "lite-rereview.findings", "implement.acceptance", "lite-review.findings", "lite-independent.findings"],
      "on": {"clean": "done", "findings": "direct-review", "unusable": "lite-rereview", "exhausted": "direct-review"}},
     {"id": "escalated-settled", "stage": "final review", "kind": "decide", "holds": "run", "grader": "direct-settled", "max_visits": 2,
-     "in": ["escalated-rereview.verdict", "escalated-rereview.findings", "implement.acceptance"],
+     "in": ["escalated-rereview.verdict", "escalated-rereview.findings", "implement.acceptance", "escalated.findings", "lite-independent.findings"],
      "on": {"clean": "done", "findings": "direct-review", "unusable": "escalated-rereview", "exhausted": "direct-review"}},
     {"id": "full-settled", "stage": "final review", "kind": "decide", "holds": "run", "grader": "direct-settled", "max_visits": 2,
-     "in": ["full-rereview.verdict", "full-rereview.findings", "implement.acceptance"],
+     "in": ["full-rereview.verdict", "full-rereview.findings", "implement.acceptance", "full-review.findings", "full-independent.findings"],
      "on": {"clean": "done", "findings": "direct-review", "unusable": "full-rereview", "exhausted": "direct-review"}}
   ]
 }

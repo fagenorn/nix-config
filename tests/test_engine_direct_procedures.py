@@ -216,6 +216,17 @@ class DirectProcedureTest(unittest.TestCase):
             with self.subTest(step=one["id"]):
                 self.assertIn("implement.acceptance", one["in"])
 
+    def test_every_settled_step_reads_the_earlier_findings_its_re_review_may_restate(self):
+        direct = load(PROCEDURES, "direct")
+        for route in ("lite", "escalated", "full"):
+            settled, rereview = step(direct, f"{route}-settled"), step(direct, f"{route}-rereview")
+            restatable = [p for p in rereview["in"] if p.endswith(".findings")]
+            with self.subTest(route=route):
+                self.assertEqual(len(restatable), 2)
+                for path in restatable:
+                    self.assertIn(path, settled["in"])
+                self.assertEqual(settled["in"][0], f"{route}-rereview.verdict")
+
     def test_a_blocked_group_reaches_its_tally(self):
         direct = load(PROCEDURES, "direct")
         for route in ("lite", "full"):

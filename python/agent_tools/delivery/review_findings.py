@@ -25,7 +25,8 @@ follow-up issue from a finding writes the finding's rule and kind into the issue
 body and passes its name in that round's `filed`.
 
 `usable` copies the rule of the direct re-review route (`engine_graders`), including its drop of a
-finding naming only non-code criteria of `acceptance`, rather than importing it, so this module
+finding of kind `other` naming only non-code criteria of `acceptance` (or restating earlier findings, held by
+name, that are so dropped), rather than importing it, so this module
 imports no engine module; a test holds the copy to the grader. The landing route's re-review (`LANDING_REREVIEWS`) takes any `pass` or `findings`
 verdict and stops on `findings`, so it is judged by that verdict, not by `usable`. A minor
 finding, or one dropped by kind, that a re-review restates as a blocker keeps the restatement as its own finding. Nothing here reads a file, starts a process or reads a clock, and an
@@ -96,17 +97,24 @@ def _names(text: str, cid: str) -> bool:
     return False
 
 
-def _restates_a_finding(text: str) -> bool:
-    """Whether `text` holds a finding name, `<step>:<n>`: a step name (a lowercase letter first) and a place of 1 or more."""
+def _refs(text: str) -> list[str]:
+    """Each finding name `<step>:<n>` in `text`: a step name (a lowercase letter in it) and a place of 1 or more."""
+    refs = []
     for place, ch in enumerate(text):
         if ch != ":" or text[place + 1:place + 2] not in tuple("123456789"):
             continue
-        start = place
+        start, end = place, place + 1
         while start and (text[start - 1] in "-0123456789" or "a" <= text[start - 1] <= "z"):
             start -= 1
+        while text[end:end + 1] != "" and text[end] in "0123456789":
+            end += 1
         if any("a" <= c <= "z" for c in text[start:place]):
-            return True
-    return False
+            refs.append(text[start:end])
+    return refs
+
+
+def _restates_a_finding(text: str) -> bool:
+    return bool(_refs(text))
 
 
 def _kinds(acceptance: object) -> dict[str, object]:
@@ -119,24 +127,44 @@ def _kinds(acceptance: object) -> dict[str, object]:
     return kinds
 
 
-def _drops(finding: Mapping[str, object], kinds: Mapping[str, object]) -> bool:
-    restates = finding.get("restates")
-    if isinstance(restates, str) and _restates_a_finding(restates):
-        return False
+def _criteria(finding: Mapping[str, object], kinds: Mapping[str, object]) -> list[str]:
     texts = [finding[m] for m in ("restates", "summary") if isinstance(finding.get(m), str)]
-    named = [cid for cid in kinds if any(_names(text, cid) for text in texts)]
+    return [cid for cid in kinds if any(_names(text, cid) for text in texts)]
+
+
+def _own(finding: Mapping[str, object], kinds: Mapping[str, object]) -> bool:
+    """Whether a finding of kind `other`, restating none, names only non-code criteria and at least one."""
+    restates = finding.get("restates")
+    if finding.get("kind", "other") != "other" or (isinstance(restates, str) and _restates_a_finding(restates)):
+        return False
+    named = _criteria(finding, kinds)
     return bool(named) and all(kinds[cid] in NON_CODE_KINDS for cid in named)
 
 
-def usable(rereview: object, acceptance: object = None) -> bool:
-    """Whether the re-review route would accept this reply instead of discarding it and asking again."""
+def _drops(finding: Mapping[str, object], kinds: Mapping[str, object],
+           earlier: Mapping[str, Mapping[str, object]]) -> bool:
+    """The grader's drop: the finding's own (`_own`), or, for a kind `other` finding restating findings, every one
+    of them held in `earlier` (name -> finding) and dropped by `_own`."""
+    restates = finding.get("restates")
+    refs = _refs(restates) if isinstance(restates, str) else []
+    if not refs:
+        return _own(finding, kinds)
+    return (finding.get("kind", "other") == "other"
+            and all(kinds[cid] in NON_CODE_KINDS for cid in _criteria(finding, kinds))
+            and all(name in earlier and _own(earlier[name], kinds) for name in refs))
+
+
+def usable(rereview: object, acceptance: object = None,
+           earlier: Mapping[str, Mapping[str, object]] | None = None) -> bool:
+    """Whether the re-review route would accept this reply instead of discarding it and asking again; `earlier`
+    holds the findings it may restate, by name."""
     if not isinstance(rereview, Mapping) or rereview.get("verdict") not in ("pass", "findings"):
         return False
     findings = rereview.get("findings")
     if not isinstance(findings, list):
         return False
-    kinds = _kinds(acceptance)
-    return not any(isinstance(f, Mapping) and not _drops(f, kinds) and not _minor(f)
+    kinds, held = _kinds(acceptance), earlier or {}
+    return not any(isinstance(f, Mapping) and not _drops(f, kinds, held) and not _minor(f)
                    and _blank(f.get("file")) and _blank(f.get("failing_input")) for f in findings)
 
 
@@ -166,32 +194,32 @@ def dispositions(rounds: Sequence[Round]) -> tuple[Disposed, ...]:
     for place, one in enumerate(rounds, 1):
         reviewed = [item for step, result in one.reviews for item in _named(step, result)]
         declined = _declined(one.fix)
+        originals = dict(reviewed)
         closes = one.rereview is not None and (
             _answered(one.rereview[1]) if one.rereview[0] in LANDING_REREVIEWS
-            else usable(one.rereview[1], one.acceptance))
+            else usable(one.rereview[1], one.acceptance, originals))
         kinds = _kinds(one.acceptance)
         again = _named(*one.rereview) if closes else []
         landing = one.rereview is not None and one.rereview[0] in LANDING_REREVIEWS
         # A direct re-review settles clean past a finding it drops, so that finding restates, and holds, nothing.
-        settled = [(n, f) for n, f in again if landing or not (_minor(f) or _drops(f, kinds))]
+        settled = [(n, f) for n, f in again if landing or not (_minor(f) or _drops(f, kinds, originals))]
         restated = {f["restates"] for _, f in settled if isinstance(f.get("restates"), str)}
         for name, finding in reviewed:
             if name in one.filed:
                 value = "filed"
-            elif _minor(finding) or _drops(finding, kinds):
+            elif _minor(finding) or _drops(finding, kinds, originals):
                 value = "dropped"
             elif closes and name not in restated:
                 value = "declined" if name in declined else "fixed"
             else:
                 value = "open"
             disposed.append(Disposed(place, name, finding, value))
-        originals = dict(reviewed)
         for name, finding in again:
             restates = finding.get("restates")
             original = originals.get(restates) if isinstance(restates, str) else None
-            dropping = _minor(finding) or _drops(finding, kinds)
+            dropping = _minor(finding) or _drops(finding, kinds, originals)
             represented = original is not None and (
-                _minor(finding) or not (_minor(original) or _drops(original, kinds)))
+                _minor(finding) or not (_minor(original) or _drops(original, kinds, originals)))
             if represented and (landing or not dropping):
                 continue
             value = "filed" if name in one.filed else "dropped" if dropping else "open"
