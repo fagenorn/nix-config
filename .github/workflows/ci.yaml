@@ -102,12 +102,24 @@ jobs:
           primary-key: nix-dotnet-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'lib/agent-tools.nix', 'lib/agent-tools-dotnet.nix', 'dotnet/**', 'docs/guides/architecture.md') }}
           restore-prefixes-first-match: nix-dotnet-${{ runner.os }}-
           save: ${{ github.event_name == 'push' }}
+          gc-max-store-size-linux: 4G
       - name: Build the .NET package
         run: nix build --no-link '.#packages.x86_64-linux.agent-tools-dotnet'
       - name: Run the .NET tests
         run: nix build --no-link --print-build-logs '.#checks.x86_64-linux.agent-tools-dotnet-tests'
+      # Each save starts from the entry it restored, so the cache step collects the store down to
+      # 4G first; these roots keep the outputs and every input of the builds through that collection.
+      - name: Root the build outputs and inputs
+        run: |
+          mkdir -p "$RUNNER_TEMP/gcroots"
+          nix build --out-link "$RUNNER_TEMP/gcroots/package" '.#packages.x86_64-linux.agent-tools-dotnet'
+          nix build --out-link "$RUNNER_TEMP/gcroots/package-inputs" '.#packages.x86_64-linux.agent-tools-dotnet.inputDerivation'
+          nix build --out-link "$RUNNER_TEMP/gcroots/tests" '.#checks.x86_64-linux.agent-tools-dotnet-tests'
+          nix build --out-link "$RUNNER_TEMP/gcroots/tests-inputs" '.#checks.x86_64-linux.agent-tools-dotnet-tests.inputDerivation'
+      # The first run proves the tree is formatted, so the exit 1 after planting can only be Planted.cs.
       - name: Prove the formatter fails an unformatted file
         run: |
+          PYTHONPATH=python python3 -m agent_tools.delivery.dotnet_format_lint --root "$GITHUB_WORKSPACE"
           printf 'namespace AgentTools.Hosts;\n\npublic static class Planted\n{\npublic static int Value => 1;\n}\n' > dotnet/Hosts/Planted.cs
           code=0
           PYTHONPATH=python python3 -m agent_tools.delivery.dotnet_format_lint --root "$GITHUB_WORKSPACE" 2> "$RUNNER_TEMP/format.err" || code=$?

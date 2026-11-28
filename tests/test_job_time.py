@@ -276,6 +276,61 @@ class ObservedTest(unittest.TestCase):
         self.assertEqual((code, line["state"]), (1, "not_met"))
 
 
+class UnreadableInputTest(unittest.TestCase):
+    """A payload the reader cannot trust is exit 2, never a dropped run or a KeyError."""
+
+    def bad_jobs(self, run_id=101):
+        late = make_job(200, run_id=run_id)
+        yield "unreadable completed_at", dict(late, completed_at="not a time")
+        yield "missing started_at", {k: v for k, v in late.items() if k != "started_at"}
+        yield "reversed timestamps", dict(late, started_at=late["completed_at"],
+                                          completed_at=late["started_at"])
+
+    def test_a_green_job_with_unreadable_times_is_exit_2_not_a_dropped_run(self):
+        for label, job in self.bad_jobs():
+            with self.subTest(label=label):
+                world = World({run_id: 300 if run_id == 101 else 200 for run_id in range(100, 112)},
+                              jobs={101: job})
+                code, line, err, _ = observed(world)
+                self.assertEqual((code, line), (2, None))
+                self.assertTrue(err.startswith("job-time: "), err)
+
+    def test_file_reads_a_green_job_with_unreadable_times_as_exit_2(self):
+        for label, job in self.bad_jobs(111):
+            with self.subTest(label=label):
+                runs = [make_run(run_id) for run_id in range(101, 112)]
+                gets = {f"{LISTING}&status=completed&per_page=50": {"workflow_runs": runs}}
+                for run_id in range(101, 112):
+                    gets[JOBS.format(run_id)] = {"jobs": [job if run_id == 111 else
+                                                          make_job(200, run_id=run_id)]}
+                code, line, err, _ = call(["file", "--repo", "o/r", "--branch", "main"], gets)
+                self.assertEqual((code, line), (2, None))
+                self.assertTrue(err.startswith("job-time: "), err)
+
+    def test_a_run_without_a_conclusion_key_is_exit_2_but_a_null_conclusion_is_read(self):
+        runs = [make_run(run_id) for run_id in range(101, 112)]
+        del runs[0]["conclusion"]
+        gets = {f"{LISTING}&status=completed&per_page=50": {"workflow_runs": runs}}
+        code, line, err, _ = call(["file", "--repo", "o/r", "--branch", "main"], gets)
+        self.assertEqual((code, line), (2, None))
+        self.assertTrue(err.startswith("job-time: "), err)
+
+        world = World({run_id: 200 for run_id in range(100, 112)})
+        world_runs = world.runs()
+        del world_runs[5]["conclusion"]
+        pages = {f"{LISTING}&created=>={stamp(START)}&per_page=100": [{"workflow_runs": world_runs}]}
+        code, line, err, _ = call(
+            ["observed", "--repo", "o/r", "--branch", "main", "--merge", MERGE, "--runs", "10"],
+            world.gets(), pages)
+        self.assertEqual((code, line), (2, None))
+        self.assertTrue(err.startswith("job-time: "), err)
+
+        pending = [make_run(run_id, conclusion=None, status="in_progress") for run_id in range(101, 103)]
+        gets = {f"{LISTING}&status=completed&per_page=50": {"workflow_runs": pending}}
+        code, line, _, _ = call(["file", "--repo", "o/r", "--branch", "main"], gets)
+        self.assertEqual((code, line["action"]), (0, "too_few"))
+
+
 class ArgumentTest(unittest.TestCase):
     def test_bad_arguments_exit_2_with_nothing_on_stdout(self):
         base = ["observed", "--repo", "o/r", "--branch", "main", "--merge", MERGE, "--runs", "10"]

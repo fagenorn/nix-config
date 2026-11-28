@@ -626,6 +626,8 @@ BASE_PLATFORM_READ = "\n".join([
 CHECKOUT, INSTALL = "actions/checkout@v4", "DeterminateSystems/nix-installer-action@v4"
 QUICK_INSTALL, NIX_CACHE = "nixbuild/nix-quick-install-action@v36", "nix-community/cache-nix-action@v7"
 DOTNET_FORMAT_PROOF = "\n".join([
+    "PYTHONPATH=python python3 -m agent_tools.delivery.dotnet_format_lint "
+    '--root "$GITHUB_WORKSPACE"',
     "printf 'namespace AgentTools.Hosts;\\n\\npublic static class Planted\\n{\\n"
     "public static int Value => 1;\\n}\\n' > dotnet/Hosts/Planted.cs",
     "code=0",
@@ -634,6 +636,17 @@ DOTNET_FORMAT_PROOF = "\n".join([
     'cat "$RUNNER_TEMP/format.err"',
     'test "$code" = 1',
     "grep -qx 'dotnet-format-lint: dotnet format would change files' \"$RUNNER_TEMP/format.err\"",
+])
+DOTNET_GC_ROOTS = "\n".join([
+    'mkdir -p "$RUNNER_TEMP/gcroots"',
+    "nix build --out-link \"$RUNNER_TEMP/gcroots/package\" "
+    "'.#packages.x86_64-linux.agent-tools-dotnet'",
+    "nix build --out-link \"$RUNNER_TEMP/gcroots/package-inputs\" "
+    "'.#packages.x86_64-linux.agent-tools-dotnet.inputDerivation'",
+    "nix build --out-link \"$RUNNER_TEMP/gcroots/tests\" "
+    "'.#checks.x86_64-linux.agent-tools-dotnet-tests'",
+    "nix build --out-link \"$RUNNER_TEMP/gcroots/tests-inputs\" "
+    "'.#checks.x86_64-linux.agent-tools-dotnet-tests.inputDerivation'",
 ])
 SETUP = ("not-lint", "runner setup")
 
@@ -652,6 +665,8 @@ CI_STEP_CLASSES = {
     ("ci.yaml", "dotnet-solution",
      "nix build --no-link --print-build-logs '.#checks.x86_64-linux.agent-tools-dotnet-tests'"):
         ("not-lint", "runs the .NET tests"),
+    ("ci.yaml", "dotnet-solution", DOTNET_GC_ROOTS):
+        ("not-lint", "roots the .NET builds' outputs and inputs through the Nix store collection"),
     ("ci.yaml", "dotnet-solution", DOTNET_FORMAT_PROOF):
         ("not-lint", "proves the dotnet-format lint member fails a planted unformatted file"),
     ("ci.yaml", "agent-workflow-tests-shard", CHECKOUT): SETUP,

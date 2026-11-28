@@ -41,7 +41,10 @@ median under `BUDGET_MS` is `met` and anything else `not_met`. It prints
 
 Both subcommands exit 2 with `job-time: <reason>` on stderr and nothing on stdout for a
 `Refusal`, a `ForgeError`, a `--repo` outside `<owner>/<name>`, a `--merge` that is not 40
-lowercase hex digits or a `--runs` below 1. The workflow token needs `actions: read` for the
+lowercase hex digits or a `--runs` below 1. A payload it cannot trust is a `ForgeError` too: a
+run with no `conclusion` key (an explicit null is read) and a green job whose times cannot be
+read or end before they start, since dropping such a job would let a later run take its place.
+The workflow token needs `actions: read` for the
 run and job reads, and `issues: write` to file.
 """
 
@@ -82,13 +85,19 @@ def instant(value: object) -> datetime | None:
 
 
 def wall_ms(job: dict) -> int | None:
-    """The wall time of a green `JOB` job in milliseconds, `None` for any other job."""
+    """The wall time of a green `JOB` job in milliseconds, `None` for any other job.
+
+    A green job whose times cannot be read, or end before they start, is a payload error:
+    dropping it would let the next green run take its place in the window.
+    """
     if job.get("name") != JOB or job.get("status") != "completed" \
             or job.get("conclusion") != "success":
         return None
     started, ended = instant(job.get("started_at")), instant(job.get("completed_at"))
     if started is None or ended is None:
-        return None
+        raise invalid("a green job has an unreadable started_at or completed_at")
+    if ended < started:
+        raise invalid("a green job completed before it started")
     return int(round((ended - started).total_seconds() * 1000))
 
 
@@ -184,7 +193,8 @@ def listed(listing: object, with_sha: bool = False) -> list[dict]:
     if not isinstance(found, list) or not all(
             isinstance(item, dict) and isinstance(item.get("id"), int)
             and not isinstance(item.get("id"), bool) and isinstance(item.get("created_at"), str)
-            and (item.get("conclusion") is None or isinstance(item.get("conclusion"), str))
+            and "conclusion" in item
+            and (item["conclusion"] is None or isinstance(item["conclusion"], str))
             and (not with_sha or isinstance(item.get("head_sha"), str))
             for item in found):
         raise invalid("the run listing is not a list of runs with an id, a created_at and a conclusion")
