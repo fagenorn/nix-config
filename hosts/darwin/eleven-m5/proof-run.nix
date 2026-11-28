@@ -29,6 +29,13 @@ let
   ];
 in
 {
+  # The console bumps the same fixture this daemon proves on to each revision it proves.
+  home-manager.users.${username}.agentConsole.lockBump = {
+    project = "fagenorn/engine-fixture";
+    branch = "main";
+    platformRepo = "fagenorn/nix-config";
+  };
+
   # Proves the delivery engine on the fixture project once a day at 06:00, as the owner: it
   # delivers one fixed issue with the real model from the tip of the platform repository's main
   # branch, unless that revision is already proven. Only the calendar entry starts it, so a
