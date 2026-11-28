@@ -135,6 +135,11 @@ class GraderTest(unittest.TestCase):
         ("direct-settled", settled("findings", [MINOR]), "clean"),
         ("direct-settled", settled("findings", [NAMED]), "findings"),
         ("direct-settled", settled("findings", [UNNAMED]), "unusable"),
+        ("plan-settled", settled("findings", []), "unusable"),
+        ("plan-settled", settled("findings", [NAMED]), "findings"),
+        ("plan-settled", settled("findings", [UNNAMED]), "unusable"),
+        ("plan-settled", settled("pass", []), "clean"),
+        ("plan-settled", settled("findings", [MINOR]), "clean"),
         ("lane-rule", LANE_RESULTS, "direct"),
         ("lane-rule", dict(LANE_RESULTS, **{"issue.marked": True}), "standard"),
     ]

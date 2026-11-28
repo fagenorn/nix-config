@@ -283,7 +283,7 @@ class StubbedRun:
         declaration.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO_ROOT / "home/common/agent-skills/host-declaration.json", declaration)
         (home / ".claude/agents").mkdir(parents=True, exist_ok=True)
-        for name in ("implementer", "reviewer", "reviewer-lite"):
+        for name in ("planner", "implementer", "reviewer", "reviewer-lite"):
             shutil.copy(ROLES / f"{name}.md", home / ".claude/agents" / f"{name}.md")
 
     def deliver(self, procedures: Path | None = None, *,
