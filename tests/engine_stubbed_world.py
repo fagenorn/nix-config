@@ -40,6 +40,8 @@ run's worktree and bare origin when they name none. `extra_files` (relative path
 `FixtureProject`: each file is committed on `main` after the adoption, outside every branch diff.
 A resumed session that answered replays its recorded answer and runs no effect again. `deliver_until(cut)` starts
 `engine deliver` and kills its process group once `cut()` holds; an entry's `sleep` keeps a session open until then.
+`deliver` and `deliver_until` take `plan=` and pass `--plan <plan>`; the stand-in's `<step>#<k>` entries, `reads` and
+`result` effects are described in its docstring.
 `answer(step, entry)` sets `replies[step]` to `entry` with its effects filled the same way and rewrites
 the scenario file (`self.scenario`) the stub reads, so the next `deliver()` answers `step` with `entry`.
 
@@ -286,17 +288,20 @@ class StubbedRun:
         for name in ("planner", "implementer", "reviewer", "reviewer-lite"):
             shutil.copy(ROLES / f"{name}.md", home / ".claude/agents" / f"{name}.md")
 
-    def deliver(self, procedures: Path | None = None, *,
+    def deliver(self, procedures: Path | None = None, *, plan: str | None = None,
                 validator_unimportable: bool = False) -> subprocess.CompletedProcess:
-        """`engine deliver <issue>` in the fixture checkout, with the procedures in `procedures` when given.
+        """`engine deliver <issue>` in the fixture checkout, with the procedures in `procedures` when given
+        and `--plan <plan>` when `plan` is.
 
         `validator_unimportable` runs the engine in a process that cannot import the check or the cap checker.
         """
-        return subprocess.run(self._engine_argv(procedures, validator_unimportable),
+        return subprocess.run(self._engine_argv(procedures, validator_unimportable, plan=plan),
                               cwd=self.fixture.root, env=self.env, capture_output=True, text=True, timeout=600)
 
-    def _engine_argv(self, procedures: Path | None, validator_unimportable: bool = False) -> list[str]:
+    def _engine_argv(self, procedures: Path | None, validator_unimportable: bool = False, *,
+                     plan: str | None = None) -> list[str]:
         extra = ["--procedures", str(procedures)] if procedures is not None else []
+        extra += ["--plan", plan] if plan is not None else []
         entry = ["-c", VALIDATOR_UNIMPORTABLE_ENGINE] if validator_unimportable else ["-m", "agent_tools.delivery.engine"]
         return [sys.executable, *entry, "deliver", str(self.issue), *extra]
 
@@ -311,13 +316,13 @@ class StubbedRun:
         (it has then logged that launch): the point from which a kill leaves the session open."""
         return (Path(f"{self.log}.slept") / step).exists()
 
-    def deliver_until(self, cut: Callable[[], bool], procedures: Path | None = None, wait: float = 120,
-                      poll: float = 0.05) -> None:
+    def deliver_until(self, cut: Callable[[], bool], procedures: Path | None = None, *, plan: str | None = None,
+                      wait: float = 120, poll: float = 0.05) -> None:
         """Start `engine deliver`, kill its process group with SIGKILL once `cut()` holds, and wait for it to end.
 
         The processes the run's steps started are left to the next `deliver()`, which ends them as a continue does;
         the test's cleanup kills any that are still alive."""
-        engine = subprocess.Popen(self._engine_argv(procedures), cwd=self.fixture.root, env=self.env,
+        engine = subprocess.Popen(self._engine_argv(procedures, plan=plan), cwd=self.fixture.root, env=self.env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         self.test.addCleanup(self._kill_started)
         deadline = time.monotonic() + wait

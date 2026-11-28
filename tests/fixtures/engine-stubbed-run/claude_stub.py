@@ -26,7 +26,12 @@ step id (never the visit), writes `{"account": "stub"}` to the file named by
 answer and `session_id` by the argv word after `--session-id` (or `--resume`), then exits 0. A
 step with no entry prints a result with no `structured_output`. A launch with a session id
 records its answer in `<log>.sessions/<session>.json` before printing; a `--resume` whose record
-exists replays that answer and runs no effect again.
+exists replays that answer and runs no effect again. The entry `<step>#<k>` is taken before `<step>.<visit>`
+and `<step>` by the launch whose session id is the k-th distinct one launched with that step in `<log>` (a
+`--resume` takes the k of the session it resumes), and that name keys the sleep marker. An entry of the
+`{"reply": ...}` form may carry `"reads": [<path>, ...]`, which writes `$HOME/.claude/projects/stub/<session>.jsonl`
+with one assistant `Read` tool_use line per path, and `"result": "<name>"`, which after every other effect prints
+`tests/fixtures/engine-session/result-<name>.json` with its `session_id` replaced, in place of a normal result.
 """
 
 import json
@@ -133,7 +138,32 @@ def switch_effect(effect: dict) -> None:
     git_in(effect["worktree"], "checkout", "-q", "-b", effect["branch"])
 
 
-def run_entry(result: dict, scenario: dict, name: str | None) -> None:
+def session_number(log: str, key: str | None, session: str | None) -> int | None:
+    """The k of `session` among the distinct session ids launched with `key` in `log`, counting from 1."""
+    if session is None:
+        return None
+    seen: list[str] = []
+    for line in Path(log).read_text(encoding="utf-8").splitlines():
+        launch = json.loads(line)
+        other = word_after(launch["argv"], "--session-id", "--resume")
+        if launch["key"] == key and other is not None and other not in seen:
+            seen.append(other)
+    return seen.index(session) + 1 if session in seen else None
+
+
+def reads_effect(paths: list[str], session: str | None) -> None:
+    """Write `$HOME/.claude/projects/stub/<session>.jsonl`, one assistant `Read` tool_use line per path."""
+    if session is None:
+        return
+    target = Path(os.environ["HOME"]) / ".claude/projects/stub" / f"{session}.jsonl"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines = [{"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": f"toolu_{i}", "name": "Read", "input": {"file_path": path}}]}}
+        for i, path in enumerate(paths)]
+    target.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+
+
+def run_entry(result: dict, scenario: dict, name: str | None, session: str | None = None) -> None:
     """Run the scenario entry's effects and set the result's answer."""
     if name is None:
         result.pop("structured_output", None)
@@ -153,6 +183,13 @@ def run_entry(result: dict, scenario: dict, name: str | None) -> None:
                 leave_effect(entry["leave"])
             if "switch" in entry:
                 switch_effect(entry["switch"])
+            if "reads" in entry:
+                reads_effect(entry["reads"], session)
+            if "result" in entry:  # the bound result replaces the normal one, after every other effect
+                bound = json.loads((NORMAL.parent / f"result-{entry['result']}.json").read_text(encoding="utf-8"))
+                result.clear()
+                result.update(bound, **({"session_id": session} if session is not None else {}))
+                return
             if entry.get("miss") is True:  # every effect ran, and the session gave no structured answer
                 result.pop("structured_output", None)
                 return
@@ -165,15 +202,16 @@ def main(argv: list[str]) -> int:
     log, words = argv[1], argv[2:]
     prompt = sys.stdin.read()
     step, visit = step_and_visit(words)
-    name = next((n for n in (f"{step}.{visit}", step) if n in scenario), None)
+    session = word_after(words, "--session-id", "--resume")
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"argv": words, "cwd": os.getcwd(), "key": step, "prompt": prompt},
                                 sort_keys=True) + "\n")
+    number = session_number(log, step, session)
+    name = next((n for n in (f"{step}#{number}", f"{step}.{visit}", step) if n in scenario), None)
     answer = os.environ.get("CLAUDE_ACCOUNT_ANSWER")
     if answer:
         Path(answer).write_text(json.dumps({"account": "stub"}), encoding="utf-8")
     result = json.loads(NORMAL.read_text(encoding="utf-8"))
-    session = word_after(words, "--session-id", "--resume")
     record = Path(log + ".sessions") / f"{session}.json" if session is not None else None
     if session is not None:
         result["session_id"] = session
@@ -187,7 +225,7 @@ def main(argv: list[str]) -> int:
             slept.parent.mkdir(parents=True, exist_ok=True)
             slept.touch()
             time.sleep(scenario[name].get("sleep", 0))
-        run_entry(result, scenario, name)
+        run_entry(result, scenario, name, session)
         if record is not None and "structured_output" in result:
             record.parent.mkdir(parents=True, exist_ok=True)
             scratch = record.with_suffix(".json.tmp")

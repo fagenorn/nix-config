@@ -390,6 +390,57 @@ class StubTest(unittest.TestCase):
         self.assertEqual(sleepers[0].wait(timeout=30), -signal.SIGKILL)
         self.assertIsNone(sleepers[1].poll())
 
+    def step_launch(self, run: StubbedRun, scenario: dict, session: str, *, resume: bool = False,
+                    env: dict | None = None) -> dict:
+        """One launch of the stand-in for step `build` (visit 1) under `session`; returns its stdout document."""
+        path = run.tmp / "stub-scenario.json"
+        path.write_text(json.dumps(scenario), encoding="utf-8")
+        done = subprocess.run(
+            [sys.executable, str(STUB), str(path), str(run.log), "--resume" if resume else "--session-id", session,
+             "--append-system-prompt-file", str(run.tmp / "build.1.system.md")],
+            input="prompt", env=env or run.env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_the_kth_session_of_a_step_takes_its_numbered_entry(self):
+        run = StubbedRun(self)
+        scenario = {"build": {"status": "R0"}, "build#2": {"status": "R2"}}
+        first = self.step_launch(run, scenario, "s1")
+        second = self.step_launch(run, scenario, "s2")
+        self.assertEqual((first["structured_output"], second["structured_output"]),
+                         ({"status": "R0"}, {"status": "R2"}))
+
+    def test_a_resumed_session_keeps_its_numbered_entry_and_sleep_marker(self):
+        run = StubbedRun(self)
+        scenario = {"build#2": {"reply": {"status": "R2"}, "sleep": 0}}
+        self.step_launch(run, scenario, "s1")
+        self.step_launch(run, scenario, "s2")
+        (Path(f"{run.log}.sessions") / "s2.json").unlink()
+        resumed = self.step_launch(run, scenario, "s2", resume=True)
+        self.assertEqual(resumed["structured_output"], {"status": "R2"})
+        self.assertTrue(run.asleep("build#2"))
+
+    def test_a_reads_effect_writes_a_transcript_of_read_calls(self):
+        run = StubbedRun(self)
+        home = run.tmp / "reads-home"
+        home.mkdir()
+        self.step_launch(run, {"build": {"reply": {"status": "R"}, "reads": ["/w/a.py", "/w/b.py"]}}, "s9",
+                         env={**run.env, "HOME": str(home)})
+        lines = (home / ".claude/projects/stub/s9.jsonl").read_text(encoding="utf-8").splitlines()
+        items = [json.loads(line)["message"]["content"][0] for line in lines]
+        self.assertEqual([(item["type"], item["name"], item["input"]["file_path"]) for item in items],
+                         [("tool_use", "Read", "/w/a.py"), ("tool_use", "Read", "/w/b.py")])
+
+    def test_a_result_effect_prints_the_bound_fixture(self):
+        run = StubbedRun(self)
+        printed = self.step_launch(run, {"build": {"reply": {"status": "R"}, "result": "max-budget"}}, "s7")
+        expected = json.loads((STUB.parents[1] / "engine-session/result-max-budget.json").read_text("utf-8"))
+        self.assertEqual(printed, {**expected, "session_id": "s7"})
+
+    def test_deliver_passes_the_plan_option(self):
+        run = StubbedRun(self)
+        self.assertEqual(run._engine_argv(None, plan="outline")[-2:], ["--plan", "outline"])
+
 
 if __name__ == "__main__":
     unittest.main()
