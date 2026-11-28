@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agent_tools.console import manager, sprints
 from . import console_test_support as support
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 TIER = "fast"
 
