@@ -16,7 +16,7 @@ below, `{"read": False}` and never a partial summary; otherwise exactly
 removed), `outside` the touched paths that are not inside `root` (the normalized absolute path when it
 can be placed, else the word as written), `scripts` the interpreter code and here-documents, in text
 order. A here-document reaches its program unchanged only through `cat` without a file operand or option
-and `tee`; through any other feeder (`base64 -d`, `tr`, `cat x.sh`) the script's text is not known, and
+and `tee` writing only plain files, none of them standard output, with no redirection on either command; through any other feeder (`base64 -d`, `tr`, `cat x.sh`) the script's text is not known, and
 its entry is `{"program": str, "lines": None, "paths": []}`: no line count and no path is claimed. Every list is in first-seen order without
 duplicates. With no absolute `root` every path is outside.
 
@@ -81,6 +81,7 @@ _DATA_READERS = frozenset(
 _PATTERN_FILE_READERS = frozenset({"grep", "egrep", "fgrep"})
 _PROGRAM_FILE_READERS = frozenset({"jq", "yq"})
 _STDIN_FILES = frozenset({"-", "/dev/stdin"})
+_STDOUT_FILES = frozenset({"/dev/stdout", "/dev/fd/1", "/proc/self/fd/1", "/dev/tty"})
 _JQ_OPTION_VALUES = {"--arg": 2, "--argjson": 2, "--slurpfile": 2, "--rawfile": 2, "--indent": 1, "-L": 1}
 _VERSIONED_NAME = re.compile(r"([A-Za-z]+)(?:[-_]?[0-9][0-9._]*(?:-?dbg|[dmtu])?|-dbg)")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
@@ -521,19 +522,42 @@ class _Reader:
                 texts.append((item.word.value, item.word.value.count("\n") + 1))
         return texts
 
+    @staticmethod
+    def program_at(words):
+        """The index of the program word among a command's words: the first that is neither the pipeline
+        negation `!` nor a leading assignment."""
+        first = 0
+        while first < len(words) and (words[first].word.value == "!"
+                                      or _ASSIGNMENT.match(words[first].word.value)):
+            first += 1
+        return first
+
     @classmethod
     def passes_on(cls, chain):
-        """True when the first command of `chain` hands its here-document text, unchanged, to the end of
-        the chain: each command is a bare `cat` (or `cat -`) or a `tee`, and only the first has its own text."""
+        """True when the first command of `chain` hands its here-document text, unchanged and once, to the
+        end of the chain: each command is a `cat` with no operand but `-` or a `tee` whose operands are
+        plain files other than standard output, none redirects its input or output, and only the first
+        has its own text."""
         for at, (items, _) in enumerate(chain):
             if at and cls.stdin_texts(items):
                 return False
-            words = [item.word.value for item in items if item.kind == "word"
-                     and not _ASSIGNMENT.match(item.word.value)]
-            name = posixpath.basename(words[0]) if words else ""
-            if name == "tee":
-                continue
-            if name != "cat" or any(value != "-" for value in words[1:]):
+            if any(item.kind == "redir" and (item.op in _READING_REDIRECTS or item.op in _WRITING_REDIRECTS
+                                             or item.op == ">&") for item in items):
+                return False
+            words = [item for item in items if item.kind == "word"]
+            first = cls.program_at(words)
+            if first >= len(words):
+                return False
+            name = posixpath.basename(words[first].word.value)
+            arguments = words[first + 1:]
+            if name == "cat":
+                if any(item.word.value != "-" for item in arguments):
+                    return False
+            elif name == "tee":
+                if any(item.word.option or item.word.expanded or item.word.brace
+                       or posixpath.normpath(item.word.value) in _STDOUT_FILES for item in arguments):
+                    return False
+            else:
                 return False
         return True
 
@@ -542,11 +566,9 @@ class _Reader:
 
         `feeders` are the earlier (items, reaches) commands of its pipeline."""
         words = [item for item in items if item.kind == "word"]
-        first = 0
-        while first < len(words) and (words[first].word.value == "!"
-                                      or _ASSIGNMENT.match(words[first].word.value)):
-            words[first].role = "skip" if words[first].word.value == "!" else "arg"
-            first += 1
+        first = self.program_at(words)
+        for item in words[:first]:
+            item.role = "skip" if item.word.value == "!" else "arg"
         program = words[first].word if first < len(words) else None
         arguments = words[first + 1:]
         self.placed = None
@@ -557,16 +579,15 @@ class _Reader:
         if self.script_input and any(item.kind == "redir" and item.op in _READING_REDIRECTS for item in items):
             raise _Refuse("a program fed standard input from a file the console cannot read")
         if feeders and self.script_input and not self.stdin_texts(items):
-            fed = [(text, lines, self.passes_on(feeders[at:]))
-                   for at, (before, reaches) in enumerate(feeders) if not reaches
-                   for text, lines in self.stdin_texts(before)]
-            if not fed:
+            source = next((at for at in range(len(feeders) - 1, -1, -1)
+                           if not feeders[at][1] and self.stdin_texts(feeders[at][0])), None)
+            if source is None:
                 raise _Refuse("a program fed standard input the console cannot read")
-            for text, lines, intact in fed:
-                if intact:
-                    self.script(self.interpreter, text, lines)
-                else:
-                    self.scripts.append({"program": self.interpreter, "lines": None, "paths": []})
+            text, lines = self.stdin_texts(feeders[source][0])[-1]
+            if self.passes_on(feeders[source:]):
+                self.script(self.interpreter, text, lines)
+            else:
+                self.scripts.append({"program": self.interpreter, "lines": None, "paths": []})
         if program is not None:
             if program.expanded or program.value in _RESERVED:
                 raise _Refuse("a program the console cannot read")

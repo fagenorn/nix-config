@@ -423,6 +423,35 @@ class CommandSummaryTest(unittest.TestCase):
                 self.assertEqual(result["runs"], runs)
                 self.assertEqual(result["scripts"], [unknown])
 
+    def test_a_feeder_with_an_assignment_shaped_operand_a_redirect_or_a_second_copy_leaves_the_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        body = "rm -rf /etc/nginx"
+        rows = [
+            f"cat name=value <<'EOF' | bash\n{body}\nEOF",
+            f"cat <<'EOF' | cat name=value | bash\n{body}\nEOF",
+            f"cat <<'EOF' | cat < x.sh | bash\n{body}\nEOF",
+            f"cat <<'EOF' | cat > /tmp/y | bash\n{body}\nEOF",
+            f"cat <<'EOF' | tee --help | bash\n{body}\nEOF",
+            f"cat <<'EOF' | tee /dev/stdout | bash\n{body}\nEOF",
+            f"tee /dev/fd/1 <<'EOF' | bash\n{body}\nEOF",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_negated_or_assigned_feeder_still_passes_its_heredoc_through(self):
+        for feeder in ("! cat", "FOO=1 cat"):
+            with self.subTest(feeder=feeder):
+                result = self.summary(f"{feeder} <<'EOF' | bash\nrm -rf /etc/nginx\nEOF" + self.PAD)
+                self.assertEqual(result["scripts"], [{"program": "bash", "lines": 1, "paths": ["/etc/nginx"]}])
+
+    def test_only_the_nearest_heredoc_feeder_gives_the_interpreter_one_script_row(self):
+        command = "cat <<'A' | cat <<'B' | bash\nrm -rf /etc/a\nA\nrm -rf /etc/b\nB" + self.PAD
+        self.assertEqual(self.summary(command)["scripts"],
+                         [{"program": "bash", "lines": 1, "paths": ["/etc/b"]}])
+
     def test_a_feeder_that_passes_its_heredoc_through_keeps_the_script_text(self):
         for feeder in ("cat", "cat -", "tee /tmp/log"):
             with self.subTest(feeder=feeder):
