@@ -8,6 +8,7 @@ import unittest
 
 from agent_tools.delivery import engine_core, engine_reply, engine_session, issue_setup
 from agent_tools.delivery.engine_core import RunGroup, Stop
+from agent_tools.delivery.engine_graders import GRADERS, dropped
 from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
 
 TIER = "fast"
@@ -171,6 +172,60 @@ class DirectProcedureTest(unittest.TestCase):
                 text = (PROCEDURES / f"direct-{kind}-{route}.md").read_text(encoding="utf-8")
                 texts.add(text.replace(fix, "FIX").replace(independent, "INDEPENDENT").replace(review, "REVIEW"))
             self.assertEqual(len(texts), 1, kind)
+
+    def test_every_re_review_prompt_carries_the_sentence_that_other_criteria_are_graded_never_findings(self):
+        sentence = ("A code criterion that is not met, or has no evidence, is an Important finding; "
+                    "criteria of other kinds are graded (give what you observed), never findings.")
+        self.assertIn(sentence, (PROCEDURES / "direct-review.md").read_text(encoding="utf-8"))
+        for name in ("direct-rereview-full.md", "direct-rereview-lite.md", "direct-rereview-escalated.md"):
+            with self.subTest(name=name):
+                self.assertIn(sentence, (PROCEDURES / name).read_text(encoding="utf-8"))
+
+    def test_every_fix_and_re_review_prompt_leaves_the_findings_the_engine_dropped_alone(self):
+        fix = ("A finding that names only criteria of other kinds than code (evidence, human or note) in its "
+               "restates or summary is dropped by the engine: leave it alone, neither fixing nor declining it.")
+        rereview = ("A finding of the review that names only criteria of other kinds than code (evidence, human "
+                    "or note) in its restates or summary was dropped by the engine: do not report it again.")
+        for route in ("full", "lite", "escalated"):
+            for name, sentence in ((f"direct-fix-{route}.md", fix), (f"direct-rereview-{route}.md", rereview)):
+                with self.subTest(name=name):
+                    self.assertIn(sentence, (PROCEDURES / name).read_text(encoding="utf-8"))
+
+    def test_a_re_review_finding_naming_only_an_evidence_criterion_settles_clean_and_rides_on_its_transition(self):
+        evidence = {"id": "AC2", "text": "t", "kind": "evidence", "result": "r"}
+        implemented = {**IMPLEMENTED, "acceptance": [*IMPLEMENTED["acceptance"], evidence]}
+        fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": [], "declines": []}
+        finding = {**NAMED[0], "summary": "AC2 has no evidence", "kind": "other", "restates": "AC2"}
+        events = (reported("preflight", "clear", PREFLIGHT) + reported("implement", "done", implemented)
+                  + lite_round(lite_review("findings", NAMED)) + reported("lite-fix", "done", fix)
+                  + reported("lite-rereview", "findings", {"verdict": "findings", "findings": [finding]}))
+
+        replay = replayed(events)
+
+        self.assertIsInstance(replay.action, engine_core.Done)
+        self.assertIn(engine_core.Transition("lite-settled", "clean", "done"), replay.transitions)
+        settled = [t for t in replay.transitions if t.step == "lite-settled"][0]
+        self.assertEqual(settled.dropped, ({"finding": "lite-rereview:1", "criteria": ["AC2"]},))
+
+    def test_every_step_whose_grader_drops_findings_reads_the_acceptance(self):
+        steps = [s for s in load(PROCEDURES, "direct")["steps"]
+                 if s["kind"] == "decide" and GRADERS[s["grader"]].drops is dropped]
+        self.assertEqual({s["id"] for s in steps}, {"lite-tally", "escalated-tally", "full-tally",
+                                                    "lite-settled", "escalated-settled", "full-settled"})
+        for one in steps:
+            with self.subTest(step=one["id"]):
+                self.assertIn("implement.acceptance", one["in"])
+
+    def test_every_settled_step_reads_the_earlier_findings_its_re_review_may_restate(self):
+        direct = load(PROCEDURES, "direct")
+        for route in ("lite", "escalated", "full"):
+            settled, rereview = step(direct, f"{route}-settled"), step(direct, f"{route}-rereview")
+            restatable = [p for p in rereview["in"] if p.endswith(".findings")]
+            with self.subTest(route=route):
+                self.assertEqual(len(restatable), 2)
+                for path in restatable:
+                    self.assertIn(path, settled["in"])
+                self.assertEqual(settled["in"][0], f"{route}-rereview.verdict")
 
     def test_a_blocked_group_reaches_its_tally(self):
         direct = load(PROCEDURES, "direct")

@@ -474,6 +474,14 @@ To start a run at once, from a reset fixture, whatever `main` did:
 
     proof-run now --platform-repo fagenorn/nix-config --branch main --fixture fagenorn/engine-fixture --fixture-branch main
 
+## Lock bumps
+
+The console runs a lock bump pass for the fixture project every ten minutes. It reads the proven
+revisions in `~/.agents/state/engine/proven.jsonl` and offers each to `fagenorn/engine-fixture` as one
+pull request that it merges once the required checks are green. Its record is
+`~/.agents/state/console/lock-bumps.json` and its `console: lock_bump ...` lines are in
+`~/Library/Logs/agent-console.log`. Which projects get bumps is a separate decision of the owner.
+
 ## Retiring a model
 
 Deleting a `models` entry stops its download and its declared settings, but leaves

@@ -96,6 +96,11 @@ def git_contains(root: Path) -> Callable[[str, str], bool | None]:
 
 def read_rows(store: Path) -> list[dict]:
     """The `activation.finished` payloads in `seq` order; `sqlite3.Error` when unreadable."""
+    return [payload for _, payload in read_stamped(store)]
+
+
+def read_stamped(store: Path) -> list[tuple[str, dict]]:
+    """The (`at`, payload) of every `activation.finished` row in `seq` order; `sqlite3.Error` when unreadable."""
     connection = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True)
     try:
         connection.execute("PRAGMA query_only = ON")
@@ -104,18 +109,18 @@ def read_rows(store: Path) -> list[dict]:
             raise sqlite3.DatabaseError(
                 f"store schema is {version}, this build reads {event_log.SCHEMA_VERSION}")
         found = connection.execute(
-            "SELECT seq, payload FROM events WHERE kind = 'activation.finished' "
+            "SELECT at, payload FROM events WHERE kind = 'activation.finished' "
             "ORDER BY seq").fetchall()
     finally:
         connection.close()
     rows = []
-    for _, text in found:
+    for at, text in found:
         try:
             payload = json.loads(text)
         except (TypeError, ValueError):
             continue
-        if isinstance(payload, dict):
-            rows.append(payload)
+        if isinstance(payload, dict) and isinstance(at, str):
+            rows.append((at, payload))
     return rows
 
 

@@ -1,0 +1,87 @@
+[
+  {
+    "pname": "Microsoft.Bcl.AsyncInterfaces",
+    "version": "6.0.0",
+    "hash": "sha256-49+H/iFwp+AfCICvWcqo9us4CzxApPKC37Q5Eqrw+JU="
+  },
+  {
+    "pname": "Microsoft.CodeCoverage",
+    "version": "18.12.0",
+    "hash": "sha256-hxJgGyot2CRVmTcJfuLGyRWRK3Yx5GhzeTs01nxJC0E="
+  },
+  {
+    "pname": "Microsoft.NET.Test.Sdk",
+    "version": "18.12.0",
+    "hash": "sha256-+/p7jwNpB8kPe+YqYR0RCh7sI9gcG+n+sVXpQBj2Rc0="
+  },
+  {
+    "pname": "Microsoft.TestPlatform.ObjectModel",
+    "version": "18.12.0",
+    "hash": "sha256-g59ntYgZlrIjzepT2cFoaUomPOPZw1SnxP8Lb6ovK0A="
+  },
+  {
+    "pname": "Microsoft.TestPlatform.TestHost",
+    "version": "18.12.0",
+    "hash": "sha256-aeHpahHkSJx5ccno2u6jGdo07qNLfqaB3+OEFTP9bpg="
+  },
+  {
+    "pname": "Microsoft.Win32.Registry",
+    "version": "5.0.0",
+    "hash": "sha256-9kylPGfKZc58yFqNKa77stomcoNnMeERXozWJzDcUIA="
+  },
+  {
+    "pname": "System.CommandLine",
+    "version": "2.0.15",
+    "hash": "sha256-aeVcUsbyIJSPOxBoQ/rXCdp6jrwyEPp8A12wt0ebSRo="
+  },
+  {
+    "pname": "System.Security.AccessControl",
+    "version": "6.0.1",
+    "hash": "sha256-Ri4m95ZBfopDUGVahbvUIzuUy9D3FQwcXprP2I6IUUE="
+  },
+  {
+    "pname": "xunit.analyzers",
+    "version": "2.3.0",
+    "hash": "sha256-mmHvwQ5LLpkwbKNLYXM699sNXq91DrbXkCBkU5p7+fc="
+  },
+  {
+    "pname": "xunit.runner.visualstudio",
+    "version": "4.0.1",
+    "hash": "sha256-c9jZppuLQF9rD6JGr+38OvuHBhWJ+XKyUPpDQP9Gn/U="
+  },
+  {
+    "pname": "xunit.v3.assert",
+    "version": "4.0.3",
+    "hash": "sha256-Rsv+3W+JcMzNSeEXMPBFuPIBeHL883DEYyJOQfO6uqk="
+  },
+  {
+    "pname": "xunit.v3.common",
+    "version": "4.0.3",
+    "hash": "sha256-IfCYIarT9Q6fmSMfYbZ6W1aJvESKmqvgah3Nbp1Z6R0="
+  },
+  {
+    "pname": "xunit.v3.core.mtp-off",
+    "version": "4.0.3",
+    "hash": "sha256-ECdmWcce3QYbuoWuoEl2JJvrFoAThKl6/rfERTbFWtE="
+  },
+  {
+    "pname": "xunit.v3.extensibility.core",
+    "version": "4.0.3",
+    "hash": "sha256-MzsjsKLq1TFLoD6I4H/XNl90WucvryL+yy0v1XScR6o="
+  },
+  {
+    "pname": "xunit.v3.mtp-off",
+    "version": "4.0.3",
+    "hash": "sha256-mNDuI8vaVGmkAGM5zlirzx4Kd2tnl9n9q4FTC6e2Jpw="
+  },
+  {
+    "pname": "xunit.v3.runner.common",
+    "version": "4.0.3",
+    "hash": "sha256-4Z8vhLOiLZFdIM8p9ps+K5HTkMDcgukHHT8nihYKYVo="
+  },
+  {
+    "pname": "xunit.v3.runner.inproc.console",
+    "version": "4.0.3",
+    "hash": "sha256-f+RXe5TFoESquTxhuERByzB2kGpwdpCW8ph8n/6Ul5k="
+  }
+]

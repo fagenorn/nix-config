@@ -16,3 +16,7 @@ producer-report-*.json
 # The devenv shell writes its cache into .devenv/ at the root. devenv.nix,
 # devenv.yaml and devenv.lock are tracked (issue 1447); only the cache is hidden.
 .devenv/
+
+# .NET build output under the solution root
+dotnet/**/bin/
+dotnet/**/obj/
