@@ -106,11 +106,10 @@ def wrap_resumed(original):
 
 
 def wrap_popen(original):
-    """Record every process the engine spawns, under the same lock as the writes.
+    """Record each spawn under the lock that guards the writes, so no cut lands between spawn and record.
 
-    The engine writes `process_started` only after `Popen` returns, and starts each process in its own session, so
-    a process spawned just before the cut is never recorded in the ledger and survives the kill. The spawn and its
-    record are one step under `LOCK`: a cut cannot land between them, and none can start once it has.
+    The engine writes `process_started` only after `Popen` returns, so a spawn just before the cut would
+    survive the kill unrecorded; none can start once the cut has.
     """
     def init(self, *args, **kwargs):
         with LOCK:
