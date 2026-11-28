@@ -19,7 +19,7 @@ any other line yields nothing), and `trusted_author` is the author test its call
 parameterise with the logins and associations they trust.
 
 D9, ending is append-only: a marker is ended by posting an `end` marker (`of=<id>`,
-`reason=<reason>`) naming its id, and nothing edits or deletes an `end` marker. A marker is live
+`reason=<reason>`, and any further fields its caller records) naming its id, and nothing edits or deletes an `end` marker. A marker is live
 when it is not itself an `end` marker, carries no `released` field and no `end` marker in the
 same listing names it, so a delayed edit that rewrites an older body can drop a field but can
 never bring an ended marker back.
@@ -122,8 +122,8 @@ def render(kind: str, fields: Mapping[str, str], sentence: str, extra: str = "")
     return f"{first}\n{sentence}" + (f"\n{extra}" if extra else "")
 
 
-def end_body(of: int, reason: str) -> str:
-    return render(END_KIND, {"of": str(of), "reason": reason}, f"Ends marker comment {of} ({reason}).")
+def end_body(of: int, reason: str, **extra: str) -> str:
+    return render(END_KIND, {"of": str(of), "reason": reason, **extra}, f"Ends marker comment {of} ({reason}).")
 
 
 def _instant(value: Any) -> datetime:
@@ -156,13 +156,18 @@ def parse(comment: Mapping[str, Any]) -> Marker | None:
     return Marker(comment_id, match["kind"], fields, body, _instant(comment.get("updated_at")))
 
 
-def with_fields(marker: Marker, **updates: str) -> str:
-    """The marker's body with its first line re-rendered: existing keys keep their position
-    and take the new value, new keys append in argument order; every other line is unchanged."""
-    fields = {**marker.fields, **updates}
+def rewritten(marker: Marker, fields: Mapping[str, str]) -> str:
+    """The marker's body with its first line rendered from exactly `fields`, in their order;
+    every other line is unchanged."""
     rest = marker.body.split("\n", 1)[1] if "\n" in marker.body else ""
     first = render(marker.kind, fields, "x").split("\n", 1)[0]
     return first + ("\n" + rest if "\n" in marker.body else "")
+
+
+def with_fields(marker: Marker, **updates: str) -> str:
+    """The marker's body with its first line re-rendered: existing keys keep their position
+    and take the new value, new keys append in argument order; every other line is unchanged."""
+    return rewritten(marker, {**marker.fields, **updates})
 
 
 def ended(markers: Iterable[Marker]) -> set[int]:
@@ -221,9 +226,9 @@ def post(slug: str, issue: int, body: str) -> int:
     return _posted(slug, issue, body)["id"]
 
 
-def end(slug: str, issue: int, of: int, reason: str) -> int:
+def end(slug: str, issue: int, of: int, reason: str, **extra: str) -> int:
     """End marker `of` by appending an `end` marker (D9); the target is never touched."""
-    return post(slug, issue, end_body(of, reason))
+    return post(slug, issue, end_body(of, reason, **extra))
 
 
 def write(slug: str, issue: int, kind: str, fields: Mapping[str, str], sentence: str,

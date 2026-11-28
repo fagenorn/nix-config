@@ -66,6 +66,7 @@
         "free",
         "held_by",
         "stale",
+        "takeover-eligible",
         "error"
       ]
     }

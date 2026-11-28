@@ -265,14 +265,22 @@ class EventShapeTest(unittest.TestCase):
     def test_optional_members_round_trip_and_are_checked(self):
         validate = engine_ledger.validate_event
         stored, continued = EXAMPLES["result_stored"], EXAMPLES["run_continued"]
-        for accepted in ({**stored, "head": "a" * 40}, {**stored, "head": "b" * 64},
+        taken, one = EXAMPLES["transition_taken"], {"finding": "full-rereview:1", "criteria": ["AC2"]}
+        for accepted in ({**taken, "dropped": [one]}, {**stored, "head": "a" * 40}, {**stored, "head": "b" * 64},
                          {**stored, "outcome": "failed"},
                          {**stored, "head": "a" * 40, "outcome": "ok"},
                          {**continued, "step": "draft"},
                          {**continued, "step": "draft", "visit": 2}):
             with self.subTest(accepted=accepted):
                 self.assertEqual(validate(dict(accepted)), accepted)
-        for refused in ({**stored, "head": "A" * 40}, {**stored, "head": "a" * 39},
+        for refused in ({**taken, "dropped": []}, {**taken, "dropped": "x"},
+                        {**taken, "dropped": [{**one, "finding": "full-rereview:0"}]},
+                        {**taken, "dropped": [{**one, "finding": "Full:1"}]},
+                        {**taken, "dropped": [{**one, "criteria": []}]},
+                        {**taken, "dropped": [{**one, "criteria": [""]}]},
+                        {**taken, "dropped": [{**one, "extra": 1}]},
+                        {**EXAMPLES["outcome_graded"], "dropped": [one]},
+                        {**stored, "head": "A" * 40}, {**stored, "head": "a" * 39},
                         {**stored, "head": 40}, {**stored, "head": None},
                         {**stored, "outcome": ""}, {**stored, "outcome": 3},
                         {**continued, "step": "draft", "visit": 0},

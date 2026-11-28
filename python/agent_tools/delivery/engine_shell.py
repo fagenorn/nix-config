@@ -899,7 +899,8 @@ def _record_core_transitions(run_dir: Path, ledger: list[dict], walk: engine_cor
             engine_ledger.append_event(run_dir, {
                 "event": "transition_taken", "at": _now(), "step": transition.step,
                 "visit": transition.visit, "outcome": transition.outcome,
-                "to": transition.target})
+                "to": transition.target,
+                **({"dropped": list(transition.dropped)} if transition.dropped else {})})
 
 
 def _record_stop(run_dir: Path, step: str, name: str, need: str, detail: str,

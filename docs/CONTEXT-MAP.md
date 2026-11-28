@@ -1,4 +1,3 @@
-# Context Map
 ## Areas
 | Area | Context file | Gist | governs |
 |---|---|---|---|
@@ -50,6 +49,7 @@
 | Detaching word | Guard |
 | Digest | Console |
 | Drafted contract | Console |
+| Early takeover | Claims |
 | Enforcer | Delivery |
 | Engine | Delivery |
 | Excluded profile | Console |
@@ -77,6 +77,7 @@
 | Lint-time issue | Delivery |
 | Live fault | Console |
 | Live-fault lane | Delivery |
+| Lock bump | Project contract |
 | Look approval | Delivery |
 | Look file set | Delivery |
 | Look marker | Delivery |
@@ -146,5 +147,4 @@
 | Verified tree | Verification |
 | Verify block | Verification |
 | Waiting since | Console |
-## Relationships
 - **Console → Claims**: an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader; an **Inbox item** of a held check is a live **Owner prompt** of Verification, answered through the runner's owner path. **Console → Project contract**: the console's projects are the **Fleet registry**'s entries. **Delivery → Claims, Verification**: a delivery holds a **Claim** and lands under the **Land lock**; one that leaves evidence criteria holds its issue with a **Verify block**. **Verification → Claims**: an **Owner prompt** is an **Owner-action marker**. **Release → Guard**: the forge adapter passes each mutation through the guard. **Guard → Project contract**: a **Derived row** comes from a resolved **Project contract** and the **Fleet registry**. **Project contract → every area**: each command reads the **ResolvedProject**. **Hosts → Verification, Console**: every host runs **Verification passes** on a schedule, and the **Cache proxy** reports each **Limit reading** to the console.

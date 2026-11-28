@@ -4,14 +4,22 @@ Source entry `python -m agent_tools.claims.forge_claim`, library `agent_tools.cl
 session at a time delivers a forge issue, and every fact is held in issue comments called
 markers. A claim is a `claim` marker and the `in-progress`
 label is only a filter over it. Contention is settled by the marker contest (D2): the smallest
-live claim comment id of the issue wins, and `acquire` never steals a claim, stale or not.
+live claim comment id of the issue wins, and `acquire` never steals a claim, stale or not, except one
+whose holder provably no longer runs (the D6 early takeover).
 
 Subcommands: each of `acquire`, `renew`, `release` and `status` takes `--repo <owner/name>
 --issue <n> --holder <host>/<batch_id>` (a session without a batch uses `<host>/session-<id>`).
 `acquire` and `renew` also take an optional `--branch <name>`, recorded as the claim's `branch`
 field (the staleness activity source); `release` takes `--reason` (default `done`); `status`
 takes no more. `acquire` posts the claim and adds the `in-progress` label. `status` reports the
-verdict and never takes a claim.
+verdict and never takes a claim. `acquire` and `renew` also record the caller's Claude Code session
+(`CLAUDE_CODE_SESSION_ID`) as `session` and its console sprint (`CONSOLE_SPRINT_ID`, never the sprint
+secret) as `sprint`, each only when the environment holds a value of its form, so a claim names the
+session that holds it; `renew` removes either field it cannot record, so a renewed claim never names
+an earlier session, and keeps a claim's `took` and `tookbranch` only when it records the same session and
+sprint again. They also record the caller's own running process from its session's registry record as
+`pid` and, on a host with `/proc`, `pstart` (its start time), only when exactly one running record
+names the session; `renew` removes both when it cannot.
 
 D3, a renewal changes the body: `renew` rewrites the claim's first line with `renewed=<n+1>`
 so the edit always moves the server's `updated_at`, then re-lists and reports `not_held` when
@@ -24,14 +32,19 @@ that is not there is success.
 D8, output: every call, a usage error included, prints exactly one JSON object on one stdout
 line with the keys `command`, `repo`, `issue`, `holder`, `verdict`, `comment_id` and `by`.
 Exit 0 carries `acquired`, `already_held`, `renewed`, `released` and every `status` verdict
-(`free`, `held_by`, `stale`); exit 3 is contention (`acquire` answers `held_by` or `lost_to`,
+(`free`, `held_by`, `stale`, `takeover-eligible`); exit 3 is contention (`acquire` answers `held_by` or `lost_to`,
 `renew` and `release` answer `not_held`); exit 1 is a forge error (`verdict: "error"`, `error`
 the `ForgeError` code, `detail`, and `transient`, true when the error is a transport error: a
 `gh` timeout, an HTTP 5xx or a connection failure); exit 2 is usage (`verdict: "error"`,
 `error: "usage"`, `detail` the parser's message), and `-h`/`--help` alone prints argparse help
 and exits 0. Verdict-specific keys: `acquire` and `status` add `released_by_owner` (the claim
 ids ended by a ticked owner-action box), `release` adds `label_removed`, and `status` adds
-`activity_at` (UTC, null when free), `owner_action_comment_id` and `owner_action_posted`.
+`activity_at` (UTC, null when free), `owner_action_comment_id` and `owner_action_posted`. Every
+`acquire` answer, an error included, also carries `takeover`: null, or after an early takeover (D6)
+an object with `claim` (the taken claim's id), `holder` (its holder), `branch` (its branch, or null),
+`worktree` (the claimed worktree's path, null when it cannot be found in this repository) and
+`uncommitted` (that worktree's uncommitted paths from `git status --porcelain -z`, `[]` when clean,
+null when unreadable).
 
 D9, ending is append-only: `release` posts an `end` marker first, then edits the claim to
 `released=<reason>`, retires the issue's obsolete `owner-action` markers and removes
@@ -44,8 +57,9 @@ claim untouched. A repeat `release` of the newest claim after a complete one lik
 `released` (exit 0) and changes nothing.
 
 D10, owner-action retirement: `renew` and `release` end every live `owner-action` marker that
-names their claim, a `status` whose verdict is `free`, `held_by` or `stale` ends every live
-stale-claim `owner-action` naming a claim other than the holder's, and the `owner-action` label
+names their claim, a `status` whose verdict is `free`, `held_by`, `stale` or `takeover-eligible`
+ends every live stale-claim `owner-action` naming a claim other than the holder's
+(`takeover-eligible` keeps the prompt of the claim it names, for the takeover to retire), and the `owner-action` label
 goes when none of any reason remains live on the issue. Retirement ends only markers that carry a
 `claim` field: a claim-less marker, or a prompt of another reason such as a verify-pending
 prompt, is never ended here and counts as live, so it keeps the label.
@@ -60,7 +74,7 @@ D5, server now: "now" is the server's `Date` header of `gh api --include rate_li
 claim is stale when `now - activity >= 24 hours`, where activity is the latest of the claim's own
 `updated_at` (moved by each renewal, D3) and the branch activity of D4.
 
-D6, owner-action: a stale claim is never stolen. Taking it over would end the block sooner, but a
+D6, owner-action: a stale claim is never stolen, except by the early takeover below. Taking it over would end the block sooner, but a
 holder that is merely slow, or whose renewal was delayed, would lose work it is still doing and two
 sessions would deliver the issue, so an abandoned issue waits for the owner's tick instead.
 `status` reports one by posting one `owner-action` marker (`reason=stale-claim`, `claim=<id>`,
@@ -78,6 +92,31 @@ the claim right after judging that listing's `updated_at`, so a renewal that lan
 listing is never undone. A renewal that lands between that listing and the end, or a branch push
 after the activity read, can still lose the claim; the holder's `renew` then answers `not_held`
 (D3).
+
+D6 early takeover: a claim whose holder provably no longer runs is taken over at once by a manager of
+the same sprint, with no day's wait and no owner box. `acquire` takes it when all hold: the claim
+records `session`, `sprint` and `pid` (a claim without a process is never taken early); its holder's host (the text before the first `/`) is this host
+(`hostname -s`); the caller's session and sprint are recorded in its environment, the session differs
+from the claim's and the sprint equals it; and `agent_tools.claims.claim_takeover` reads the claim's
+session as gone: this host's Claude Code session registry (the default root's profiles always among
+it, whatever `CLAUDE_ACCOUNTS_DIR` names), read whole without an error, shows the caller's own session
+running, and the process the claim records (a running session rewrites its record when its id changes,
+so a missing record is no proof) and every record of the claim's session are shown dead by the
+console's strict process check and a conclusive reading. Anything else, a registry, profile or record
+that cannot be read (an entry that is not a readable regular file included) or a malformed record of
+any session, keeps the rule above. The claimed worktree is the one `git worktree list` registers for
+the branch and does not mark prunable. `acquire` reads the claimed worktree first, then takes a fresh
+listing and ends the claim only when the fresh claim's whole body and `updated_at` are the ones it
+judged and the registry, read again, still shows the session gone. The `end` marker carries
+`reason=holder-gone`, `successor` and `sprint` (the caller's). Only the caller whose `end` is the
+claim's first, in comment order, goes on: the claim is edited to `released=holder-gone`, its
+owner-action prompts are retired (`released`), and the caller's claim records `took=<the taken
+claim's id>` and the former branch when `--branch` is absent; a caller whose `end` came second
+acquires as if the issue were free. The takeover never resets, cleans, stashes or discards the
+worktree: it reports it, reading git with no repository-selecting variable and no optional lock.
+A takeover survives a retry and a re-call: when no claim is live and the issue's newest claim was first ended, in comment order, `holder-gone` by an `end` marker whose `successor` and `sprint` are the caller's, `acquire` finishes the steps left (the `released` edit only when absent, the prompt retirement) and claims as the takeover would (a replacement claim that loses to a claim of the same holder reports the takeover only when the winner records the caller's session, sprint and `took`); any other first `end`, such as one of `release --reason holder-gone` or another successor's, grants nothing. A caller whose own live claim records its session, its sprint and `took` gets the report again with `already_held`. Within one invocation the tries share the worktree report read before the claim changed hands, so a retry reports what was read then and runs no git command. A claim of the caller's own holder that records another session, gone under the same rule (a batch relaunched under the same holder), is taken over in place: after the same fresh-listing and registry checks it is edited to the caller's `session`, `sprint` and process and `took=<its own id>` with `tookbranch` (the branch it
+had, `-` for none, so a later renewal's `--branch` cannot change the replayed report); only when a new listing's winner is that claim and still records them are the owner-action prompts that were live before the edit retired (`renewed`), (a prompt posted and labelled meanwhile keeps the label, restored after the removal when a new listing shows it live) and `already_held` carries the report; a retry of that invocation retires those prompts only, and a later call none. When a listing shows the claim released, another winner or another session's identity, `acquire` goes on as it would for that winner. A claim that records the caller's session and no `took`, or another sprint, stays `already_held` with no edit.
+`status` answers `takeover-eligible` (exit 0, `by` the holder, `activity_at` null) for a claim of another holder that qualifies, judged before any activity or server-time read; it posts no owner-action prompt and adds no label, so its caller goes on to `acquire`, which decides alone and checks everything again.
 
 The `land` subcommand (`land acquire|release|status|refresh|hold`, issue 629) is the cross-host land lock
 of `agent_tools.claims.forge_land_lock`: `main` routes it there and reports its usage errors in its
@@ -108,12 +147,15 @@ also sheds the `owner-action` label its lost-reply retirement left behind.
 """
 import argparse
 import json
+import os
 import re
 import sys
 import time
+from collections.abc import Collection, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from agent_tools.claims import claim_takeover
 from agent_tools.claims import forge_land_lock
 from agent_tools.claims import forge_owner_action
 from agent_tools.claims import forge_markers as fm
@@ -127,6 +169,10 @@ OWNER_ACTION = ("owner-action", "D93F0B")
 OWNER_ACTION_KIND = "owner-action"
 STALE_AFTER = timedelta(hours=24)
 RELEASE_BOX = "Release this claim"
+TAKEOVER_REASON = "holder-gone"
+CALLER_KEYS = (*claim_takeover.IDENTITY_KEYS, *claim_takeover.PROCESS_KEYS)
+TOOK_KEYS = ("took", "tookbranch")
+NO_BRANCH = "-"
 TICKED = re.compile(rf"\s*[-*] \[[xX]\] {RELEASE_BOX}\s*")
 
 CONTENDED, FORGE_ERROR, USAGE = 3, 1, 2
@@ -222,20 +268,24 @@ def _mark_in_progress(args: argparse.Namespace) -> None:
 
 
 def retire_owner_actions(slug: str, issue: int, markers: list[Marker], claim_id: int | None,
-                         reason: str) -> list[int]:
-    """End the live `owner-action` markers naming `claim_id` (every one naming a claim when None)
-    with `reason` (D10). A marker with no `claim` field is never ended here (issue 636, D6).
-
-    When at least one was ended and no live `owner-action` of the issue remains, judged on
-    `markers` plus the ids ended here, the `owner-action` label is removed. Returns the ended
-    marker ids, ascending."""
+                         reason: str, only: Collection[int] | None = None) -> list[int]:
+    """End the live `owner-action` markers naming `claim_id` (every one naming a claim when None,
+    only those in `only` when given) with `reason` (D10). A marker with no `claim` field is never
+    ended here (issue 636, D6). When none is live but those ended, the label is removed, and with
+    `only` a new listing puts it back when a prompt posted meanwhile is live. Returns the ids ended."""
     live = [m for m in markers if m.kind == OWNER_ACTION_KIND and fm.is_live(m, markers)]
     named = sorted(m.comment_id for m in live if "claim" in m.fields
-                   and (claim_id is None or m.fields["claim"] == str(claim_id)))
+                   and (claim_id is None or m.fields["claim"] == str(claim_id))
+                   and (only is None or m.comment_id in only))
     for comment_id in named:
         fm.end(slug, issue, comment_id, reason)
     if named and not any(m.comment_id not in named for m in live):
         forge_api.remove_label(slug, issue, OWNER_ACTION[0])
+        if only is not None:
+            again = fm.list_markers(slug, issue)
+            if any(m.kind == OWNER_ACTION_KIND and fm.is_live(m, again) for m in again):
+                forge_api.ensure_label(slug, *OWNER_ACTION)
+                forge_api.add_label(slug, issue, OWNER_ACTION[0])
     return named
 
 
@@ -366,24 +416,197 @@ def acquire(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     match = {"issue": str(args.issue)}
     held = fm.contest(markers, CLAIM_KIND, match)
     winner = held[0] if held else None
+    takeover = None
+    if winner is not None and _holder_of(winner) != args.holder and claim_takeover.qualifies(winner, os.environ):
+        winner, takeover, markers = _take_over(args, winner, match)
+    elif winner is not None and _holder_of(winner) == args.holder:
+        winner, takeover, markers = _own_takeover(args, markers, winner, match)
     if winner is None:
-        fields = {"issue": str(args.issue), "holder": args.holder}
-        if args.branch:
-            fields["branch"] = args.branch
-        written = fm.write(args.repo, args.issue, CLAIM_KIND, fields, f"Claimed by {args.holder}.", match)
+        if takeover is None:
+            takeover = _resume_takeover(args, markers)
+        written = fm.write(args.repo, args.issue, CLAIM_KIND, _claim_fields(args, takeover),
+                           f"Claimed by {args.holder}.", match)
         if written.won:
             _mark_in_progress(args)
-            return 0, _result(args, "acquired", written.own_id, released_by_owner=freed)
+            return 0, _result(args, "acquired", written.own_id, released_by_owner=freed, takeover=takeover)
         winner = written.winner
         comment_id = winner.comment_id if winner is not None else None
         if _holder_of(winner) == args.holder:
-            return 0, _result(args, "already_held", comment_id, released_by_owner=freed)
-        return CONTENDED, _result(args, "lost_to", comment_id, _holder_of(winner), released_by_owner=freed)
+            if takeover is not None and not _records_takeover(winner, takeover):
+                takeover = None
+            return 0, _result(args, "already_held", comment_id, released_by_owner=freed, takeover=takeover)
+        return CONTENDED, _result(args, "lost_to", comment_id, _holder_of(winner), released_by_owner=freed,
+                                  takeover=None)
     if _holder_of(winner) == args.holder:
         _mark_in_progress(args)
-        return 0, _result(args, "already_held", winner.comment_id, released_by_owner=freed)
+        return 0, _result(args, "already_held", winner.comment_id, released_by_owner=freed, takeover=takeover)
     return CONTENDED, _result(args, "held_by", winner.comment_id, _holder_of(winner),
-                         released_by_owner=freed)
+                              released_by_owner=freed, takeover=None)
+
+
+def _records_takeover(claim: Marker, takeover: dict[str, Any]) -> bool:
+    """Whether `claim` records this caller's session and sprint and the taken claim, as this caller's own would."""
+    identity = claim_takeover.identity_fields(os.environ)
+    return (all(claim.fields.get(k) == identity.get(k) for k in claim_takeover.IDENTITY_KEYS)
+            and claim.fields.get("took") == str(takeover["claim"]))
+
+
+def _unchanged(a: Marker, b: Marker) -> bool:
+    return (a.comment_id, a.body, a.updated_at) == (b.comment_id, b.body, b.updated_at)
+
+
+def _first_end(markers: list[Marker], claim_id: int) -> Marker | None:
+    """The `end` marker of lowest comment id naming the claim."""
+    return min((m for m in markers if m.kind == fm.END_KIND and m.fields.get("of") == str(claim_id)),
+               key=lambda m: m.comment_id, default=None)
+
+
+def _takeover_report(claim: Marker, report: tuple[str | None, list[str] | None],
+                     branch: str | None) -> dict[str, Any]:
+    return {"claim": claim.comment_id, "holder": _holder_of(claim), "branch": branch,
+            "worktree": report[0], "uncommitted": report[1]}
+
+
+def _taken_branch(former: Marker, claim: Marker) -> str | None:
+    """The branch the takeover found on `former`; an in-place one (`former` is `claim`) kept it in `tookbranch`."""
+    recorded = claim.fields.get("tookbranch") if former is claim else None
+    if recorded is not None:
+        return None if recorded == NO_BRANCH else recorded
+    return former.fields.get("branch")
+
+
+def _finish_takeover(args: argparse.Namespace, markers: list[Marker], claim: Marker,
+                     report: tuple[str | None, list[str] | None]) -> dict[str, Any]:
+    """The steps after the takeover's `end`; each is idempotent."""
+    if "released" not in claim.fields:
+        fm.edit(args.repo, claim.comment_id, fm.with_fields(claim, released=TAKEOVER_REASON))
+    if not retire_owner_actions(args.repo, args.issue, markers, claim.comment_id, "released"):
+        _retired_owner_action_label(args.repo, args.issue, markers, claim.comment_id)
+    return _takeover_report(claim, report, claim.fields.get("branch"))
+
+
+def _take_over(args: argparse.Namespace, winner: Marker, match: dict[str, str]
+               ) -> tuple[Marker | None, dict[str, Any] | None, list[Marker]]:
+    """End `winner` when its holder is provably gone: returns the winner to go on with, the report
+    (None unless this caller's `end` is the claim's first) and the newest listing. Nothing reads
+    the forge between the fresh listing and the end."""
+    report = claim_takeover.worktree_report(args.repo, winner.fields.get("branch"))
+    markers = fm.list_markers(args.repo, args.issue)
+    held = fm.contest(markers, CLAIM_KIND, match)
+    fresh = held[0] if held else None
+    if fresh is None or not _unchanged(fresh, winner) or not claim_takeover.qualifies(fresh, os.environ):
+        return fresh, None, markers
+    identity = claim_takeover.identity_fields(os.environ)
+    _kept(args, "takeover_reports")[fresh.comment_id] = report
+    end_id = fm.end(args.repo, args.issue, fresh.comment_id, TAKEOVER_REASON,
+                    successor=identity["session"], sprint=identity["sprint"])
+    again = fm.list_markers(args.repo, args.issue)
+    first = _first_end(again, fresh.comment_id)
+    if first is None or first.comment_id != end_id:
+        held = fm.contest(again, CLAIM_KIND, match)
+        return (held[0] if held else None), None, again
+    return None, _finish_takeover(args, again, fresh, report), again
+
+
+def _kept(args: argparse.Namespace, name: str) -> dict[int, Any]:
+    """The store one invocation's tries share: `run_verb` hands every try the same `args`."""
+    return vars(args).setdefault(name, {})
+
+
+def _interrupted_takeover(markers: list[Marker], issue: int, identity: dict[str, str]) -> Marker | None:
+    """The issue's newest claim when its first `end` is a takeover by this session and sprint."""
+    if "session" not in identity or "sprint" not in identity:
+        return None
+    claims = [m for m in markers if m.kind == CLAIM_KIND and m.fields.get("issue") == str(issue)]
+    if not claims:
+        return None
+    newest = max(claims, key=lambda m: m.comment_id)
+    first = _first_end(markers, newest.comment_id)
+    if (first is not None and first.fields.get("reason") == TAKEOVER_REASON
+            and first.fields.get("successor") == identity["session"]
+            and first.fields.get("sprint") == identity["sprint"]):
+        return newest
+    return None
+
+
+def _resume_takeover(args: argparse.Namespace, markers: list[Marker]) -> dict[str, Any] | None:
+    claim = _interrupted_takeover(markers, args.issue, claim_takeover.identity_fields(os.environ))
+    if claim is None:
+        return None
+    report = _kept(args, "takeover_reports").get(claim.comment_id)
+    if report is None:
+        report = claim_takeover.worktree_report(args.repo, claim.fields.get("branch"))
+    return _finish_takeover(args, markers, claim, report)
+
+
+def _own_takeover(args: argparse.Namespace, markers: list[Marker], winner: Marker, match: dict[str, str]
+                  ) -> tuple[Marker | None, dict[str, Any] | None, list[Marker]]:
+    """The winner to go on with, the report (None unless the caller's claim records a takeover) and the
+    newest listing, for a claim of the caller's own holder."""
+    identity = claim_takeover.identity_fields(os.environ)
+    if "session" not in identity:
+        return winner, None, markers
+    if (winner.fields.get("session") == identity["session"] and "sprint" in identity
+            and winner.fields.get("sprint") == identity["sprint"]):
+        took = winner.fields.get("took")
+        if took is None:
+            return winner, None, markers
+        former = winner if took == str(winner.comment_id) else next(
+            (m for m in markers if m.kind == CLAIM_KIND and str(m.comment_id) == took), None)
+        if former is None:
+            return winner, None, markers
+        branch = _taken_branch(former, winner)
+        report = _kept(args, "takeover_reports").get(former.comment_id)
+        if report is None:
+            report = claim_takeover.worktree_report(args.repo, branch)
+        ids = _kept(args, "handoff_prompts").get(winner.comment_id) if former is winner else None
+        if ids and not retire_owner_actions(args.repo, args.issue, markers, winner.comment_id, "renewed",
+                                            only=ids):
+            _retired_owner_action_label(args.repo, args.issue, markers, winner.comment_id)
+        return winner, _takeover_report(former, report, branch), markers
+    if not claim_takeover.qualifies(winner, os.environ):
+        return winner, None, markers
+    report = claim_takeover.worktree_report(args.repo, winner.fields.get("branch"))
+    fresh_markers = fm.list_markers(args.repo, args.issue)
+    held = fm.contest(fresh_markers, CLAIM_KIND, match)
+    fresh = held[0] if held else None
+    if fresh is None or not _unchanged(fresh, winner) or not claim_takeover.qualifies(fresh, os.environ):
+        return fresh, None, fresh_markers
+    ids = [m.comment_id for m in fresh_markers if m.kind == OWNER_ACTION_KIND
+           and m.fields.get("claim") == str(fresh.comment_id) and fm.is_live(m, fresh_markers)]
+    _kept(args, "takeover_reports")[fresh.comment_id] = report
+    _kept(args, "handoff_prompts")[fresh.comment_id] = ids
+    fields = {k: v for k, v in fresh.fields.items() if k not in CALLER_KEYS}
+    fields.update(_caller_fields(os.environ))
+    fields.update(took=str(fresh.comment_id), tookbranch=fresh.fields.get("branch") or NO_BRANCH)
+    fm.edit(args.repo, fresh.comment_id, fm.rewritten(fresh, fields))
+    again = fm.list_markers(args.repo, args.issue)
+    held = fm.contest(again, CLAIM_KIND, match)
+    now = held[0] if held else None
+    if (now is None or now.comment_id != fresh.comment_id
+            or now.fields.get("session") != identity["session"]
+            or now.fields.get("sprint") != identity["sprint"]
+            or now.fields.get("took") != str(fresh.comment_id)):
+        return now, None, again
+    if ids and not retire_owner_actions(args.repo, args.issue, again, fresh.comment_id, "renewed", only=ids):
+        _retired_owner_action_label(args.repo, args.issue, again, fresh.comment_id)
+    return now, _takeover_report(fresh, report, fresh.fields.get("branch")), again
+
+
+def _caller_fields(environ: Mapping[str, str]) -> dict[str, str]:
+    """The fields naming the caller's session, sprint and own process, each only when it can be recorded."""
+    return {**claim_takeover.identity_fields(environ), **claim_takeover.process_fields(environ)}
+
+
+def _claim_fields(args: argparse.Namespace, takeover: dict[str, Any] | None) -> dict[str, str]:
+    fields = {"issue": str(args.issue), "holder": args.holder}
+    branch = args.branch or (takeover or {}).get("branch")
+    if branch:
+        fields["branch"] = branch
+    fields.update(_caller_fields(os.environ))
+    if takeover:
+        fields["took"] = str(takeover["claim"])
+    return fields
 
 
 def renew(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
@@ -397,7 +620,14 @@ def renew(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     updates = {"renewed": str(count + 1)}
     if args.branch:
         updates["branch"] = args.branch
-    fm.edit(args.repo, winner.comment_id, fm.with_fields(winner, **updates))
+    identity = claim_takeover.identity_fields(os.environ)
+    same = all(k in identity and identity[k] == winner.fields.get(k) for k in claim_takeover.IDENTITY_KEYS)
+    fields = {k: v for k, v in winner.fields.items() if k not in (*CALLER_KEYS, *TOOK_KEYS)}
+    fields.update(updates)
+    fields.update(_caller_fields(os.environ))
+    if same:
+        fields.update({k: winner.fields[k] for k in TOOK_KEYS if k in winner.fields})
+    fm.edit(args.repo, winner.comment_id, fm.rewritten(winner, fields))
     again = fm.list_markers(args.repo, args.issue)
     if not any(m.comment_id == winner.comment_id and fm.is_live(m, again) for m in again):
         return CONTENDED, _result(args, "not_held", winner.comment_id)
@@ -481,6 +711,9 @@ def status(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         retire_obsolete(args.repo, args.issue, markers, None)
         return 0, _result(args, "free", **report)
     winner = held[0]
+    if _holder_of(winner) != args.holder and claim_takeover.qualifies(winner, os.environ):
+        retire_obsolete(args.repo, args.issue, markers, winner.comment_id)
+        return 0, _result(args, "takeover-eligible", winner.comment_id, _holder_of(winner), **report)
     activity = activity_at(args.repo, winner)
     report["activity_at"] = activity.strftime("%Y-%m-%dT%H:%M:%SZ")
     base = (winner.comment_id, _holder_of(winner))
@@ -527,6 +760,8 @@ def _error_result(args: argparse.Namespace, error: ForgeError) -> dict[str, Any]
         return forge_land_lock.result(args, "error", **fields)
     if args.command == "owner-action":
         return forge_owner_action.result(args, "error", **fields)
+    if args.command == "acquire":
+        fields["takeover"] = None
     return _result(args, "error", **fields)
 
 
@@ -558,9 +793,12 @@ def main(argv: list[str] | None = None) -> int:
         if argv[:1] == ["land"]:
             _emit(forge_land_lock.usage_result(argv, str(error)))
             return USAGE
-        _emit({"command": argv[0] if argv and argv[0] in COMMANDS else None, "repo": None,
-               "issue": None, "holder": None, "verdict": "error", "comment_id": None, "by": None,
-               "error": "usage", "detail": str(error)})
+        usage = {"command": argv[0] if argv and argv[0] in COMMANDS else None, "repo": None,
+                 "issue": None, "holder": None, "verdict": "error", "comment_id": None, "by": None,
+                 "error": "usage", "detail": str(error)}
+        if argv[:1] == ["acquire"]:
+            usage["takeover"] = None
+        _emit(usage)
         return USAGE
     except SystemExit as stop:  # -h/--help: argparse printed the help text
         return stop.code if isinstance(stop.code, int) else 0

@@ -13,6 +13,8 @@ The findings to act on are:
 - every critical or important finding of the independent review: {{full-independent.findings}}
 - every code criterion of {{implement.acceptance}} that the review's grading does not show met with evidence: {{full-review.acceptance}}
 
+A finding that names only criteria of other kinds than code (evidence, human or note) in its restates or summary is dropped by the engine: leave it alone, neither fixing nor declining it.
+
 Fix each real defect with a regression test and commit it in the worktree. A finding that is wrong is declined, not changed in code: list it in declines with finding, its name (full-review:2 is the second finding of the review, full-independent:1 the first of the independent review), and reason, the evidence that it is wrong. A criterion that only lacks evidence: produce the evidence it asks for by running the command it names (or the test that asserts it, written first when none exists) in the worktree, and report in notes, per criterion id, the command, its exit status and its last lines; the focused-tests-only rule does not apply to a command a criterion names. If it fails, fix the cause with a regression test and commit; when nothing has to change, commit nothing and return commit equal to start_head.
 
 Before committing, read git status in the worktree you commit in and stage by path only the files the fix itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); a lock file, a generated file or an untracked file the fix did not need is left unstaged and named in notes.
