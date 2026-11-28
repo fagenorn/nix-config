@@ -320,6 +320,7 @@
  "home/common/agent-skills/tests/test_resolve_core.py": 0.2,
  "tests/test_host_sudo.py": 0.2,
  "tests/test_branch_protection.py": 0.2,
+ "tests/test_dotnet_solution_job.py": 0.2,
  "tests/test_transaction_plan.py": 0.2,
  "tests/test_console_bypass_proof_mcp.py": 0.2,
  "tests/test_console_action_card.py": 0.2,
