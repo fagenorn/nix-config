@@ -85,9 +85,26 @@ def settled(verdict, findings):
 LANE_RESULTS = {"issue.body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "issue.marked": False,
                 "issue.lane_paths": {"s": ["secrets/"]}}
 
+OUTLINE_ISSUE = ("# t\n\nbody\n\n## Acceptance criteria\n\n- [ ] [code] one\n- [ ] [code] two\n\n"
+                 "## Comment 1\n\n- [ ] [code] not a criterion\n")
+S1 = {"n": 1, "change": "c", "files": ["a.py"], "test": "t", "assertion": "a"}
+S2 = dict(S1, n=2, change="d")
+
+
+def mapping(slices, criteria, issue=OUTLINE_ISSUE, step="outline"):
+    return {f"{step}.slices": slices, f"{step}.criteria": criteria, "plan-preflight.issue_text": issue}
+
+
+def on(ids, slice_of=lambda i: 1):
+    return [{"id": cid, "kind": "code", "slice": slice_of(i)} for i, cid in enumerate(ids, 1)]
+
 
 class GraderTest(unittest.TestCase):
     GRADER_CASES = [
+        ("outline-mapped", mapping([S1, S2], on(["AC1", "AC2"], lambda i: i)), "mapped"),
+        ("outline-mapped", mapping([S1], on(["AC1", "AC2"], lambda i: i)), "unmapped"),
+        ("outline-proven", {"outline.slices": [S1]}, "proven"),
+        ("outline-proven", {"outline.slices": []}, "unproven"),
         ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "approve"}, "accept"),
         ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "revise"}, "revise"),
         ("review-capability", {"contract.capabilities": {
@@ -521,6 +538,56 @@ class LaneRuleTest(unittest.TestCase):
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     self.assertFalse(alias.name.startswith("agent_tools.delivery"), alias.name)
+
+
+class OutlineGraderTest(unittest.TestCase):
+    def mapped(self, slices, criteria, **kw):
+        return GRADERS["outline-mapped"].grade(mapping(slices, criteria, **kw))
+
+    def test_outline_mapped_refuses_a_criterion_that_names_no_slice(self):
+        self.assertEqual(self.mapped([S1], on(["AC1", "AC2"], lambda i: i)), "unmapped")
+        self.assertEqual(self.mapped([S1], on(["AC1", "AC2"])), "mapped")
+
+    def test_outline_mapped_refuses_an_issue_criterion_the_outline_omits(self):
+        self.assertEqual(self.mapped([S1], on(["AC1"])), "unmapped")
+        self.assertEqual(self.mapped([S1], on(["AC1", "AC2", "AC3"])), "unmapped")
+        self.assertEqual(self.mapped([S1], on(["AC1", "AC1"])), "unmapped")
+        self.assertEqual(self.mapped([S1], on(["ac1", "ac2"])), "mapped")
+
+    def test_outline_mapped_refuses_slices_that_share_a_number_or_leave_build_order(self):
+        both = on(["AC1", "AC2"])
+        self.assertEqual(self.mapped([S1, dict(S2, n=1)], both), "unmapped")
+        self.assertEqual(self.mapped([S2, S1], both), "unmapped")
+        self.assertEqual(self.mapped([S1, S2], both), "mapped")
+
+    def test_outline_mapped_reads_any_step_by_suffix(self):
+        self.assertEqual(self.mapped([S1], on(["AC1", "AC2"]), step="outline-revise"), "mapped")
+
+    def test_outline_mapped_refuses_a_bool_slice_and_non_lists(self):
+        self.assertEqual(self.mapped([S1], on(["AC1", "AC2"], lambda i: True)), "unmapped")
+        self.assertEqual(self.mapped([S1], None), "unmapped")
+        self.assertEqual(self.mapped(None, on(["AC1", "AC2"])), "unmapped")
+        self.assertEqual(self.mapped([dict(S1, n=True)], on(["AC1", "AC2"])), "unmapped")
+
+    def test_outline_mapped_needs_an_empty_criteria_list_for_an_issue_with_none(self):
+        self.assertEqual(self.mapped([S1], [], issue="# t\n\nbody\n"), "mapped")
+        self.assertEqual(self.mapped([S1], on(["AC1"]), issue="# t\n\nbody\n"), "unmapped")
+
+    def test_outline_proven_needs_a_test_and_an_assertion_on_every_slice(self):
+        grade = GRADERS["outline-proven"].grade
+
+        def proven(slices):
+            return grade({"outline.slices": slices})
+
+        self.assertEqual(proven([dict(S1, test="  ")]), "unproven")
+        self.assertEqual(proven([dict(S1, assertion="")]), "unproven")
+        self.assertEqual(proven([]), "unproven")
+        self.assertEqual(proven([S1, dict(S1, n=2, assertion=None), ]), "unproven")
+        self.assertEqual(proven([S1, S2]), "proven")
+
+    def test_the_outline_graders_declare_their_outcomes(self):
+        self.assertEqual(GRADERS["outline-mapped"].outcomes, ("mapped", "unmapped"))
+        self.assertEqual(GRADERS["outline-proven"].outcomes, ("proven", "unproven"))
 
 
 if __name__ == "__main__":
