@@ -210,6 +210,7 @@ agent-workflow-tests *args:
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
     tests/test_engine_cut_continue.py \
+    tests/test_engine_cut_sweep.py \
     tests/test_engine_resume.py \
     tests/test_engine_housekeeping.py \
     tests/test_engine_history_steps.py \
@@ -565,6 +566,10 @@ console-screenshots out="":
 # Cut the stubbed delivery after each event and result file of its ledger and continue it (nightly, daily in CI).
 engine-cut-sweep:
   tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v tests/test_engine_cut_sweep_daily.py
+
+# Rewrite the committed record of the uninterrupted stubbed delivery that the cut sweeps compare against.
+engine-cut-reference:
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" ENGINE_CUT_RECORD=write PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v tests/test_engine_cut_sweep_daily.py -k test_the_uninterrupted_run_matches_the_committed_record
 
 # Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build

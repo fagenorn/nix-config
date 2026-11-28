@@ -168,6 +168,15 @@ MAX_DELIVERIES = 3
 EFFECTS = ("comment posted", "issue created", "pull request created", "pull request merged")
 
 
+STATE_KEYS = ("issue state", "issue labels", "issues created", "comments", "live claims", "released claims",
+              "lock refs", "pull requests", "main change", "main subjects", "branch on origin", "local branches",
+              "worktree")
+RECORD = REPO_ROOT / "tests/fixtures/engine-stubbed-run/cut-reference.json"
+RECIPE = "just engine-cut-reference"
+ADOPT_BRANCH = re.compile(r"refs/heads/adopt-[0-9a-f]{12}")
+RECORD_KEYS = ("end", "state", "effects", "fresh_steps")
+
+
 @dataclass(frozen=True)
 class Outcome:
     end: str
@@ -175,6 +184,50 @@ class Outcome:
     effects: dict
     fresh: dict
     fresh_steps: dict
+
+    def to_record(self) -> dict:
+        """The outcome as the committed record keeps it: no session id, which differs on every run."""
+        return {"end": self.end, "state": self.state, "effects": self.effects, "fresh_steps": self.fresh_steps}
+
+    @classmethod
+    def from_record(cls, document: dict) -> Outcome:
+        for key in RECORD_KEYS:
+            if key not in document:
+                raise ValueError(f"record has no {key!r}")
+        for key in document:
+            if key not in RECORD_KEYS:
+                raise ValueError(f"record has an unknown {key!r}")
+        for member, keys in (("state", STATE_KEYS), ("effects", EFFECTS)):
+            for key in document[member]:
+                if key not in keys:
+                    raise ValueError(f"record {member} has an unknown {key!r}")
+            for key in keys:
+                if key not in document[member]:
+                    raise ValueError(f"record {member} has no {key!r}")
+        return cls(document["end"], document["state"], document["effects"], {}, document["fresh_steps"])
+
+
+def read_record(path: Path = RECORD) -> Outcome:
+    return Outcome.from_record(json.loads(path.read_text(encoding="utf-8")))
+
+
+def write_record(outcome: Outcome, path: Path = RECORD) -> None:
+    path.write_text(json.dumps(outcome.to_record(), indent=2) + "\n", encoding="utf-8")
+
+
+def record_problems(recorded: Outcome, live: Outcome) -> list[str]:
+    """One line per member of the committed record that the live uninterrupted run no longer matches."""
+    lines = []
+    if recorded.end != live.end:
+        lines.append(f"record end {recorded.end!r}, live run {live.end!r}")
+    for member in ("state", "effects", "fresh_steps"):
+        was, now = getattr(recorded, member), getattr(live, member)
+        for key in [*was, *(k for k in now if k not in was)]:
+            if was.get(key) != now.get(key):
+                lines.append(f"record {member} {key} {was.get(key)!r}, live run {now.get(key)!r}")
+    if lines:
+        lines.append(f"rewrite the record with {RECIPE} if the uninterrupted run changed on purpose")
+    return lines
 
 
 def _git(path: str | Path, *args: str) -> list[str]:
@@ -241,7 +294,9 @@ def outcome(run: StubbedRun, start: str) -> Outcome:
         "main change": _git(run.bare, "diff", "--raw", "--no-renames", "--no-abbrev", start, "main"),
         "main subjects": _git(run.bare, "log", "--format=%s", f"{start}..main"),
         "branch on origin": run.origin_tip(run.branch) is not None,
-        "local branches": sorted(_git(run.fixture.root, "for-each-ref", "--format=%(refname)", "refs/heads")),
+        # the adoption branch is named from a digest of the adoption plan, which moves with the adoption code
+        "local branches": sorted(ADOPT_BRANCH.sub("refs/heads/adopt-*", ref) for ref in
+                                 _git(run.fixture.root, "for-each-ref", "--format=%(refname)", "refs/heads")),
         "worktree": run.worktree_path.exists(),
     }
     fresh, fresh_steps = _fresh(run)
@@ -346,12 +401,15 @@ def diagnose(run: StubbedRun, deliveries) -> str:
 
 class CutSweep(Scenario):
     cuts_reached = 0
+    RECORDED = False  # a member that compares against the committed record sets it and runs no reference run
 
     def world(self) -> tuple[StubbedRun, str]:
         run = self.stubbed()
         return run, run.origin_tip("main")
 
     def reference(self) -> tuple[Outcome, tuple[CutPoint, ...]]:
+        if self.RECORDED:
+            raise AssertionError("this member compares against the committed record and runs no reference run")
         cls = type(self)
         if "_reference" not in cls.__dict__:
             started = time.monotonic()
