@@ -68,7 +68,10 @@ def _names(text: str, cid: str) -> bool:
 
 
 def _refs(text: str) -> list[tuple[str, int]]:
-    """Each finding name `<step>:<n>` in `text`: a step name (a lowercase letter in it) and a place of 1 or more (0 when too long to be one)."""
+    """Each finding name `<step>:<n>` in `text`: a step name with a lowercase letter, and a place of 1 or more.
+
+    A place too long to be one reads as 0.
+    """
     refs = []
     for place, ch in enumerate(text):
         if ch != ":" or text[place + 1:place + 2] not in tuple("123456789"):
@@ -104,7 +107,10 @@ def _named(finding: Mapping[str, object], kinds: Mapping[str, object]) -> list[s
 
 
 def _own(finding: Mapping[str, object], kinds: Mapping[str, object]) -> list[str]:
-    """The criteria a finding of kind `other`, restating none, names in its `restates` or `summary`, when all are non-code."""
+    """The criteria a finding of kind `other`, restating none, names in `restates` or `summary`.
+
+    Empty unless every one named is a non-code criterion.
+    """
     restates = finding.get("restates")
     if finding.get("kind", "other") != "other" or (isinstance(restates, str) and _restates_a_finding(restates)):
         return []
