@@ -1,4 +1,4 @@
-"""The job stopwatch: how long the `.NET Solution` CI job takes on the integration branch.
+"""How long the `.NET Solution` CI job takes on the integration branch, and the one issue filed when it is too slow.
 
 The command `job-time` reads the job's wall time from the run history of `ci.yaml`:
 
@@ -22,6 +22,14 @@ the lowest number), a filer that would not be trusted raises `Refusal`, and else
 is filed (`filed`). Stdout is one line:
 
     {"action": "filed", "issue": 101, "job": ".NET Solution", "runs": 10, "median_seconds": 250.0}
+
+The issue it files says, in its title and its first sentence, that the median wall time of
+the `JOB` job over the last `RUNS` green push runs of `WORKFLOW` on the branch is not under
+the `BUDGET_MS` budget. Its body asks for the job to be made faster (its Nix store cache,
+its build or its tests) and says that a slow run never fails a change. Its one acceptance
+criterion is met when the log of the `OWN_JOB` job on the branch prints `"action": "within"`.
+The body starts with `MARKER`; at most one such issue is open, and the marker identifies it
+only when a trusted author wrote it.
 
 `observed` takes the runs after the merge run, the earliest push run whose head is `--merge`,
 which is an exclusive boundary: it is the first run that can save the new cache, so the
