@@ -6,7 +6,13 @@
 # `agent_tools.delivery.engine_commands.PLATFORM_MODULES` mirrors the rows of the commands an
 # engine procedure may run, and tests/test_engine_commands.py pins the mirror to these rows.
 # The revision record is the flake revision a project's lock pins (adoption's lock entry).
-{ pkgs, revision }:
+# The package also links the .NET solution's agent-tools executable at libexec/agent-platform/agent-tools,
+# on no PATH, so a later slice can point a command row at it.
+{
+  pkgs,
+  revision,
+  agentToolsDotnet,
+}:
 let
   inherit (pkgs) lib;
   python = pkgs.python3;
@@ -177,10 +183,12 @@ let
           launchers = lib.mapAttrs (name: _: "${package}/bin/${name}") commands;
           inherit python tools;
           dotnet-tools = dotnetTools;
+          agent-tools-dotnet = agentToolsDotnet;
         };
       }
       ''
-        mkdir -p "$out/bin" "$out/share/agent-platform"
+        mkdir -p "$out/bin" "$out/share/agent-platform" "$out/libexec/agent-platform"
+        ln -s ${agentToolsDotnet}/bin/agent-tools "$out/libexec/agent-platform/agent-tools"
         cp ${../home/common/agent-skills/platform-manifest.json} "$out/share/agent-platform/platform-manifest.json"
         cp ${revisionRecord} "$out/share/agent-platform/platform-revision.json"
         cp -R ${../home/common/agent-skills/standards} "$out/share/agent-platform/standards"
