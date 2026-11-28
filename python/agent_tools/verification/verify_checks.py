@@ -126,7 +126,7 @@ named at or after the anchor's second that does not read as a run, is exit 2 (`r
 never a verdict; a root whose events the ledger would not replay has no lane.
 
 `engine-direct-delivered --since SHA [--runs-root DIR] [--log PATH] [--repo-root DIR]`
-(`verify_checks.engine_direct_delivered`, issue 1549) is met when a direct-lane engine delivery after activation ended
+(`verify_checks.engine_direct_delivered`) is met when a direct-lane engine delivery after activation ended
 done with its pull request merged within 14 days of the activation. The anchor is found as `engine-direct-past-implement`
 finds it (none: `not_yet`, 75, with `anchor` null). A root counts when its `run.json` has procedure `deliver`, no `parent`
 and a `started` at or after the anchor's whole second, its first `lane` transition is `direct`, it has a `landing`
