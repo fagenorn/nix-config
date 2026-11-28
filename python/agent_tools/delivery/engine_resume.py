@@ -9,7 +9,7 @@ continued in the same visit too: `named_children` reads the child runs its `call
 reads how a child run ended, so the continuing call walks the unfinished children again in place and starts none.
 
 With earlier results stale, the interrupted visit still resumes when each stale step is a `read` command (it
-mutates nothing and waits for nothing) that, run again, answers with the outcome it stored: the answer is not
+mutates nothing and waits for nothing) that, run again, answers with the outcome and result it stored: the answer is not
 recorded and a rewinding walk runs the step as a visit. One that answers otherwise rewinds the visit as before,
 so a read that changed (an issue parked meanwhile) is never walked past, and one that cannot have changed (the
 repository head) never discards a session.
@@ -30,13 +30,16 @@ as its result and runs no child.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from agent_tools.claims import forge_markers
 from agent_tools.delivery import engine_core, engine_ledger, engine_session, engine_stop, procedure_terms
 
 DONE = "done"
+RENEWED = re.compile(r" renewed=[0-9]+")
 ENGINE_STOPS = (*procedure_terms.ENGINE_STOPS, engine_stop.STOPPED_BY_REQUEST)
 
 
@@ -195,11 +198,33 @@ def pending_reentry(action: engine_core.Action, ledger: list[dict]) -> engine_co
     return engine_core.Reentry(action.step, action.visit, ()) if entered else None
 
 
+def _stored_result(run_dir: Path, name: str, visit: int) -> object:
+    """The result document the visit stored, None when it is absent or unreadable."""
+    try:
+        return json.loads((run_dir / "results" / f"{name}.{visit}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _settled(value: object) -> object:
+    """`value` with the renewal count of every claim marker in its text zeroed: the run's own keep-alive rewrites
+    that count in the claim comment a read result quotes, which is no change in what the read found."""
+    if isinstance(value, str):
+        return forge_markers.MARKER.sub(
+            lambda found: RENEWED.sub(" renewed=0", found[0]) if found["kind"] == "claim" else found[0], value)
+    if isinstance(value, list):
+        return [_settled(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _settled(item) for key, item in value.items()}
+    return value
+
+
 def unchanged(procedure: dict, inputs: dict, ledger: list[dict], stale: tuple[str, ...], *,
-              events: Callable[[list[dict]], list[dict]],
+              run_dir: Path, events: Callable[[list[dict]], list[dict]],
               rerun: Callable[[engine_core.RunCommand], object]) -> bool:
-    """Whether every stale step is a `read` command that, run again through `rerun`, answers with the outcome its
-    latest visit stored. `events` turns a ledger part into the core's events."""
+    """Whether every stale step is a `read` command that, run again through `rerun`, answers with the outcome and
+    the result document its latest visit stored (a later step consumes the result's fields, and a read can
+    keep its outcome while its fields change). `events` turns a ledger part into the core's events."""
     steps = {item["id"]: item for item in procedure["steps"]}
     for name in stale:
         step = steps[name]
@@ -213,7 +238,9 @@ def unchanged(procedure: dict, inputs: dict, ledger: list[dict], stale: tuple[st
         if not isinstance(pending, engine_core.RunCommand) or pending.step != name:
             return False
         ran = rerun(pending)
-        if ran.timed_out or recorded is None or ran.outcome != recorded:
+        stored = _stored_result(run_dir, name, visit)
+        if (ran.timed_out or recorded is None or ran.outcome != recorded or stored is None
+                or _settled(ran.result) != _settled(stored)):
             return False
     return True
 

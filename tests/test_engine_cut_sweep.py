@@ -18,8 +18,9 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from tests.engine_cut_sweep import (BROKEN_CUT, RECIPE, SAMPLE, STATE_KEYS, CutPoint, CutSweep, Outcome, again, contained,
-                                    judge, read_record, reading, record_problems, select, write_record)
+from tests.engine_cut_sweep import (BROKEN_CUT, RECIPE, SAMPLE, STATE_KEYS, CutPoint, CutSweep, Outcome, again,
+                                    contained, judge, outcome, read_record, reading, record_problems, select,
+                                    write_record)
 from tests.engine_fixture import AdoptedFixtures
 from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import StepCoverage
@@ -70,6 +71,21 @@ class CutSweepTest(CutSweep):
         self.assertTrue(any(re.fullmatch(session, line) for line in failures), failures)
         self.assertTrue(any(line.startswith(prefix + "delivery 1 exited 1 with no result line: ")
                             for line in failures), failures)
+
+    def test_a_local_main_behind_origin_is_a_state_the_rule_judges_against_the_record(self):
+        run, start = self.world()
+        git = run.world.git
+        reference = read_record()
+        self.assertIs(outcome(run, start).state["local main at origin"], True)
+        git(run.fixture.root, "commit", "--quiet", "--allow-empty", "-m", "published")
+        git(run.fixture.root, "push", "--quiet", "origin", "main")
+        git(run.fixture.root, "update-ref", "refs/heads/main", "HEAD~1")
+
+        behind = outcome(run, start)
+
+        self.assertIs(behind.state["local main at origin"], False)
+        self.assertIn("cut after x: local main at origin False, uninterrupted True",
+                      judge("x", reference, replace(reference, state=behind.state)))
 
     def test_this_member_runs_no_reference_run(self):
         with self.assertRaises(AssertionError):

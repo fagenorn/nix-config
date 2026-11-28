@@ -46,9 +46,11 @@ Order rule: the `result_stored` event is first staged (written to a temporary fi
 any staged event a cut left), then a result file is written to a writer-owned temporary file (fsynced), then
 linked into place, which refuses a result that exists, before the event is appended; `append_event` refuses
 that event while the file is absent. A crash between the two leaves a result with no event, never an
-event naming no result. An append first cuts a write that was cut short back to the last newline, so a
-torn tail never joins the next event; the cut and the write run under an exclusive `flock` on
-`events.jsonl`.
+event naming no result. A writer holds an exclusive `flock` on `results/` from its check that the result is
+absent until the result is linked, so two writers of one visit never interleave: the staged event is always
+the event of the writer whose result file was published. An append first cuts a write that was cut short
+back to the last newline, so a torn tail never joins the next event; the cut and the write run under an
+exclusive `flock` on `events.jsonl`.
 
 The ledger holds no credential: `run.json` carries only the inputs its caller passes, plus the starting
 session id the shell reads from `CLAUDE_CODE_SESSION_ID`.
@@ -56,6 +58,7 @@ session id the shell reads from `CLAUDE_CODE_SESSION_ID`.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -543,6 +546,17 @@ def staged_event(run_dir: Path, step: str, visit: int) -> dict | None:
     return event
 
 
+@contextlib.contextmanager
+def _results_lock(run_dir: Path):
+    """An exclusive `flock` on the run's `results/` directory, held from a writer's absence check to its publish."""
+    descriptor = os.open(Path(run_dir) / "results", os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: str,
                  wall_seconds: float, turns: int, tokens: Mapping[str, int],
                  spend_usd: float, head: str | None = None,
@@ -562,10 +576,11 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
                             "tokens": dict(tokens), "spend_usd": spend_usd, **optional})
     path = run_dir / relative
     if not adopt:
-        if os.path.lexists(path):
-            raise LedgerError(f"{relative} is already stored")
-        _write_staged(staged_path(run_dir, step, visit), event)
-        _write_result(path, result)
+        with _results_lock(run_dir):
+            if os.path.lexists(path):
+                raise LedgerError(f"{relative} is already stored")
+            _write_staged(staged_path(run_dir, step, visit), event)
+            _write_result(path, result)
     append_event(run_dir, event)
     return path
 

@@ -17,6 +17,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from agent_tools.delivery import engine_core, engine_ledger, engine_resume, engine_session, engine_stop
@@ -921,6 +922,75 @@ class AdoptStagedTest(unittest.TestCase):
         self.assertEqual(engine_resume.pending_reentry(action, self.events()),
                          engine_core.Reentry("a", 1, ()))
         self.assertIsNone(engine_resume.pending_reentry(action, []))
+
+
+class UnchangedReadTest(unittest.TestCase):
+    """`engine_resume.unchanged` over a read step whose stored result a later step consumes field by field."""
+
+    PROCEDURE = {"format": 1, "inputs": ["issue"], "stops": {},
+                 "steps": [{"id": "r", "stage": "setup", "kind": "command", "command": "c", "holds": "read",
+                            "in": ["run.issue"], "on": {"clear": "done", "failed": "done", "refused": "done"}}]}
+    STORED = {"verdict": "clear", "issue_text": "the issue as first read", "branch": "issue-1-a"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = engine_ledger.create_run(
+            project="example/project", issue=1, procedure="toy",
+            procedures_dir=Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures",
+            platform_revision="0" * 40, host="host-a", inputs={"issue": 1},
+            now=datetime(2026, 11, 21, tzinfo=timezone.utc), token="a1b2", root=Path(self.tmp.name))
+        engine_ledger.append_event(self.run, {"event": "step_entered", "at": AT, "step": "r", "visit": 1,
+                                              "stage": "setup"})
+        engine_ledger.store_result(self.run, step="r", visit=1, result=self.STORED, at=AT, wall_seconds=0.0,
+                                   turns=0, tokens=dict(ZERO_TOKENS), spend_usd=0, outcome="clear")
+
+    def read_again(self, result: dict, outcome: str = "clear") -> bool:
+        ran = SimpleNamespace(timed_out=False, outcome=outcome, result=result)
+        return engine_resume.unchanged(self.PROCEDURE, {"issue": 1}, engine_ledger.replay(self.run / "events.jsonl"),
+                                       ("r",), run_dir=self.run, events=lambda part: [],
+                                       rerun=lambda pending: ran)
+
+    def test_a_read_that_answers_with_the_outcome_and_result_it_stored_is_unchanged(self):
+        self.assertTrue(self.read_again(dict(self.STORED)))
+
+    def test_a_read_that_keeps_its_outcome_but_changes_a_result_field_is_changed(self):
+        for field, value in (("issue_text", "the issue as edited"), ("branch", "issue-1-b")):
+            with self.subTest(field=field):
+                self.assertFalse(self.read_again({**self.STORED, field: value}))
+
+    def test_a_read_whose_quoted_claim_was_only_renewed_by_the_run_is_unchanged(self):
+        claim = "<!-- agent:claim v1 issue=1 holder=h/1 branch=issue-1-a renewed={} -->\nClaimed by h/1."
+        text = "# Title\n\nBody\n\n## Comment 1\n\n" + claim
+        run = engine_ledger.create_run(
+            project="example/project", issue=2, procedure="toy",
+            procedures_dir=Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures",
+            platform_revision="0" * 40, host="host-a", inputs={"issue": 2},
+            now=datetime(2026, 11, 22, tzinfo=timezone.utc), token="a1b2", root=Path(self.tmp.name))
+        engine_ledger.append_event(run, {"event": "step_entered", "at": AT, "step": "r", "visit": 1,
+                                         "stage": "setup"})
+        engine_ledger.store_result(run, step="r", visit=1, result={**self.STORED, "issue_text": text.format(1)},
+                                   at=AT, wall_seconds=0.0, turns=0, tokens=dict(ZERO_TOKENS), spend_usd=0,
+                                   outcome="clear")
+        ledger = engine_ledger.replay(run / "events.jsonl")
+
+        def again(issue_text: str) -> bool:
+            ran = SimpleNamespace(timed_out=False, outcome="clear",
+                                  result={**self.STORED, "issue_text": issue_text})
+            return engine_resume.unchanged(self.PROCEDURE, {"issue": 2}, ledger, ("r",), run_dir=run,
+                                           events=lambda part: [], rerun=lambda pending: ran)
+
+        self.assertTrue(again(text.format(7)))
+        self.assertFalse(again(text.format(7).replace("Body", "Edited body")))
+        self.assertFalse(again(text.format(7).replace("branch=issue-1-a", "branch=issue-1-b")))
+
+    def test_a_read_that_changes_its_outcome_is_changed(self):
+        self.assertFalse(self.read_again(dict(self.STORED), outcome="failed"))
+
+    def test_a_read_whose_stored_result_cannot_be_read_is_changed(self):
+        (self.run / "results" / "r.1.json").write_text("{", encoding="utf-8")
+
+        self.assertFalse(self.read_again(dict(self.STORED)))
 
 
 class DeniedRecordTest(unittest.TestCase):

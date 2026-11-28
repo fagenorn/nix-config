@@ -169,8 +169,8 @@ EFFECTS = ("comment posted", "issue created", "pull request created", "pull requ
 
 
 STATE_KEYS = ("issue state", "issue labels", "issues created", "comments", "live claims", "released claims",
-              "lock refs", "pull requests", "main change", "main subjects", "branch on origin", "local branches",
-              "worktree")
+              "lock refs", "pull requests", "main change", "main subjects", "local main at origin",
+              "branch on origin", "local branches", "worktree")
 RECORD = REPO_ROOT / "tests/fixtures/engine-stubbed-run/cut-reference.json"
 RECIPE = "just engine-cut-reference"
 ADOPT_BRANCH = re.compile(r"refs/heads/adopt-[0-9a-f]{12}")
@@ -235,6 +235,11 @@ def _git(path: str | Path, *args: str) -> list[str]:
     return done.stdout.splitlines()
 
 
+def main_at_origin(run: StubbedRun) -> bool:
+    """Whether the checkout's local `main` is at origin's tip: the close-out fast-forward ran."""
+    return _git(run.fixture.root, "rev-parse", "main") == [run.origin_tip("main")]
+
+
 def _root_events(run: StubbedRun) -> list[dict]:
     roots = run.runs()
     return run.events(roots[0]) if roots and (roots[0] / "events.jsonl").exists() else []
@@ -293,6 +298,7 @@ def outcome(run: StubbedRun, start: str) -> Outcome:
         "pull requests": [[p["number"], p["state"], p["headRefName"]] for p in run.pulls()],
         "main change": _git(run.bare, "diff", "--raw", "--no-renames", "--no-abbrev", start, "main"),
         "main subjects": _git(run.bare, "log", "--format=%s", f"{start}..main"),
+        "local main at origin": main_at_origin(run),
         "branch on origin": run.origin_tip(run.branch) is not None,
         # the adoption branch is named from a digest of the adoption plan, which moves with the adoption code
         "local branches": sorted(ADOPT_BRANCH.sub("refs/heads/adopt-*", ref) for ref in
@@ -430,6 +436,7 @@ class CutSweep(Scenario):
             print(f"cut reference: {len(points)} cut points, {seconds:.1f} s", file=sys.stderr)
             cls.reference_seconds = seconds
             cls._reference = (result, points)
+            self.doCleanups()  # end the reference world: its fake forge environment must not reach a cut world
         return cls._reference
 
     def cut_and_continue(self, plan, expected: Outcome, *, broken: bool = False) -> tuple[str, list[str]]:

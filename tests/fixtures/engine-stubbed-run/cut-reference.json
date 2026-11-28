@@ -25,6 +25,7 @@
       "Merge remote-tracking branch 'origin/issue-41-add-a-greeting'",
       "stub change"
     ],
+    "local main at origin": true,
     "branch on origin": false,
     "local branches": [
       "refs/heads/adopt-*",

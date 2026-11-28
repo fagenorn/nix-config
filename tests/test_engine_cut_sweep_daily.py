@@ -162,6 +162,17 @@ class CutHarnessTest(Scenario):
         self.assertEqual(live_started(run), [])
 
 
+class ReferenceWorldTest(CutSweep):
+    """A class of its own, so that its reference run is not the cached one of `CutSweepDailyTest`."""
+
+    def test_the_reference_run_leaves_no_fake_forge_environment_for_the_cut_worlds(self):
+        before = dict(os.environ)
+
+        self.reference()
+
+        self.assertEqual(dict(os.environ), before)
+
+
 class CutSweepDailyTest(CutSweep):
     def test_the_uninterrupted_run_matches_the_committed_record(self):
         live, _ = self.reference()

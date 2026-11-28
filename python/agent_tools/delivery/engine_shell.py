@@ -658,7 +658,8 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
 
     def same_read(stale: tuple[str, ...]) -> bool:
         return engine_resume.unchanged(
-            procedure, inputs, ledger, stale, events=lambda part: core_events(run_dir, part, computed),
+            procedure, inputs, ledger, stale, run_dir=run_dir,
+            events=lambda part: core_events(run_dir, part, computed),
             rerun=lambda pending: engine_commands.run(
                 table, pending.command, pending.subcommand, pending.args, guard=_guard(),
                 on_start=lambda pid: None, timeout=table.wall_seconds(pending.command)))
