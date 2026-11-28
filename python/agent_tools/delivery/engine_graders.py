@@ -5,6 +5,8 @@ step's input paths to their values. It reads only its argument, and any value
 may be `None` (a group member that sent no reply reads as `None`, D6).
 
 - `direct-implemented`: the implement reply -> ineligible, task, lite or full.
+- `outline-implemented`: `direct-implemented`, except that an empty acceptance list is not `task`: an outline of
+  an issue with no acceptance criteria builds with none (the list must still be a list).
 - `direct-lite-tally`: the lite review and the independent one -> no-review,
   unusable, escalate, codex-unavailable, findings or clean.
 - `direct-escalated-tally`: the same without `no-review` and `escalate`
@@ -31,6 +33,13 @@ may be `None` (a group member that sent no reply reads as `None`, D6).
   failing ids needs every condition, else all).
 - `lane-rule`: the issue step's body, marker and lane paths -> direct or
   standard, by `lane_rule.choose`, with an unknown marker read as marked.
+- `outline-mapped`: an outline's slices, criteria and the issue text (read by the suffixes `.slices`, `.criteria`
+  and `.issue_text`, so every planner step shares it) -> mapped when the slice numbers are exactly 1..n in list
+  order, every criterion names a string id and the number of a slice, and the upper-cased ids are distinct and
+  equal the issue's own acceptance criteria (`AC<index>`, `acceptance_criteria.acceptance_criteria` of the text
+  after its first line, the title, so only the body is read); else unmapped.
+- `outline-proven`: an outline's slices (read by the suffix `.slices`) -> proven when the list is non-empty and
+  every slice carries a non-blank test and a non-blank assertion; else unproven.
 """
 
 from __future__ import annotations
@@ -38,7 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
-from agent_tools.delivery import lane_rule
+from agent_tools.delivery import acceptance_criteria, lane_rule
 
 
 NON_CODE_KINDS: tuple[str, ...] = ("evidence", "human", "note")
@@ -237,16 +246,24 @@ def _tally(results: Mapping[str, object], review: str, independent: str, *,
     return "clean"
 
 
-def _direct_implemented(results: Mapping[str, object]) -> str:
+def _implemented(results: Mapping[str, object], *, criteria_free: bool) -> str:
     if results.get("implement.ineligible") is True:
         return "ineligible"
     if (results.get("implement.status") != "done" or _blank(results.get("implement.start_head"))
             or _blank(results.get("implement.commit"))):
         return "task"
     acceptance = results.get("implement.acceptance")
-    if not isinstance(acceptance, list) or not acceptance:
+    if not isinstance(acceptance, list) or not (acceptance or criteria_free):
         return "task"
     return "full" if results.get("implement.sensitive") is True else "lite"
+
+
+def _direct_implemented(results: Mapping[str, object]) -> str:
+    return _implemented(results, criteria_free=False)
+
+
+def _outline_implemented(results: Mapping[str, object]) -> str:
+    return _implemented(results, criteria_free=True)
 
 
 def _direct_lite_tally(results: Mapping[str, object]) -> str:
@@ -324,10 +341,41 @@ def _lane_rule(results: Mapping[str, object]) -> str:
                             lane_paths=results.get("issue.lane_paths")).lane
 
 
+def _integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _outline_mapped(results: Mapping[str, object]) -> str:
+    slices, criteria = _suffixed(results, ".slices"), _suffixed(results, ".criteria")
+    text = _suffixed(results, ".issue_text")
+    if not isinstance(slices, list) or not isinstance(criteria, list) or not isinstance(text, str):
+        return "unmapped"
+    text = text.partition("\n")[2]  # the first line is the issue's title: only the body holds its criteria
+    if not all(isinstance(s, Mapping) and _integer(s.get("n")) for s in slices):
+        return "unmapped"
+    if [s["n"] for s in slices] != list(range(1, len(slices) + 1)):
+        return "unmapped"
+    if not all(isinstance(c, Mapping) and isinstance(c.get("id"), str) and _integer(c.get("slice"))
+               and 1 <= c["slice"] <= len(slices) for c in criteria):
+        return "unmapped"
+    ids = [c["id"].upper() for c in criteria]
+    wanted = {acceptance_criteria.ac_id(c) for c in acceptance_criteria.acceptance_criteria(text)}
+    return "mapped" if len(set(ids)) == len(ids) and set(ids) == wanted else "unmapped"
+
+
+def _outline_proven(results: Mapping[str, object]) -> str:
+    slices = _suffixed(results, ".slices")
+    if not isinstance(slices, list) or not slices:
+        return "unproven"
+    return "proven" if all(isinstance(s, Mapping) and not _blank(s.get("test")) and not _blank(s.get("assertion"))
+                           for s in slices) else "unproven"
+
+
 GRADERS: Mapping[str, Grader] = {
     "toy-tally": Grader(("accept", "revise"), _toy_tally),
     "review-capability": Grader(("clear", "blocked"), _review_capability),
     "direct-implemented": Grader(("ineligible", "task", "lite", "full"), _direct_implemented),
+    "outline-implemented": Grader(("ineligible", "task", "lite", "full"), _outline_implemented),
     "direct-lite-tally": Grader(
         ("no-review", "unusable", "escalate", "codex-unavailable", "findings", "clean"),
         _direct_lite_tally, drops=dropped),
@@ -341,4 +389,6 @@ GRADERS: Mapping[str, Grader] = {
     "verify-fixed": Grader(("unrelated", "not-done", "done"), _verify_fixed),
     "verify-narrowing": Grader(("unusable", "findings", "rerun-failed-only", "rerun-all"), _verify_narrowing),
     "lane-rule": Grader(("direct", "standard"), _lane_rule),
+    "outline-mapped": Grader(("mapped", "unmapped"), _outline_mapped),
+    "outline-proven": Grader(("proven", "unproven"), _outline_proven),
 }

@@ -90,6 +90,32 @@
         "posted",
         "error"
       ],
+      "outline-built": [
+        "built",
+        "error"
+      ],
+      "outline-note": [
+        "posted",
+        "error"
+      ],
+      "outline-note-check": [
+        "posted",
+        "absent",
+        "error"
+      ],
+      "outline-preflight": [
+        "clear",
+        "error"
+      ],
+      "outline-read": [
+        "read",
+        "error"
+      ],
+      "outline-slice": [
+        "read",
+        "built",
+        "error"
+      ],
       "plan-note": [
         "posted",
         "error"

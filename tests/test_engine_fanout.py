@@ -20,11 +20,15 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from unittest import mock
 
 from agent_tools.delivery import (
     engine_commands, engine_ledger, engine_resume, engine_session, engine_shell, engine_stop,
 )
+from agent_tools.delivery.engine_admission import Admission
+from tests.test_engine_check import SHIPPED_OK, broken_copy, editing, run_check
+from tests.test_engine_check import step as check_step
 from tests.test_engine_deliver import EngineProject, step
 from tests.test_engine_session import (
     DRAFT_REPLY, RESULT_NORMAL, canned_result, copy_roles, install_stub,
@@ -72,12 +76,40 @@ def FAN(items_command: str, parallel: int) -> list[dict]:
     ]
 
 
+def sequential(steps: list[dict]) -> list[dict]:
+    """The same steps with the fan call running its items in order, stopping at the first not ending done."""
+    fan = next(item for item in steps if item["id"] == "fan")
+    del fan["parallel"]
+    fan["sequential"] = True
+    return steps
+
+
 def fan_children(work: str = "standin-stamp") -> dict[str, dict]:
     return {"fan-child": child([
         {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": work,
          "in": ["run.item"], "on": {"ok": "judge", "failed": "child-stop", "refused": "child-stop"}},
         {"id": "judge", "stage": "building", "kind": "decide", "holds": "run", "grader": "toy-tally",
          "in": ["run.item"], "on": {"accept": "done", "revise": "child-stop"}}])}
+
+
+class AdmissionTest(unittest.TestCase):
+    def test_a_sequential_admission_stops_handing_out_indexes_after_an_end_other_than_done(self):
+        admission = Admission(3, sequential=True)
+        self.assertEqual(admission.take(), 0)
+        admission.ended("task")
+        self.assertIsNone(admission.take())
+
+    def test_a_sequential_admission_continues_after_done(self):
+        admission = Admission(3, sequential=True)
+        self.assertEqual(admission.take(), 0)
+        admission.ended("done")
+        self.assertEqual(admission.take(), 1)
+
+    def test_a_plain_admission_ignores_the_ends(self):
+        admission = Admission(3)
+        self.assertEqual(admission.take(), 0)
+        admission.ended("task")
+        self.assertEqual(admission.take(), 1)
 
 
 class WalkSpy:
@@ -376,6 +408,33 @@ class CallTest(unittest.TestCase):
         stopped = project.events(root.parent / items[1]["run"])[-1]
         self.assertEqual((stopped["event"], stopped["stop"]), ("stop_reached", "child-stop"))
 
+    def test_a_sequential_call_admits_no_item_after_a_child_that_stops(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(sequential(FAN("standin-items-mixed", 1)),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        (root,) = roots(project)
+        events = project.events(root)
+        self.assertEqual([e["outcome"] for e in graded(events, "fan")], ["child-stop"])
+        items = result(root, "fan.1.json")["items"]
+        self.assertEqual([entry["end"] for entry in items], ["done", "child-stop"])
+        self.assertEqual(len(children_of(project)), 2)
+        self.assertEqual([e["index"] for e in events if e["event"] == "call"], [0, 1])
+
+    def test_a_sequential_call_whose_children_all_end_done_runs_every_item_in_order(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(sequential(FAN("standin-items", 1)),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (root,) = roots(project)
+        calls = [e for e in project.events(root) if e["event"] == "call"]
+        self.assertEqual([c["index"] for c in calls], [0, 1, 2])
+        items = result(root, "fan.1.json")["items"]
+        self.assertEqual([entry["end"] for entry in items], ["done"] * 3)
+        self.assertEqual([entry["run"] for entry in items], [c["child"] for c in calls])
+        self.assertEqual(len(children_of(project)), 3)
+
     def test_a_call_without_each_runs_one_child(self):
         project = EngineProject(self)
         procedures = project.procedures(
@@ -464,7 +523,7 @@ class CallTest(unittest.TestCase):
         project = EngineProject(self)
         fault_seen = threading.Event()
         waited: list[bool] = []
-        real_fail = engine_shell._Admission.fail
+        real_fail = engine_shell.Admission.fail
 
         def fail(admission) -> None:
             real_fail(admission)
@@ -479,7 +538,7 @@ class CallTest(unittest.TestCase):
         spy = WalkSpy(REAL_WALK, before=before)
         procedures = project.procedures(FAN("standin-items-hold", 2), children=fan_children())
         with project.inside(), mock.patch.object(engine_shell, "_walk", spy), \
-                mock.patch.object(engine_shell._Admission, "fail", fail):
+                mock.patch.object(engine_shell.Admission, "fail", fail):
             with self.assertRaises(engine_shell.Fault):
                 engine_shell.deliver(1517, procedures)
         self.assertEqual(waited, [True])
@@ -1294,6 +1353,42 @@ class HandlerTest(unittest.TestCase):
             self.assertIs(handler, engine_session._terminate)
         self.assertIs(after_group, sentinel)
         self.assertIs(after_call, sentinel)
+
+
+def _sequential_call(sequential: object, each: bool, parallel: int | None) -> Callable[[dict], None]:
+    """The toy's `children` call with `sequential` set, and with `each` and `parallel` as given."""
+    def change(toy: dict) -> None:
+        children = check_step(toy, "children")
+        children["sequential"] = sequential
+        if not each:
+            del children["each"]
+        if parallel is None:
+            del children["parallel"]
+        else:
+            children["parallel"] = parallel
+    return change
+
+
+class SequentialCallCheckTest(unittest.TestCase):
+    def test_sequential_needs_true_each_and_no_parallel(self):
+        refused = [
+            ("yes", True, None, "sequential must be true."),
+            (True, False, None, "sequential needs each."),
+            (True, True, 2, "sequential does not go with parallel."),
+        ]
+        for sequential, each, parallel, detail in refused:
+            with self.subTest(detail):
+                directory = broken_copy(editing("toy", _sequential_call(sequential, each, parallel)))
+                code, out, _ = run_check("--procedures", str(directory))
+                document = json.loads(out)
+                self.assertEqual((code, document["verdict"]), (1, "refused"))
+                self.assertEqual([(r["step"], r["defect"], r["detail"]) for r in document["refusals"]],
+                                 [("children", "invalid_field", detail)])
+
+    def test_a_sequential_call_over_each_without_parallel_is_accepted(self):
+        directory = broken_copy(editing("toy", _sequential_call(True, True, None)))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
 
 if __name__ == "__main__":

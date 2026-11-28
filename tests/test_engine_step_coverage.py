@@ -19,7 +19,7 @@ from unittest import mock
 from agent_tools.delivery.suite_runner import PART_DIR_ENV, PART_ENV, PART_MEMBER_ENV
 from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import (
-    COVERAGE_MODULES, PROCEDURE_NAMES, UNREACHABLE, Step, StepCoverage, check_scopes, reachable, scopes)
+    COVERAGE_MODULES, ENTRIES, PROCEDURE_NAMES, UNREACHABLE, Step, StepCoverage, check_scopes, reachable, scopes)
 from tests.test_suite_tiers import SUITE_RECIPE, justfile_text, recipe_paths
 
 TIER = "fast"  # reads the shipped procedure files and the justfile, copies a few small files
@@ -75,19 +75,33 @@ class ProcedureScopeTest(unittest.TestCase):
         self.assertEqual(
             reachable(PROCEDURES),
             ("close-out", "deliver", "direct", "land", "land-attempt", "setup", "verify"))
+        self.assertEqual(
+            reachable(PROCEDURES, "outline"),
+            ("close-out", "land", "land-attempt", "outline", "outline-build", "outline-slice", "setup", "verify"))
+        self.assertEqual(ENTRIES, ("deliver", "outline"))
         self.assertEqual(set(given), set(COVERAGE_MODULES))
         self.assertIn("verify", given[STUBBED_RUN])
         self.assertIn("verify", given[VERIFY_ROUNDS])
 
+    def test_a_procedure_only_outline_reaches_is_reachable(self):
+        procedures = self.copy()
+        store(procedures, "extra", load(procedures, "verify"))
+        add_call(procedures, "outline", "extra", "extra-call")
+        self.assertNotIn("extra", reachable(procedures))
+        self.assertIn("procedures no stubbed-run module judges: ['extra']", refusal(procedures, scopes()))
+        given = scopes()
+        given[LAND_RECOVERY] += ("extra",)
+        self.assertIsNone(check_scopes(procedures, given))
+
     def test_a_judged_procedure_deliver_does_not_reach_fails_naming_it(self):
         given = scopes()
         given[LAND_RECOVERY] += ("toy",)
-        self.assertIn("procedures judged but not reachable from deliver: ['toy']", refusal(PROCEDURES, given))
+        self.assertIn("procedures judged but not reachable from an entry: ['toy']", refusal(PROCEDURES, given))
 
     def test_an_unreachable_procedure_file_that_is_not_exempt_fails_naming_it(self):
         procedures = self.copy()
         store(procedures, "stray", load(procedures, "toy-child"))
-        self.assertIn("procedure files neither reachable from deliver nor exempt: ['stray']",
+        self.assertIn("procedure files neither reachable from an entry nor exempt: ['stray']",
                       refusal(procedures, scopes()))
 
     def test_an_exempt_procedure_deliver_reaches_fails_naming_it(self):
@@ -95,7 +109,7 @@ class ProcedureScopeTest(unittest.TestCase):
             with self.subTest(callee=callee):
                 procedures = self.copy()
                 add_call(procedures, "deliver", callee, "toy-call")
-                self.assertIn(f"exempt procedures deliver reaches or that are gone: {stale}",
+                self.assertIn(f"exempt procedures an entry reaches or that are gone: {stale}",
                               refusal(procedures, scopes()))
 
     def test_an_exempt_procedure_whose_file_is_gone_fails_naming_it(self):
@@ -103,7 +117,7 @@ class ProcedureScopeTest(unittest.TestCase):
             with self.subTest(name=name):
                 procedures = self.copy()
                 (procedures / f"{name}.json").unlink()
-                self.assertIn(f"exempt procedures deliver reaches or that are gone: ['{name}']",
+                self.assertIn(f"exempt procedures an entry reaches or that are gone: ['{name}']",
                               refusal(procedures, scopes()))
 
     def test_an_exempt_procedure_whose_file_is_replaced_by_a_non_file_fails_naming_it(self):
@@ -117,7 +131,7 @@ class ProcedureScopeTest(unittest.TestCase):
                         path.mkdir()
                     else:
                         path.symlink_to(procedures / "absent-target")
-                    self.assertIn(f"exempt procedures deliver reaches or that are gone: ['{name}']",
+                    self.assertIn(f"exempt procedures an entry reaches or that are gone: ['{name}']",
                                   refusal(procedures, scopes()))
 
     def test_a_call_to_a_procedure_with_no_file_fails_naming_it(self):

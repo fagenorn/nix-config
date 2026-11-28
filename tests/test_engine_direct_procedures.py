@@ -56,12 +56,15 @@ class DirectProcedureTest(unittest.TestCase):
         direct = {s["id"]: s["worktree"] for s in load(PROCEDURES, "direct")["steps"] if "worktree" in s}
         self.assertEqual(direct, {"implement": named, "lite-fix": named, "escalated-fix": named,
                                   "full-fix": named})
+        outline = {"outline-build.json": {name: named for name in ("lite-fix", "escalated-fix", "full-fix")},
+                   "outline-slice.json": {"build": {"path": "slice.worktree_path", "branch": "slice.branch"}}}
         for path in sorted(PROCEDURES.glob("*.json")):
             if path.name in ("direct.json", "command_verdicts.json"):
                 continue
             with self.subTest(path.name):
                 steps = json.loads(path.read_text(encoding="utf-8")).get("steps", [])
-                self.assertEqual([s["id"] for s in steps if "worktree" in s], [])
+                self.assertEqual({s["id"]: s["worktree"] for s in steps if "worktree" in s},
+                                 outline.get(path.name, {}))
 
     def test_the_direct_implementer_prompts_show_commands_in_the_worktree(self):
         steps = {s["id"]: s for s in load(PROCEDURES, "direct")["steps"]}

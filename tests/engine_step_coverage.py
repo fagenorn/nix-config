@@ -20,10 +20,11 @@ and joins when no teardown did.
 cannot narrow it, and leaves out each test a decorator skips: a decorator skip is part of the module's
 shape, so the check then fails if the skip lost a step. It names only the tests of `base`.
 Across modules, `check_scopes` holds the coverage modules to one rule: every procedure `deliver` reaches,
-through `call` steps, is in the scope of at least one module of `COVERAGE_MODULES`, every judged procedure
-is reachable, and every procedure file is reachable or named in `UNREACHABLE`. A new coverage module is
-registered in `COVERAGE_MODULES` and in `scopes`. `toy` and `toy-child` are exempt because the engine refuses to run
-`toy` and nothing calls either; the exemption fails once `deliver` reaches either or its file is gone.
+through `call` steps (or `outline`, the entry of `--plan outline`: the `ENTRIES`), is in the scope of at least one
+module of `COVERAGE_MODULES`, every judged procedure is reachable from an entry, and every procedure file is
+reachable or named in `UNREACHABLE`. A new coverage module is registered in `COVERAGE_MODULES` and in `scopes`.
+`toy` and `toy-child` are exempt because the engine refuses to run `toy` and nothing calls either; the exemption
+fails once an entry reaches either or its file is gone.
 """
 
 from __future__ import annotations
@@ -40,8 +41,9 @@ from agent_tools.delivery.suite_runner import PART_DIR_ENV, PART_ENV, PART_MEMBE
 Step = tuple[str, str]
 PROCEDURE_NAMES = ("setup", "deliver", "direct", "verify", "land", "close-out")
 UNREACHABLE = ("toy", "toy-child")
+ENTRIES = ("deliver", "outline")
 COVERAGE_MODULES = ("tests.test_engine_stubbed_run", "tests.test_engine_land_recovery",
-                    "tests.test_engine_verify_rounds")
+                    "tests.test_engine_verify_rounds", "tests.test_engine_outline")
 
 
 class StepCoverage:
@@ -156,8 +158,8 @@ def reachable(procedures: Path, entry: str = "deliver") -> tuple[str, ...]:
 
 def scopes() -> dict[str, tuple[str, ...]]:
     # Imported here: each coverage module imports this one, so a top-level import would be circular.
-    from tests import test_engine_land_recovery, test_engine_stubbed_run, test_engine_verify_rounds
-    modules = (test_engine_stubbed_run, test_engine_land_recovery, test_engine_verify_rounds)
+    from tests import test_engine_land_recovery, test_engine_outline, test_engine_stubbed_run, test_engine_verify_rounds
+    modules = (test_engine_stubbed_run, test_engine_land_recovery, test_engine_verify_rounds, test_engine_outline)
     return {module.__name__: module.STEPS.names for module in modules}
 
 
@@ -165,13 +167,13 @@ def check_scopes(procedures: Path, scopes: Mapping[str, tuple[str, ...]],
                  exempt: tuple[str, ...] = UNREACHABLE) -> None:
     files = {path.stem for path in procedures.glob("*.json")
              if path.is_file() and not path.name.endswith(".reply.json")}
-    reach = set(reachable(procedures))
+    reach = {name for entry in ENTRIES for name in reachable(procedures, entry)}
     judged = {name for scope in scopes.values() for name in scope}
     groups = (
         ("procedures no stubbed-run module judges", reach - judged),
-        ("procedures judged but not reachable from deliver", judged - reach),
-        ("procedure files neither reachable from deliver nor exempt", files - reach - set(exempt)),
-        ("exempt procedures deliver reaches or that are gone",
+        ("procedures judged but not reachable from an entry", judged - reach),
+        ("procedure files neither reachable from an entry nor exempt", files - reach - set(exempt)),
+        ("exempt procedures an entry reaches or that are gone",
          {name for name in exempt if name in reach or name not in files}),
     )
     found = [f"{label}: {sorted(names)}" for label, names in groups if names]

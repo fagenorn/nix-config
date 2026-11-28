@@ -398,6 +398,19 @@ class CallTest(unittest.TestCase):
         stopped = D + G + MEMBERS_PASS + pair("fan", "child-stop", {"items": entries("done", "child-stop", "done")})
         self.assertEqual(next_action(fan(), INPUTS, stopped), Stop("needs-owner", "owner-decision", "draft"))
 
+    def test_a_sequential_call_reports_no_item_after_one_that_did_not_end_done(self) -> None:
+        procedure = fan()
+        call = step(procedure, "fan")
+        del call["parallel"]
+        call["sequential"] = True
+        before = D + G + MEMBERS_PASS
+        halted = before + pair("fan", "child-stop", {"items": entries("done", "child-stop")})
+        self.assertEqual(next_action(procedure, INPUTS, halted), Stop("needs-owner", "owner-decision", "draft"))
+        for ends, outcome in ((("child-stop", "done", "done"), "child-stop"), (("done", "child-stop", "done"), "child-stop")):
+            with self.subTest(ends=ends), self.assertRaises(engine_core.CoreError) as raised:
+                next_action(procedure, INPUTS, before + pair("fan", outcome, {"items": entries(*ends)}))
+            self.assertIn("sequential", str(raised.exception))
+
     def test_a_call_without_each_runs_once(self) -> None:
         events = D + G + MEMBERS_PASS + pair("fan", "done", {"items": entries("done", "done", "done")})
         self.assertEqual(next_action(fan(), INPUTS, events), RunCall("once", 1, "toy-fan-child", None, 1, ()))
@@ -1036,8 +1049,11 @@ class PurityTest(unittest.TestCase):
         common = {"__future__", "dataclasses", "typing", "collections.abc"}
         self.assertEqual(impure(core, common | {"agent_tools.delivery.engine_graders"}), [])
         lane_rule = (delivery / "lane_rule.py").read_text(encoding="utf-8")
-        self.assertEqual(impure(graders, common | {"agent_tools.delivery.lane_rule"}), [])
+        grading = {"agent_tools.delivery.lane_rule", "agent_tools.delivery.acceptance_criteria"}
+        self.assertEqual(impure(graders, common | grading), [])
         self.assertEqual(impure(lane_rule, common | {"re"}), [])
+        criteria = (delivery / "acceptance_criteria.py").read_text(encoding="utf-8")
+        self.assertEqual(impure(criteria, common | {"re"}), [])
 
     def test_the_purity_check_refuses_an_impure_source(self) -> None:
         allowed = {"__future__", "dataclasses", "typing"}

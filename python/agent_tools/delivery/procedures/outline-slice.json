@@ -1,0 +1,22 @@
+{
+  "format": 1,
+  "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
+  "inputs": ["holder", "issue", "item", "repo", "repo_root"],
+  "stops": {
+    "setup": {"need": "owner-decision", "reenter": "slice"},
+    "task": {"need": "owner-decision", "reenter": "slice"},
+    "claim-lost": {"need": "owner-decision", "reenter": "slice"}
+  },
+  "steps": [
+    {"id": "slice", "stage": "building", "kind": "command", "command": "issue-setup", "subcommand": "outline-slice", "holds": "run",
+     "in": ["run.holder", "run.issue", "run.item"],
+     "on": {"read": "build", "built": "done", "error": "setup", "refused": "setup"}},
+    {"id": "build", "stage": "building", "kind": "agent", "role": "implementer", "prompt": "outline-slice.md", "reply": "direct-implement.reply.json", "outcome_from": "status", "worktree": {"path": "slice.worktree_path", "branch": "slice.branch"}, "holds": "run", "mutates": true,
+     "in": ["run.issue", "run.repo", "slice.worktree_path", "slice.branch", "slice.integration_branch", "slice.slice", "slice.outline", "slice.details", "slice.merged_refs",
+            "slice.routed", "slice.route_detail", "slice.reads", "slice.diff"],
+     "on": {"done": "slice-built", "blocked": "task", "no-reply": "task", "out-of-bounds": "task"}},
+    {"id": "slice-built", "stage": "building", "kind": "decide", "grader": "direct-fixed", "holds": "run",
+     "in": ["build.status", "build.start_head", "build.commit"],
+     "on": {"done": "done", "not-done": "task"}}
+  ]
+}

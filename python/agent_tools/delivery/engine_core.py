@@ -102,7 +102,8 @@ Calls
     non-boolean integer (a child run input), checked before the action is
     returned. The shell reports `entered` then an `outcome` whose `result` is
     `{"items": [{"end": <end>, ...}, ...]}`, one entry per item (one entry for
-    a call without `each`). The outcome must be `call_outcome` of those ends:
+    a call without `each`; a `sequential` call that halted reports the children
+    that ran, the last one the only end that is not `done`). The outcome must be `call_outcome` of those ends:
     `done` when every end is `done` (and for no ends), else the first end that
     is not `done`, in list order. The result may carry other members beside
     `items` (those the call's `returns` names), readable as `<call>.<member>`.
@@ -421,7 +422,12 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
         if step["kind"] == "call":
             wanted = 1 if pending.items is None else len(pending.items)
             entries = result.get("items")
-            if not isinstance(entries, list) or len(entries) != wanted:
+            if step.get("sequential") and isinstance(entries, list) and not all(
+                    isinstance(e, dict) and e.get("end") == "done" for e in entries[:-1]):
+                raise CoreError(f"call {step['id']!r} is sequential and reported an item after one that did not end 'done'")
+            halted = (step.get("sequential") and isinstance(entries, list) and 0 < len(entries) < wanted
+                      and isinstance(entries[-1], dict) and entries[-1].get("end") != "done")
+            if not isinstance(entries, list) or (len(entries) != wanted and not halted):
                 raise CoreError(f"call {step['id']!r} must report {wanted} entries in 'items'")
             if not all(isinstance(entry, dict) and isinstance(entry.get("end"), str) for entry in entries):
                 raise CoreError(f"call {step['id']!r} reported an entry without an 'end'")

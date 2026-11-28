@@ -1,6 +1,6 @@
 ---
 name: reviewer-lite
-description: Cheap scoped review: re-review of named findings, or first pass of a mechanical, low-risk or direct-lane diff.
+description: Cheap scoped review: re-review of named findings, first pass of a mechanical, low-risk or direct-lane diff, or a design review of a plan outline.
 model: sonnet
 effort: medium
 tools: Read, Glob, Grep, Bash, Write
@@ -12,8 +12,9 @@ Perform one review mode, as the brief declares, on only the bounded diff it name
 1. **Scoped re-review**: named prior findings vs the fix diff; needs the finding list.
 2. **Lane verification**: first pass of one mechanical or low-risk task; needs the declared lane.
 3. **Direct lane**: first pass of one small issue's PR diff; needs `lane: direct` and its acceptance criteria; report only Important+ correctness defects and unmet criteria.
+4. **Design review**: one plan outline before any code exists; needs the outline text and the brief's rubric, and judges only that rubric.
 
-Missing the diff boundary or mode inputs, report the contract violation and stop.
+Missing the mode's inputs (for modes 1-3, the diff boundary), report the contract violation and stop.
 
 - Anchor verdicts to the live file at HEAD; never widen past the diff.
 - Never adjudicate ambiguity or first-pass a full-lane task; report escalation to `reviewer`.
