@@ -81,6 +81,11 @@ class PageLongPermissionCardTest(unittest.TestCase):
         self.assertEqual(lines_of(card)[1], (
             "summary-script", "Runs a sh script of 1 line the console does not read"))
 
+    def test_a_script_of_unknown_text_claims_no_line_count_or_path(self) -> None:
+        card = card_of({"frame": frame([summarised(scripts=[{"program": "bash", "lines": None, "paths": []}])])})
+        self.assertEqual(lines_of(card)[1], (
+            "summary-script", "Runs a bash script whose text the console does not know"))
+
     def test_an_unrecognised_writer_says_no_write_it_recognises(self) -> None:
         card = card_of({"frame": frame([summarised(runs=["curl"], outside=["/tmp/x.bin"])])})
         self.assertEqual([t for _, t in lines_of(card)], [

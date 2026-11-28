@@ -1604,7 +1604,7 @@ function commandSummary(summary) {
   if (!readable) { line("summary-unread", "The console could not read what this command does: read it in full below before you answer."); return box; }
   if (summary.runs.length > 0) line("summary-runs", "Runs " + summaryList(summary.runs));
   line("summary-writes", summary.writes.length > 0 ? "Writes or deletes " + summaryList(summary.writes) : "No write the console recognises");
-  for (const script of summary.scripts) line("summary-script", "Runs a " + script.program + " script of " + script.lines + (script.lines === 1 ? " line" : " lines") + " the console does not read" + (script.paths.length > 0 ? "; it names " + summaryList(script.paths) : ""));
+  for (const script of summary.scripts) line("summary-script", script.lines === null ? "Runs a " + script.program + " script whose text the console does not know" : "Runs a " + script.program + " script of " + script.lines + (script.lines === 1 ? " line" : " lines") + " the console does not read" + (script.paths.length > 0 ? "; it names " + summaryList(script.paths) : ""));
   if (summary.outside.length > 0) line("summary-outside", "Outside its own copy of the project: " + summaryList(summary.outside));
   return box;
 }

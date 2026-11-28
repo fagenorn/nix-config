@@ -404,6 +404,245 @@ class CommandSummaryTest(unittest.TestCase):
         command = "sort <<'EOF'\nFix the reads of /etc/passwd paths\nEOF" + self.PAD
         self.assertEqual(self.summary(command), self.want(["sort"], [], ["/etc/passwd"]))
 
+    def test_a_feeder_that_changes_or_ignores_its_heredoc_leaves_the_script_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        encoded = "ZWNobyBoaSA+IC9ldGMvcGFzc3dk"
+        rows = [
+            (f"base64 -d <<'EOF' | bash\n{encoded}\nEOF", ["base64", "bash"]),
+            ("cat x.sh <<'EOF' | bash\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+            ("tr a-z A-Z <<'EOF' | bash\nrm -rf /etc/nginx\nEOF", ["tr", "bash"]),
+            ("rev <<'EOF' | bash\nxgnin/cte/ fr- mr\nEOF", ["rev", "bash"]),
+            ("cat -n <<'EOF' | bash\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+            (f"cat <<'EOF' | base64 -d | bash\n{encoded}\nEOF", ["cat", "base64", "bash"]),
+            (f"cat <<'EOF' | tee /tmp/log | gzip -d | bash\n{encoded}\nEOF", ["cat", "tee", "gzip", "bash"]),
+        ]
+        for command, runs in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["runs"], runs)
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_feeder_with_an_assignment_shaped_operand_a_redirect_or_a_second_copy_leaves_the_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        body = "rm -rf /etc/nginx"
+        rows = [
+            f"cat name=value <<'EOF' | bash\n{body}\nEOF",
+            f"cat <<'EOF' | cat name=value | bash\n{body}\nEOF",
+            f"cat <<'EOF' | cat < x.sh | bash\n{body}\nEOF",
+            f"cat <<'EOF' | cat > /tmp/y | bash\n{body}\nEOF",
+            f"cat <<'EOF' | tee --help | bash\n{body}\nEOF",
+            f"cat <<'EOF' | tee /dev/stdout | bash\n{body}\nEOF",
+            f"tee /dev/fd/1 <<'EOF' | bash\n{body}\nEOF",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_negated_or_assigned_feeder_still_passes_its_heredoc_through(self):
+        for feeder in ("! cat", "FOO=1 cat"):
+            with self.subTest(feeder=feeder):
+                result = self.summary(f"{feeder} <<'EOF' | bash\nrm -rf /etc/nginx\nEOF" + self.PAD)
+                self.assertEqual(result["scripts"], [{"program": "bash", "lines": 1, "paths": ["/etc/nginx"]}])
+
+    def test_text_a_pipe_and_a_heredoc_both_feed_one_stdin_is_unknown_because_zsh_joins_them(self):
+        # Bash lets the heredoc replace the pipe; zsh (MULTIOS) reads the pipe and then the heredoc.
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            "cat <<'A' | cat <<'B' | bash\nrm -rf /etc/a\nA\nrm -rf /etc/b\nB",
+            "cat <<'A' | bash <<'B'\nrm -rf /etc/a\nA\nrm -rf /etc/b\nB",
+            "echo hi | bash <<'B'\nrm -rf /etc/b\nB",
+            "echo hi | cat <<'B' | bash\nrm -rf /etc/b\nB",
+            "cat <<'A' | bash <<< 'rm -rf /etc/b'\nrm -rf /etc/a\nA",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_heredoc_on_another_descriptor_is_not_the_standard_input_of_its_command(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        encoded = "ZWNobyBoaSA+IC9ldGMvcGFzc3dk"
+        rows = [
+            f"base64 -d <<'A' | cat 3<<'B' | bash\n{encoded}\nA\nrm -rf /etc/b\nB",
+            f"base64 -d <<'A' | cat {{v}}<<'B' | bash\n{encoded}\nA\nrm -rf /etc/b\nB",
+            f"base64 -d <<'A' | cat 3<<< 'rm -rf /etc/b' | bash\n{encoded}\nA",
+            f"base64 -d <<'A' | bash 3<<'B'\n{encoded}\nA\nrm -rf /etc/b\nB",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+        command = "cat <<'A' | cat 3<<'B' | bash\nrm -rf /etc/a\nA\nrm -rf /etc/b\nB" + self.PAD
+        result = self.summary(command)
+        self.assertEqual(result["scripts"], [{"program": "bash", "lines": 1, "paths": ["/etc/a"]}])
+        self.assertEqual(result["outside"], ["/etc/a", "/etc/b"])
+        command = "bash 0<<'A'\nrm -rf /etc/a\nA" + self.PAD
+        self.assertEqual(self.summary(command)["scripts"],
+                         [{"program": "bash", "lines": 1, "paths": ["/etc/a"]}])
+        command = "bash 3<<'B'\nrm -rf /etc/b\nB" + self.PAD
+        self.assertEqual(self.summary(command), self.want(["bash"], [], ["/etc/b"]))
+
+    def test_a_descriptor_script_beside_a_piped_text_is_unknown_not_the_pipe_text(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        result = self.summary("cat <<A | bash /dev/fd/3 3<<B\n: /tmp/pipe\nA\n: /tmp/script\nB" + self.PAD)
+        self.assertTrue(result["read"])
+        self.assertEqual(result["scripts"], [unknown])
+        self.assertLessEqual({"/tmp/pipe", "/tmp/script"}, set(result["outside"]))
+
+    def test_a_redirect_on_another_descriptor_does_not_hide_the_piped_script_text(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        result = self.summary("cat x.sh <<EOF | bash 3</dev/null\n:\nEOF" + self.PAD)
+        self.assertTrue(result["read"])
+        self.assertEqual(result["scripts"], [unknown])
+        known = self.summary("cat <<'EOF' | bash 3</dev/null\n: /tmp/x\nEOF" + self.PAD)
+        self.assertEqual(known["scripts"], [{"program": "bash", "lines": 1, "paths": ["/tmp/x"]}])
+        self.assertFalse(self.summary("cat <<'EOF' | bash 0</dev/null\n:\nEOF" + self.PAD)["read"])
+
+    def test_a_double_slash_spelling_of_standard_output_leaves_the_script_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        for alias in ("//dev/stdout", "//dev/fd/1", "//proc/self/fd/1", "//dev/tty"):
+            command = f"tee {alias} <<'EOF' | bash\n:\nEOF"
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_heredoc_the_shell_expands_does_not_keep_its_literal_line_count(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            "s=':\n:'\ncat <<EOF | bash\n$s\nEOF",
+            "cat <<EOF | bash\n: \\\n/tmp/x\nEOF",
+            "cat <<EOF | bash\n: ${HOME}\nEOF",
+            "cat <<< \"$HOME\" | bash",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+        for command in ("cat <<EOF | bash\n: /tmp/x\nEOF", "cat <<'EOF' | bash\n: $HOME \\\nEOF"):
+            with self.subTest(command=command):
+                scripts = self.summary(command + self.PAD)["scripts"]
+                self.assertEqual([(row["program"], row["lines"]) for row in scripts], [("bash", 1)])
+
+    def test_several_standard_input_texts_on_the_interpreter_make_one_unknown_row(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            "bash <<A <<B\n: /tmp/first\nA\n: /tmp/second\nB",
+            "bash <<A <<< ': /tmp/second'\n: /tmp/first\nA",
+            "echo x | bash <<A <<B\n: /tmp/first\nA\n: /tmp/second\nB",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+                self.assertEqual(result["outside"], ["/tmp/first", "/tmp/second"])
+
+    def test_a_feeder_with_several_standard_input_texts_leaves_the_script_unknown_because_zsh_joins_them(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            "cat <<'A' <<'B' | bash\nrm -rf /etc/a\nA\nrm -rf /etc/b\nB",
+            "cat <<'A' <<< 'rm -rf /etc/b' | bash\nrm -rf /etc/a\nA",
+            "cat <<< 'rm -rf /etc/a' <<< 'rm -rf /etc/b' | bash",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+                self.assertEqual(result["outside"], ["/etc/a", "/etc/b"])
+
+    def test_a_script_read_through_an_explicit_descriptor_is_unknown_not_missing(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            ("bash /dev/fd/3 3<<'EOF'\nrm -rf /etc/nginx\nEOF", "bash"),
+            ("bash /proc/self/fd/3 3<<'EOF'\nrm -rf /etc/nginx\nEOF", "bash"),
+            ("bash /proc/thread-self/fd/3 3<<'EOF'\nrm -rf /etc/nginx\nEOF", "bash"),
+            ("bash /dev/fd/10 {v}<<'EOF'\nrm -rf /etc/nginx\nEOF", "bash"),
+            ("bash /dev/fd/3 3<<< 'rm -rf /etc/nginx'", "bash"),
+            ("python3 /dev/fd/3 3<<'EOF'\nrm -rf /etc/nginx\nEOF", "python3"),
+        ]
+        for command, program in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [{**unknown, "program": program}])
+                self.assertIn("/etc/nginx", result["outside"])
+
+    def test_a_heredoc_on_standard_output_disconnects_the_feeder_from_the_pipe(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            "cat <<'A' 1<<'B' | bash\nrm -rf /etc/a\nA\nrm -rf /etc/b\nB",
+            "cat <<'A' 1<<< 'rm -rf /etc/b' | bash\nrm -rf /etc/a\nA",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_procfs_alias_of_standard_output_leaves_the_script_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        for alias in ("/proc/thread-self/fd/1", "/proc/1234/fd/1", "/proc/self/task/1234/fd/1",
+                      "/proc/self/fd/../fd/1"):
+            command = f"tee {alias} <<'EOF' | bash\nrm -rf /etc/nginx\nEOF"
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_tee_operand_that_may_name_standard_output_leaves_the_script_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        body = "rm -rf /etc/nginx"
+        rows = [
+            f"cd /dev; tee stdout <<'EOF' | bash\n{body}\nEOF",
+            f"cd /dev; tee ./fd/1 <<'EOF' | bash\n{body}\nEOF",
+            f"tee /dev/fd/[1] <<'EOF' | bash\n{body}\nEOF",
+            f"tee /dev/fd/? <<'EOF' | bash\n{body}\nEOF",
+            f"tee /dev/std* <<'EOF' | bash\n{body}\nEOF",
+            f"cd \"$HOME\"; tee stdout <<'EOF' | bash\n{body}\nEOF",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+        known = [{"program": "bash", "lines": 1, "paths": ["/etc/nginx"]}]
+        for command in (f"tee out.txt <<'EOF' | bash\n{body}\nEOF",
+                        f"tee '/tmp/a[1]' <<'EOF' | bash\n{body}\nEOF",
+                        f"cd /tmp; tee stdout <<'EOF' | bash\n{body}\nEOF"):
+            with self.subTest(command=command):
+                self.assertEqual(self.summary(command + self.PAD)["scripts"], known)
+
+    def test_a_pipe_that_also_carries_standard_error_leaves_the_script_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        body = "rm -rf /etc/nginx"
+        rows = [
+            f"tee /dev/null/child <<'EOF' |& bash\n{body}\nEOF",
+            f"cat <<'EOF' |& bash\n{body}\nEOF",
+            f"cat <<'EOF' | cat |& bash\n{body}\nEOF",
+            f"cat <<'EOF' |& cat | bash\n{body}\nEOF",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+        self.assertEqual(self.summary(f"cat <<'EOF' | cat | bash\n{body}\nEOF" + self.PAD)["scripts"],
+                         [{"program": "bash", "lines": 1, "paths": ["/etc/nginx"]}])
+
+    def test_a_feeder_that_passes_its_heredoc_through_keeps_the_script_text(self):
+        for feeder in ("cat", "cat -", "tee /tmp/log"):
+            with self.subTest(feeder=feeder):
+                result = self.summary(f"{feeder} <<'EOF' | cat | bash\nrm -rf /etc/nginx\nEOF" + self.PAD)
+                self.assertEqual(result["scripts"], [{"program": "bash", "lines": 1, "paths": ["/etc/nginx"]}])
+
     def test_text_that_reaches_an_interpreter_by_another_route_still_counts(self):
         rm = "rm -rf /etc/nginx"
         py = "import shutil; shutil.rmtree('/etc/nginx')"
