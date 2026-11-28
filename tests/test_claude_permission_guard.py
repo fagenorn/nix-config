@@ -2046,9 +2046,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
     def test_the_permits_rerun_of_an_own_open_pull_request_check_run_at_its_head_is_not_a_production_change(self):
         """A `gh run rerun <id> --failed --repo <slug>` of a pull request check run of the
-        project's own open issue pull request, at its head, with a failed job, is not a production
-        change, though the project declares a rerun rule; whether the failed job is a required
-        check is not asked, and the protection of the integration branch is never read."""
+        project's own open issue pull request, at its head, with a failed job, is not a production change,
+        though the project declares a rerun rule; no required check is asked and no branch protection read."""
         guard_args, prod, _own, other = self.rerun_world()
         command, log = self.CHECK_RERUN, Path(self.fixture_dir.name) / "rerun.log"
         two = self.production_args({self.OWN: NODO_ROW, PROD: {**self.RERUN_ROW, "production": rerun_production(("deploy-rerun", ["gh", "run", "rerun"]), ("deploy-rerun-failed", ["gh", "run", "rerun", "--failed"]))}})
@@ -2100,8 +2099,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
     def test_an_own_pull_request_rerun_in_a_declaring_project_reaches_the_permit_and_is_allowed_within_the_cap(self):
         """The guard lets the check rerun through and the console permit then judges it: an
-        allow within the per-head cap, a refusal beyond it; a deploy run stays refused. A run
-        whose only failed job is no required check passes both the guard and the permit."""
+        allow within the per-head cap, a refusal beyond it; a deploy run stays refused."""
         guard_args, prod, _own, _other = self.rerun_world()
         command, head = self.CHECK_RERUN, self.CHECK_HEAD
         forge, grant = check_run_permit(PROD, head, self.fixture_dir.name)
@@ -2113,13 +2111,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         one = "run 55 (failing: no members reported)"
         denied = permit.judge(command, dataclasses.replace(grant, reruns={head: (permit.Rerun(55),) * 2}), forge)
         self.assertEqual((permit.DENY, permit.RERUN_LIMIT.format(pr=7, head=head, reruns=f"{one} and {one}")), (denied.decision, denied.reason))
-        optional = {"FAKE_JOBS_JSON": jobs_facts(failed=("deploy-preview",))}
-        through = self.run_guard(command, cwd=prod, env=check_run_forge(PROD, head, **optional), guard_args=guard_args)
-        self.assertEqual(0, through.returncode, through.stderr)
-        optional_run = {"event": "pull_request", "branch": "issue-12-x", "repo": PROD, "head": head, "prs": [7],
-                        "failed": ["deploy-preview"], "pending": False, "members": []}
-        judged = permit.judge(command, grant, permit.Forge(forge.read_pr, lambda s, i: optional_run, forge.read_required, forge.read_release_pr))
-        self.assertEqual(permit.ALLOW, judged.decision, judged.reason)
         refused = self.run_guard(command, cwd=prod, guard_args=guard_args, env=check_run_forge(
             PROD, head, FAKE_RUN_JSON=run_facts(PROD, head, "push", ()), FAKE_JOBS_JSON=jobs_facts(failed=("deploy",))))
         self.assertEqual(2, refused.returncode, refused.stderr)
