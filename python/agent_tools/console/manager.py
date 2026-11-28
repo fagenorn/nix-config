@@ -62,15 +62,46 @@ are the manager of one sprint, started by the console. Run "sprint contract" fir
 what it prints. The goal: `) followed by the goal verbatim; `sprint contract` prints the manager's
 contract, a document of this package. The secret is on no argv element. A takeover launch (a
 sprint whose manager is gone and has work, `Launch.takeover`) carries `TAKEOVER_LEAD` instead (`You
-take over one sprint whose manager is gone, started by the console. Run "sprint contract" first,
-then "sprint recap", and follow what they print. The goal: `) followed by the goal verbatim.
+take over one sprint whose manager is gone, started by the console. Its earlier conversation could
+not be continued, so you start fresh: say so in the status line of your first report. Run "sprint
+contract" first, then "sprint recap", and follow what they print. The goal: `) followed by the
+goal verbatim: that lead is the fresh one, used when the earlier conversation is not continued.
+A takeover launch given `resume` (`new_launch(..., takeover=True, resume=<session id>)`; `resume`
+without `takeover` is a `ValueError`) resumes the manager's earlier conversation instead: its
+client argv is `claude-account run --resume <session id> --bg --name <name> --settings <file>
+"<prompt>"` (the wake's order, nudge.py), wrapped in the same `systemd-run` scope on Linux, and
+its prompt carries `RESUME_LEAD` (`The console resumed this conversation because the manager's
+session had stopped while the sprint had work. You are still the manager of this sprint, and the
+orders, answers and decisions above still hold. Run "sprint contract" first, then "sprint recap",
+and follow what they print. The goal: `). Its `Launch.fallback` is the exact prompt the fresh
+takeover launch (no `resume`) with the same blocks would have; every other launch has none.
+`without_resume(launch)` is that fresh launch (`resume` None, `prompt` the fallback, no fallback)
+and the launch itself when it has no `resume`. `transcript_exists(config_dir, session_id)` is true
+only when `<config_dir>/projects/<slug>/<session_id>.jsonl` is a regular file for some slug (never
+for an id that is empty, `.`, `..` or holds `/` or NUL, and never raising `OSError`);
+`checked_resume(launch, config_dirs)` keeps the resume only when the transcript is there in the
+first directory of `config_dirs` that is the launch's own profile (`sessions.account_name`; the
+profiles share `projects` through `claude-account`, so a transcript one account wrote is readable
+from another on the same host) and gives `without_resume(launch)` otherwise, also when no
+directory names the profile. `Launch.recorded` (false by default, and reset by `without_resume`) says
+the chosen account still holds the earlier session's background record: its client argv then carries
+no `--name` and no `--settings` (`--resume <id> --bg "<prompt>"`), because the client keeps the
+record's options and starts a copy of the session when they are passed again (the wake's rule, nudge.py).
+`ResumeRefused` is a `LaunchFailed` that `run_launch` raises for a launch with `resume` whose client
+exited non-zero with `No conversation found` on its last non-empty stderr line: the client never
+reached its supervisor, so no session started. `launch_or_fresh(launcher, launch)` runs
+`launcher(launch)` and, when that raises `ResumeRefused` for a launch with `resume`, runs
+`launcher(without_resume(launch))` once; it returns `(the launch that ran, the launcher's result)`,
+and any other exception, a timeout and any other `LaunchFailed` included (the supervisor may have
+accepted the session), and an exception of the fresh call propagate.
 A launch given `notices` (the service passes `sprints.notice_block` of the project's open notices
-of the other sprints, #1118) carries them between the lead's instruction and `The goal: `, a blank
+of the other sprints) and `unheld` (a block naming the work the stopped manager held) carries
+the non-empty ones, in that order, between the lead's instruction and `The goal: `, a blank
 line on each side and `The goal: ` starting its own line: the lead without its final `The goal: `,
-a blank line, the notices, a blank line, then `The goal: ` and the goal. With none the prompt is
-the lead and the goal as before. In either form the goal is the text after the first `The goal: `
-that is not on a line beginning with `- ` (a notice line may quote `The goal: `) and runs to the
-end of the prompt; `GOAL_MARK` is that text.
+a blank line, the blocks separated by blank lines, a blank line, then `The goal: ` and the goal.
+With none the prompt is the lead and the goal as before. In either form the goal is the text after
+the first `The goal: ` that is not on a line beginning with `- ` (a notice line may quote
+`The goal: `) and runs to the end of the prompt; `GOAL_MARK` is that text.
 
 Settings file. `claude --bg` hands the session to one supervisor per configuration directory,
 and a supervisor that is already running may start the session with its own environment, not the
@@ -129,6 +160,13 @@ Identity. The launch record names the manager: the sprint's latest valid `manage
 `SprintState.manager_short_id` holds it). When it is set, `is_manager_session` admits only a session
 whose id starts with it, whatever a listing names; when it is not, it admits the listed
 `manager_session`. The permit's refusal and the delivered fold both decide through it.
+`earlier_session(sprint, session_ids)` is the session a takeover resumes: the one of `session_ids` and
+the sprint's `manager_session` that `is_manager_session` admits (the lowest id when several), so a later
+session of the same name never stands in for the launched one; None when none is admitted.
+`transcript_ids(config_dirs, short)` is the ids of the transcripts (`projects/<slug>/<id>.jsonl`) whose id
+starts with the launched short id `short` (empty for a `short` that `launched_short_id` refuses), which
+is how the full id of a launched manager that is no longer listed is found; the service adds them to the
+candidates of `earlier_session`.
 
 Failures are `LaunchFailed` with a one-line reason, the secret shown as `<secret>`: the host is
 neither Linux nor macOS (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
@@ -180,6 +218,7 @@ leaves the call (an interrupt included) also ends the group first.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import re
@@ -200,7 +239,7 @@ from agent_tools.claims import owner_actions
 from agent_tools.console import permission as permissions
 from agent_tools.console import permit
 from agent_tools.console.event_log import Event
-from agent_tools.console.sessions import DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN
+from agent_tools.console.sessions import DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN, account_name
 
 if TYPE_CHECKING:
     from agent_tools.console.sprints import SprintState
@@ -211,8 +250,16 @@ GOAL_MARK = "The goal: "
 PROMPT_LEAD = ("You are the manager of one sprint, started by the console. "
                'Run "sprint contract" first and follow what it prints. ' + GOAL_MARK)
 TAKEOVER_LEAD = ("You take over one sprint whose manager is gone, started by the console. "
+                 "Its earlier conversation could not be continued, so you start fresh: "
+                 "say so in the status line of your first report. "
                  'Run "sprint contract" first, then "sprint recap", and follow what they print. '
                  + GOAL_MARK)
+RESUME_LEAD = ("The console resumed this conversation because the manager's session had stopped "
+               "while the sprint had work. You are still the manager of this sprint, and the "
+               "orders, answers and decisions above still hold. "
+               'Run "sprint contract" first, then "sprint recap", and follow what they print. '
+               + GOAL_MARK)
+RESUME_REFUSED = "No conversation found"
 ID_ENV = "CONSOLE_SPRINT_ID"
 SECRET_ENV = "CONSOLE_SPRINT_SECRET"
 ROOT_ENV = "CONSOLE_SPRINT_ROOT"
@@ -301,6 +348,10 @@ class LaunchFailed(Exception):
     """The manager did not start; `str` is the one-line reason."""
 
 
+class ResumeRefused(LaunchFailed):
+    """The client found no conversation to resume, so it started no session."""
+
+
 class StopFailed(Exception):
     """A manager's background session could not be stopped; `str` is the one-line reason."""
 
@@ -327,6 +378,9 @@ class Launch:
     seen_after: int = 0
     permission: permissions.Permission = permissions.FALLBACK
     allow: tuple[str, ...] = ()
+    resume: str | None = None
+    fallback: str | None = None
+    recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -350,17 +404,69 @@ def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: s
                secret: str, settings_dir: Path, takeover: bool = False,
                seen_after: int = 0, notices: str = "",
                permission: permissions.Permission = permissions.FALLBACK,
-               allow: tuple[str, ...] = ()) -> Launch:
-    lead = TAKEOVER_LEAD if takeover else PROMPT_LEAD
-    if notices:
-        lead = lead.removesuffix(GOAL_MARK).rstrip() + "\n\n" + notices + "\n\n" + GOAL_MARK
+               allow: tuple[str, ...] = (), resume: str | None = None,
+               unheld: str = "") -> Launch:
+    if resume is not None and not takeover:
+        raise ValueError("a resume launch is a takeover launch")
+    blocks = [block for block in (notices, unheld) if block]
+
+    def prompt_of(lead: str) -> str:
+        if not blocks:
+            return lead + goal
+        return (lead.removesuffix(GOAL_MARK).rstrip() + "\n\n" + "\n\n".join(blocks) + "\n\n"
+                + GOAL_MARK + goal)
+
+    if resume is not None:
+        lead, fallback = RESUME_LEAD, prompt_of(TAKEOVER_LEAD)
+    else:
+        lead, fallback = TAKEOVER_LEAD if takeover else PROMPT_LEAD, None
     return Launch(
         sprint_id=sprint_id, project_id=project_id, cwd=root, profile=profile,
         session_name=session_name(project_id, sprint_id),
-        prompt=lead + goal,
+        prompt=prompt_of(lead),
         settings=settings_path(settings_dir, sprint_id),
         env={ID_ENV: sprint_id, SECRET_ENV: secret, ROOT_ENV: root}, takeover=takeover,
-        seen_after=seen_after, permission=permission, allow=allow)
+        seen_after=seen_after, permission=permission, allow=allow, resume=resume,
+        fallback=fallback)
+
+
+def without_resume(launch: Launch) -> Launch:
+    if launch.resume is None:
+        return launch
+    return dataclasses.replace(launch, resume=None, prompt=launch.fallback, fallback=None,
+                               recorded=False)
+
+
+def transcript_exists(config_dir: Path, session_id: str) -> bool:
+    if not session_id or session_id in (".", "..") or "/" in session_id or "\0" in session_id:
+        return False
+    try:
+        with os.scandir(config_dir / "projects") as entries:
+            return any(os.path.isfile(os.path.join(entry.path, session_id + ".jsonl"))
+                       for entry in entries)
+    except OSError:
+        return False
+
+
+def checked_resume(launch: Launch, config_dirs: Iterable[Path]) -> Launch:
+    if launch.resume is None:
+        return launch
+    for config_dir in config_dirs:
+        if account_name(config_dir) == launch.profile:
+            return launch if transcript_exists(config_dir, launch.resume) \
+                else without_resume(launch)
+    return without_resume(launch)
+
+
+def launch_or_fresh(launcher: Callable[[Launch], object],
+                    launch: Launch) -> tuple[Launch, object]:
+    try:
+        return launch, launcher(launch)
+    except ResumeRefused:
+        if launch.resume is None:
+            raise
+    fresh = without_resume(launch)
+    return fresh, launcher(fresh)
 
 
 def choose_profile(capacity: Mapping, last_use: Mapping[str, str], starter: str | None = None,
@@ -539,8 +645,10 @@ def launch_tools(platform: str) -> tuple[str, ...]:
 def launch_command(launch: Launch, platform: str) -> list[str] | None:
     if not supported(platform):
         return None
-    client = ["claude-account", "run", "--bg", "--name", launch.session_name,
-              "--settings", str(launch.settings), launch.prompt]
+    resuming = ["--resume", launch.resume] if launch.resume else []
+    options = [] if launch.recorded else ["--name", launch.session_name,
+                                          "--settings", str(launch.settings)]
+    client = ["claude-account", "run", *resuming, "--bg", *options, launch.prompt]
     if not platform.startswith("linux"):
         return client
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
@@ -738,12 +846,32 @@ def is_manager_session(sprint: "SprintState", session_id: str) -> bool:
     return sprint.manager_session is not None and session_id == sprint.manager_session
 
 
+def earlier_session(sprint: "SprintState", session_ids: Iterable[str]) -> str | None:
+    """The earlier manager's full session id among `session_ids` and the sprint's `manager_session`, else None."""
+    known = {*session_ids, sprint.manager_session} - {None}
+    return next((found for found in sorted(known) if is_manager_session(sprint, found)), None)
+
+
+def transcript_ids(config_dirs: Iterable[Path], short: str | None) -> set[str]:
+    """The ids of the sessions with a transcript under `config_dirs` whose id starts with the launched `short` id."""
+    if launched_short_id(short) is None:
+        return set()
+    found: set[str] = set()
+    for config_dir in config_dirs:
+        try:
+            found.update(path.stem for path in config_dir.glob(f"projects/*/{short}*.jsonl")
+                         if path.is_file())
+        except OSError:
+            continue
+    return found
+
+
 def run_launch(launch: Launch, *, platform: str = sys.platform, run=None,
                environ: Mapping[str, str] = os.environ) -> str | None:
     secret = launch.env[SECRET_ENV]
 
-    def fail(reason: str) -> LaunchFailed:
-        return LaunchFailed(reason.replace(secret, "<secret>") if secret else reason)
+    def fail(reason: str, kind: type[LaunchFailed] = LaunchFailed) -> LaunchFailed:
+        return kind(reason.replace(secret, "<secret>") if secret else reason)
 
     argv = launch_command(launch, platform)
     if argv is None:
@@ -774,7 +902,9 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=None,
         stderr = err.read().decode("utf-8", errors="replace")
     if result.returncode != 0:
         lines = [line.strip() for line in stderr.splitlines() if line.strip()]
-        raise fail(lines[-1] if lines else f"the launch exited {result.returncode}")
+        refused = launch.resume is not None and bool(lines) and RESUME_REFUSED in lines[-1]
+        raise fail(lines[-1] if lines else f"the launch exited {result.returncode}",
+                   ResumeRefused if refused else LaunchFailed)
     return printed_short_id(stdout)
 
 

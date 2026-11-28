@@ -1876,9 +1876,9 @@ class DirectLaneRoutingTest(unittest.TestCase):
 
     def test_deliver_direct_claims_with_forge_claim(self):
         """#635: step 1 claims through forge-claim and goes on only on its holding verdicts;
-        the hot instruction bytes do not grow."""
+        the hot instruction bytes stay within 6400, the session's and the programs' text."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5120)
+        self.assertLessEqual(len(raw), 6400)
         text = normalized(raw.decode("utf-8"))
         step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
         for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id> --branch <branch>`",
@@ -1903,9 +1903,9 @@ class DirectLaneRoutingTest(unittest.TestCase):
 
     def test_deliver_direct_holds_the_land_lock_from_sync_through_merge(self):
         """#677: step 6 carries the consumed forms in ship order: waiting acquire, sync merge, push,
-        required-check wait, the holding verdict before the merge, release; the hot bytes stay within their cap."""
+        required-check wait, the holding verdict before the merge, release; the hot bytes stay within 6400."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5120)
+        self.assertLessEqual(len(raw), 6400)
         text = normalized(raw.decode("utf-8"))
         land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
         at = 0

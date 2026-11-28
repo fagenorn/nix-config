@@ -136,6 +136,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
+    home/common/agent-skills/tests/test_deliver_direct_engine_entry.py \
     home/common/agent-skills/tests/test_codex_review_effort.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
@@ -192,6 +193,7 @@ agent-workflow-tests *args:
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
     tests/test_engine_check.py \
+    tests/test_engine_check_returns.py \
     tests/test_engine_check_process.py \
     tests/test_engine_direct_procedures.py \
     tests/test_engine_graders.py \
@@ -222,6 +224,7 @@ agent-workflow-tests *args:
     tests/test_engine_stubbed_guard.py \
     tests/test_engine_stubbed_findings.py \
     tests/test_engine_stubbed_world.py \
+    tests/test_engine_plan_facts.py \
     tests/test_proof_run.py \
     tests/test_bound_issues.py \
     tests/test_engine_step_coverage.py \
@@ -499,6 +502,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_warnings.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
+    tests/test_console_manager_resume.py \
     tests/test_console_launch_short_id.py \
     tests/test_console_permission.py \
     tests/test_console_manager_service.py \

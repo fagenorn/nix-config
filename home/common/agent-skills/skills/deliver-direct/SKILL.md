@@ -5,6 +5,12 @@ description: Delivers one small, concrete issue to merge with no spec or plan. U
 
 # deliver-direct
 
+**Session.** A session follows only this paragraph and the lane stops; the rest is the delivery programs' source. In the checkout, start `engine deliver <n>` with the Bash tool's `run_in_background: true` and, once it exits, read the one JSON line it printed (`end`, `need`, `detail`, `run`). Exit 0, `end` `done`: report. Exit 3, a stop: a lane stop goes where it says; `stopped-by-request` is the owner's own stop, so report it, rerun nothing; else on `need` `retry` run `engine deliver <n>` again, on `owner-decision` ask the owner with `detail`, then run it again. Exit 4: another run holds the issue; start no second. Exit 1 or 2: report its stderr line. Never claim, branch, push or merge by hand.
+
+**Lane stops.** Judge Eligibility below before the start. A standard-lane issue is not yet on the engine: stop; deliver it with `deliver-standard` as today. An open design decision or preference, or the end `ineligible`, waits for the owner's decision. An issue marked for the owner's look before merge goes to `deliver-standard` with `lane: direct`, judged before the start; after the end `look-not-on-engine` first run `forge-claim release --repo <slug> --issue <n> --holder <host>/<run>`, then do the same.
+
+**Delivery programs.** They read the rest of this file as their single source.
+
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.review.code` and `bindings.workflow.verification`.
 
 `<slug>` is `bindings.tracker.repo_slug`, `<int>` `vcs.integration_branch`, `<branch>` per `vcs.branch_pattern`, `<dir>` the worktree.
