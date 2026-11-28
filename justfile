@@ -222,6 +222,7 @@ agent-workflow-tests *args:
     tests/test_engine_stubbed_run.py \
     tests/test_engine_stubbed_guard.py \
     tests/test_engine_stubbed_world.py \
+    tests/test_engine_plan_facts.py \
     tests/test_proof_run.py \
     tests/test_bound_issues.py \
     tests/test_engine_step_coverage.py \

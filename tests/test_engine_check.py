@@ -1229,7 +1229,7 @@ UNNAMED = {"findings": [{"severity": "critical", "file": "", "failing_input": ""
 SHIPPED_MEMBERS = {
     "contract": ({"capabilities": {"review.code": {"state": "available"}, "review.plan": {"state": "available"}}},
                  {"capabilities": {"review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}),
-    **{pre: ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t", "plan": "p"},)
+    **{pre: ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t", "plan": "p", "routed": None, "route_detail": ""},)
        for pre in ("preflight", "plan-preflight")},
     "plan": ({"evidence": "p", "task_numbers": [1]},),
     **{read: ({"text": "p", "digest": "d"},) for read in ("plan-read", "plan-reread")},
