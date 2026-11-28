@@ -96,6 +96,11 @@ def interleave(test, after_listing, action):
 
 class Base(unittest.TestCase):
     def setUp(self):
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        os.environ.pop("CONSOLE_SPRINT_ID", None)
         self.slept = []
         patcher = mock.patch.object(forge_claim, "sleep", self.slept.append)
         patcher.start()

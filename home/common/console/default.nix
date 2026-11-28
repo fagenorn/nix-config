@@ -34,7 +34,9 @@
 #
 # The command also names the guest socket Tailscale Serve proxies to (`--guest-socket`, #1299,
 # ADR-console-077), in a mode-0700 folder the console makes, and, when `agentConsole.tailscale`
-# is set, this host's Tailscale client.
+# is set, this host's Tailscale client. When `agentConsole.lockBump` is set it also names the
+# project whose lock the console bumps to each proven revision, its branch and the platform
+# repository (`--lock-bump-project`, `--lock-bump-branch`, `--platform-repo`).
 {
   config,
   lib,
@@ -53,7 +55,12 @@ let
     ) " --tailscale ${lib.escapeShellArg config.agentConsole.tailscale}"
     + lib.concatMapStrings (
       d: " --screenshots ${lib.escapeShellArg d}"
-    ) config.agentConsole.screenshotDirs;
+    ) config.agentConsole.screenshotDirs
+    + lib.optionalString (config.agentConsole.lockBump != null) (
+      " --lock-bump-project ${lib.escapeShellArg config.agentConsole.lockBump.project}"
+      + " --lock-bump-branch ${lib.escapeShellArg config.agentConsole.lockBump.branch}"
+      + " --platform-repo ${lib.escapeShellArg config.agentConsole.lockBump.platformRepo}"
+    );
 
   path = lib.concatStringsSep ":" (
     [ (lib.makeBinPath [ config.programs.gh.package ]) ]
@@ -77,6 +84,28 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = "Path of this host's Tailscale client the console reads `serve status --json` and `status --json` from, the second for this host's own tailnet name (#1237, #1299, #1305, ADR-console-078); null reads nothing, so the guest door lets no guest in.";
+    };
+    lockBump = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.submodule {
+          options = {
+            project = lib.mkOption {
+              type = lib.types.str;
+              description = "The registered project, as owner/name, whose platform lock the console bumps.";
+            };
+            branch = lib.mkOption {
+              type = lib.types.str;
+              description = "The integration branch of that project.";
+            };
+            platformRepo = lib.mkOption {
+              type = lib.types.str;
+              description = "The platform repository, as owner/name, whose proven revisions are offered.";
+            };
+          };
+        }
+      );
+      default = null;
+      description = "The one registered project whose lock the console bumps to each proven revision, its integration branch and the platform repository; null bumps no project.";
     };
     command = lib.mkOption {
       type = lib.types.str;

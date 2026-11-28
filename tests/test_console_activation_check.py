@@ -116,6 +116,8 @@ class StoreTest(unittest.TestCase):
         connection.commit()
         connection.close()
         self.assertEqual(activation_check.read_rows(store), [finished(True, C1)])
+        self.assertEqual(activation_check.read_stamped(store),
+                         [("2026-11-17T00:00:00+00:00", finished(True, C1))])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = activation_check.main(
