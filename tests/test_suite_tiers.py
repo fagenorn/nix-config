@@ -34,6 +34,7 @@ SUITE_RECIPE = "agent-workflow-tests"
 NIGHTLY_RECIPES = (
     "evals",
     "console-screenshots",
+    "engine-cut-sweep",
     "agent-installed-skill-tests",
     "agent-activated-skill-tests",
 )
@@ -363,6 +364,7 @@ class CandidatesTest(unittest.TestCase):
             "agent-workflow-tests *args:\n  run extra/check.sh\n"
             "evals skill id:\n  run it\n"
             "console-screenshots out=\"\":\n  run it\n"
+            "engine-cut-sweep:\n  run it\n"
             "agent-installed-skill-tests: build\n  python3 n/test_n.py\n"
             "agent-activated-skill-tests:\n  run it\n"
         )

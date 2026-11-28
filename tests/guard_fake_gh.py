@@ -89,19 +89,19 @@ def required_facts(contexts=("Tests",), checks=()):
 def check_run_forge(slug, head, **changes):
     """The FAKE_* answers of a failed pull request check run of `slug` at `head`, with `changes`."""
     return {"FAKE_RUN_JSON": run_facts(slug, head), "FAKE_JOBS_JSON": jobs_facts(),
-            "FAKE_PULL_JSON": pull_facts(slug, head), "FAKE_REQUIRED_JSON": required_facts(), **changes}
+            "FAKE_PULL_JSON": pull_facts(slug, head), **changes}
 
 
 def check_run_accepts(slug, head):
     """`(name, command prefix, forge changes)` for each way the exempt rerun is allowed."""
-    required = required_facts(contexts=("Lint and tests",))
     return [
         ("plain", "", {}),
         ("unset prefix", "unset GITHUB_TOKEN && ", {}),
         ("env prefix", "env -u GITHUB_TOKEN -u GH_TOKEN ", {}),
         ("tokens set", "", {"GITHUB_TOKEN": "x", "GH_TOKEN": "y"}),
-        ("Actions-bound check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", 15368),))}),
-        ("any-app check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", -1),))}),
+        ("failed job that is no required check", "", {"FAKE_JOBS_JSON": jobs_facts(failed=("deploy-preview",))}),
+        ("gate failing beside a failed deploy job", "", {
+            "FAKE_JOBS_JSON": jobs_facts(failed=("smoke", "deploy-preview"), passed=("required-checks",))}),
         ("session and shell on github.com", "", {"GH_HOST": "github.com", "FAKE_SHELL_GH_HOST": "github.com"}),
         ("session and shell on one gh config directory", "", {"GH_CONFIG_DIR": "/gh", "XDG_CONFIG_HOME": "/xdg"}),
         ("shell restating the session gh config directory", "", {
@@ -109,8 +109,8 @@ def check_run_accepts(slug, head):
         ("closed pull request listed beside the open one", "", {
             "FAKE_RUN_JSON": run_facts(slug, head, numbers=(6, 7)), "FAKE_PULL_6_JSON": pull_facts(slug, head, "closed")}),
         ("failed job on page two of 101", "", {"FAKE_JOBS_JSON": jobs_pages(("Tests",))}),
-        ("failed job beside the required one", "", {
-            "FAKE_JOBS_JSON": jobs_facts(failed=("Tests", "Lint and tests")), "FAKE_REQUIRED_JSON": required}),
+        ("failed job beside a failed optional one", "", {
+            "FAKE_JOBS_JSON": jobs_facts(failed=("Tests", "deploy-preview"))}),
     ]
 
 
@@ -126,7 +126,6 @@ def check_run_refusals(slug, head):
         return check_run_forge(slug, head, **changes)
 
     other = "someone/deployer"
-    bound = required_facts(contexts=("Tests",), checks=(("Tests", 999),))
     refusals = [
         ("push", forge(FAKE_RUN_JSON=run_facts(slug, head, "push", ()))),
         ("workflow_dispatch", forge(FAKE_RUN_JSON=run_facts(slug, head, "workflow_dispatch"))),
@@ -141,7 +140,6 @@ def check_run_refusals(slug, head):
         ("other base branch", forge(FAKE_PULL_JSON=pull_facts(slug, head, base="release"))),
         ("from the default branch", forge(FAKE_RUN_JSON=run_facts(slug, head, branch="main"),
                                          FAKE_PULL_JSON=pull_facts(slug, head, branch="main"))),
-        ("pull-request deploy run", forge(FAKE_JOBS_JSON=jobs_facts(failed=("deploy-preview",)))),
         ("no failed job", forge(FAKE_JOBS_JSON=jobs_facts(failed=(), passed=("Tests",)))),
         ("truncated jobs", forge(FAKE_JOBS_JSON=jobs_facts(total=101))),
         ("page two missing", forge(FAKE_JOBS_JSON=jobs_pages(("Tests",), total=102))),
@@ -176,18 +174,6 @@ def check_run_refusals(slug, head):
         ("sibling job with a malformed conclusion", forge(FAKE_JOBS_JSON=json.dumps({"total_count": 2, "jobs": [
             {"name": "Tests", "conclusion": "failure"}, {"name": "Lint", "conclusion": 42}]}))),
         ("run nested past the recursion limit", forge(FAKE_RUN_JSON="[" * 30000 + "]" * 30000)),
-        ("not a required check", forge(FAKE_REQUIRED_JSON=required_facts(contexts=("Lint",)))),
-        ("check bound to another app", forge(FAKE_REQUIRED_JSON=required_facts(
-            contexts=(), checks=(("Tests", 999),)))),
-        ("bound context", forge(FAKE_REQUIRED_JSON=bound)),
-        ("required nonzero", forge(FAKE_REQUIRED_MODE="nonzero")),
-        ("required nonzero with a valid body",
-         forge(FAKE_REQUIRED_MODE="http_error", FAKE_REQUIRED_JSON=required_facts())),
-        ("required invalid", forge(FAKE_REQUIRED_MODE="invalid")),
-        ("required malformed", forge(FAKE_REQUIRED_JSON='{"contexts": "Tests", "checks": []}')),
-        ("unprotected integration branch", forge(
-            FAKE_REQUIRED_MODE="http_error",
-            FAKE_REQUIRED_JSON='{"message":"Branch not protected","status":"404"}')),
         ("run nonzero", forge(FAKE_RUN_MODE="nonzero")),
         ("run invalid", forge(FAKE_RUN_MODE="invalid")),
         ("run malformed", forge(FAKE_RUN_JSON='{"event": "pull_request"}')),
@@ -200,8 +186,6 @@ def check_run_refusals(slug, head):
         ("release pull request", forge(FAKE_RUN_JSON=run_facts(slug, head, branch="dev"),
                                        FAKE_PULL_JSON=pull_facts(slug, head, branch="dev", base="main")),
          {"integration_branch": "dev"}, ()),
-        ("declared by the row only", forge(FAKE_REQUIRED_JSON=required_facts(contexts=("Lint",))),
-         {"required_checks": ["Tests"]}, ()),
         ("run timeout", forge(FAKE_RUN_MODE="timeout"), {}, ("--child-timeout-seconds", "0.5")),
         ("shell timeout", forge(FAKE_SHELL_MODE="hang"), {}, ("--child-timeout-seconds", "0.5")),
         ("case-spelled row of another integration branch", forge(), {"integration_branch": "dev", "also": (
@@ -215,8 +199,7 @@ def check_run_reads(slug, forge, run_id=55, branch="main"):
     base = f"repos/{slug}"
     pulls = json.loads(forge.get("FAKE_RUN_JSON") or run_facts(slug, ""))["pull_requests"]
     return [["api", f"{base}/actions/runs/{run_id}"], ["api", "--paginate", "--slurp", f"{base}/actions/runs/{run_id}/jobs?per_page=100"],
-            *[["api", f"{base}/pulls/{pull['number']}"] for pull in pulls],
-            ["api", f"{base}/branches/{branch}/protection/required_status_checks"]]
+            *[["api", f"{base}/pulls/{pull['number']}"] for pull in pulls]]
 
 
 def check_run_permit(slug, head, root):

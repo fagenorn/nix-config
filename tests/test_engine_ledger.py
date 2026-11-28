@@ -376,6 +376,44 @@ class ResultOrderTest(unittest.TestCase):
                              {"verdict": "ok"})
             self.assertEqual(len((run / "events.jsonl").read_text().splitlines()), 1)
 
+    def test_a_stored_result_stages_its_event_before_the_result_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            seen: list[bool] = []
+            real = engine_ledger._write_result
+
+            def spy(path, document):
+                seen.append(engine_ledger.staged_path(run, "scope", 1).exists())
+                real(path, document)
+
+            with mock.patch.object(engine_ledger, "_write_result", side_effect=spy):
+                store(run, outcome="made", head="d" * 40, turns=3)
+            self.assertEqual(seen, [True])
+            (appended,) = engine_ledger.replay(run / "events.jsonl")
+            self.assertEqual(engine_ledger.staged_event(run, "scope", 1), appended)
+
+    def test_a_staged_event_a_cut_left_is_replaced_by_the_next_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            left = {**EXAMPLES["result_stored"], "step": "scope", "visit": 1,
+                    "result": "results/scope.1.json", "at": "2026-11-21T16:00:00Z"}
+            engine_ledger._write_staged(engine_ledger.staged_path(run, "scope", 1), left)
+            store(run, outcome="made")
+            (appended,) = engine_ledger.replay(run / "events.jsonl")
+            self.assertEqual(appended["at"], "2026-11-21T16:02:40Z")
+            self.assertEqual(engine_ledger.staged_event(run, "scope", 1), appended)
+
+    def test_a_staged_event_of_another_visit_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            other = {**EXAMPLES["result_stored"], "step": "s", "visit": 2,
+                     "result": "results/s.2.json"}
+            engine_ledger._write_staged(engine_ledger.staged_path(run, "s", 1), other)
+            with self.assertRaises(LedgerError) as raised:
+                engine_ledger.staged_event(run, "s", 1)
+            self.assertIn("s.1.event.json", str(raised.exception))
+            self.assertIsNone(engine_ledger.staged_event(run, "s", 3))
+
     def test_the_ledger_module_imports_no_process_or_socket_module(self):
         tree = ast.parse((DELIVERY / "engine_ledger.py").read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -917,7 +955,39 @@ class ReviewDefectsTest(unittest.TestCase):
             self.assertEqual(json.loads((run / "results/scope.1.json").read_text()),
                              {"verdict": "ok"})
             self.assertEqual(len((run / "events.jsonl").read_text().splitlines()), 1)
-            self.assertEqual([p.name for p in (run / "results").iterdir()], ["scope.1.json"])
+            self.assertEqual(sorted(p.name for p in (run / "results").iterdir()),
+                             ["scope.1.event.json", "scope.1.json"])
+
+    def test_a_second_writer_of_a_visit_waits_for_the_first_and_never_replaces_its_staged_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            real = engine_ledger._write_result
+            raced: list[threading.Thread] = []
+            failures: list[LedgerError] = []
+
+            def second() -> None:
+                try:
+                    store(run, result={"verdict": "other"}, at="2026-11-21T16:09:09Z", outcome="loser")
+                except LedgerError as error:
+                    failures.append(error)
+
+            def spy(path, document):
+                if not raced:  # the first writer, staged and not yet published: a second writer arrives
+                    raced.append(threading.Thread(target=second))
+                    raced[0].start()
+                    raced[0].join(1.0)
+                real(path, document)
+
+            with mock.patch.object(engine_ledger, "_write_result", side_effect=spy):
+                store(run, outcome="winner")
+            raced[0].join(30)
+
+            self.assertFalse(raced[0].is_alive())
+            self.assertEqual(len(failures), 1)
+            (appended,) = engine_ledger.replay(run / "events.jsonl")
+            self.assertEqual(appended["outcome"], "winner")
+            self.assertEqual(engine_ledger.staged_event(run, "scope", 1), appended)
+            self.assertEqual(json.loads((run / "results/scope.1.json").read_text()), {"verdict": "ok"})
 
     def test_a_writer_uses_its_own_temporary_file(self):
         with tempfile.TemporaryDirectory() as tmp:
