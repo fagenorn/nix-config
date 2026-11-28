@@ -2,8 +2,7 @@
 
 The service binds `127.0.0.1` on one port (`DEFAULT_PORT`) and nothing else; no
 parameter names a host. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`
-for the port actually bound, else the answer is `403` `text/plain`
-`loopback only`.
+for the port actually bound, else the answer is `403` `text/plain` `loopback only`.
 
 Before the `Host` check and before any interim `100 Continue`, on every route and method of the
 owner port, the lookup (`peer_reader`, default `peer.reader_for(sys.platform)`) must find a process
@@ -13,8 +12,7 @@ holder of another uid, else the answer is `403` `text/plain` `peer.NOT_OWNER_TEX
 stderr line `console: peer_refused <other_user|not_found|unreadable>` (ADR-console-076). There is
 one lookup per connection, and at most `PEER_LOOKUPS` lookups run at once: a connection that finds
 no free slot is answered as `unreadable` (fail closed) rather than queued. The guest door is not judged by this rule; it has its own (below). A request line or header block the
-inherited parser refuses as malformed is answered `400` before this check; it is not a route of the
-port and carries nothing of the console.
+inherited parser refuses as malformed is answered `400` before this check; it is not a route of the port and carries nothing of the console.
 
 Routes (every response carries `Cache-Control: no-store`, except a picture read's 200, which
 carries `Cache-Control: private`, and `X-Content-Type-Options: nosniff`, and every one but the
@@ -100,8 +98,7 @@ listening and unlinks its file; `close` takes the same lock around its inode che
 console stopping never unlinks the socket of one starting at the same path. A folder that holds an
 ACL allow entry (`guest_acl_reader`, default `guest.acl_reader_for(sys.platform)`; macOS only) is a
 `GuestSocketError` (`EPERM`). `close` and a
-failed construction remove the socket file this console bound (the same device and inode) and nothing
-else.
+failed construction remove the socket file this console bound (the same device and inode) and nothing else.
 Every guest connection is judged in `verify_request` before a byte is read: `guest.door_refusal` on
 the `os.lstat` of the folder and the socket (any bit beyond 0700 or 0600, or not the owner's, refuses),
 the socket path still naming the file this console bound (same device and inode, else the listener
@@ -332,8 +329,7 @@ answer failed`; success is an empty `204`. `POST /api/look-retry` (#1260) runs t
 `MAX_LOOK_RETRY_BYTES` (4096) and `sprints.parse_look_retry`: 400 `bad look retry`, `sprints.Refused` is one
 stderr line `console: look_retry_refused <reason>` and 409 with the reason, a `ForgeError` or `answer.Refused`
 from the post is 502 with the plain reason recorded for it (`tracker_words`, or the refusal's text), any other
-exception is `console: look_retry_failed <Type>: <message>` and 500 `look retry failed`; success is an empty
-`204`.
+exception is `console: look_retry_failed <Type>: <message>` and 500 `look retry failed`; success is an empty `204`.
 
 Approving a look card (#1260, ADR-console-074). An answer that chooses the `look.approve` option of a question
 that carries a `look` and carries no words of the owner's (`text` absent: an option picked with words typed beside
@@ -852,8 +848,7 @@ profile's earlier reading, its open item and its Sign in action stay. The outcom
 read says signed in, else `failed`. One `signin.ended` row, carrying the attempt of its start, is then
 appended and the view's `signin_runs` is `running` for a live run's attempt, else the folded end. A
 thread `SIGNIN_THREAD` calls `expire_signins()` every `SIGNIN_TICK_SECONDS` to enforce the run
-deadline. No row, stderr line, view or stream frame carries a link or a code; the link is in the start, add and
-link answers only.
+deadline. No row, stderr line, view or stream frame carries a link or a code; the link is in the start, add and link answers only.
 
 The manager's route, `POST /api/brief`, is not a page write: it carries no token and the sprint's
 secret takes the token's place. After the loopback `Host` check it runs the hook route's body checks
@@ -938,8 +933,7 @@ nothing, publishes nothing and marks nothing read. It answers 200 `application/j
 "milestone", "tracker_url", "issues": [{"issue", "stage"}, ...], "inbox", "next"}` and the
 `wait_until` and `paused` the report states, only when it states them (#1380), which a newer
 brief does not remove; `live_faults` is `[sprints.fault_entry(f) for f in sprints.open_faults(sprint)]`,
-the sprint's standing live-fault declarations in id order; `unread` is the number of the owner's
-messages not yet read.
+the sprint's standing live-fault declarations in id order; `unread` is the number of the owner's messages not yet read.
 
 Questions (#891): `POST /api/ask` is a manager write dispatched like `/api/brief`, before
 `PAGE_WRITES`: `_checked_length(MAX_ASK_BYTES)` (65536: any `Origin` 403 `origin refused`, 415, 411,
@@ -969,8 +963,7 @@ A body that also carries `"dry_run": true` runs every one of those refusals thro
 so a refusal comes before any upload). The round's picture rule (#1092), `Refused(LOOK_WITHOUT_PICTURE)`
 for the first question whose ask or context names screenshots, a `.png` file or a screenshots folder
 and carries no picture, is `sprints.checked_round`'s; a dry run passes `files_withheld` and skips it,
-because the round it checks has its `file` members left out and `sprint ask` has already applied the rule
-to the whole round.
+because the round it checks has its `file` members left out and `sprint ask` has already applied the rule to the whole round.
 `answer_question(project_id, sprint_id, round_id, index, choice, text)`, under the lock, raises
 `Refused(NOT_OPEN)` unless the sprint is open and of that project, `ENDED` unless
 `sprints.takes_questions`, `UNKNOWN_QUESTION` unless
@@ -983,8 +976,7 @@ or None, `differs` is `chosen` not being the recommendation. It appends exactly 
 "recommended", "differs"}`, plus `"words"` (the checked text) only when a choice and text were
 both given, folds,
 publishes, nudges the manager as `send_message` does and returns the row's `seq`, the message's id.
-Every refusal appends and publishes nothing, and neither the secret nor the owner's text appears
-in a stderr line.
+Every refusal appends and publishes nothing, and neither the secret nor the owner's text appears in a stderr line.
 
 Withdraw (#1099): `POST /api/withdraw-question` is a manager write dispatched like `/api/ask`, before
 `PAGE_WRITES`: `_checked_length(MAX_WITHDRAW_QUESTION_BYTES)` (4096: any `Origin` 403 `origin refused`,
@@ -1007,8 +999,7 @@ being `Refused(REPLACES_REFUSED)` naming the question's number, the pair and the
 the marks and withdraws what they name in the fold, and no other row. `answer_question` answers a
 question the manager took back (withdrawn or replaced) with `Refused(TAKEN_BACK)`, checked after
 `NOT_OPEN` and before `ENDED` (withdrawing a done sprint's last open question ends the sprint, and the
-owner is still told why), appending no row and storing no message; a question not taken back in an
-ended sprint is still `ENDED`.
+owner is still told why), appending no row and storing no message; a question not taken back in an ended sprint is still `ENDED`.
 
 Notices (#1117, ADR-console-044): `POST /api/notice`, `POST /api/notices` and `POST
 /api/withdraw-notice` are manager writes dispatched like `/api/withdraw-question`, before
@@ -1807,7 +1798,7 @@ or is a retry of a stalled sprint or of a manager row that is a takeover; every 
 (`manager.started`, `manager.failed` including the missing-secret one, `manager.waiting`) carries
 `"takeover": true` and `"goal"`, every `manager.started` carries `"seen_after"` (the sprint's
 `manager_seen_seq` when the launch was prepared, 0 if none) so the fold keeps a session seen while the
-launcher returned, and the launch uses `manager.new_launch(..., takeover=True)`. The
+launcher returned, and the launch uses `manager.new_launch(..., takeover=True)`. A takeover passes `resume=` the sprint's `manager_session` and, from a listing that a retry or a move also reads (a raise leaves none), `unheld=` the `revive.unheld_block` of the in-work issues no listed session or engine run holds; under the lock `manager.checked_resume` judges the transcript on the launch's own profile, and `manager.launch_or_fresh` follows a refused resume with one fresh launch in the same job, recording only its outcome. The
 nudger, launcher and listing are never called with the ingest lock held; the owner's text and the
 secret appear in no new row or stderr line.
 
@@ -7796,6 +7787,9 @@ class ConsoleService(ActionPermit):
                     print(f"console: revive_failed {type(error).__name__}: {error}",
                           file=sys.stderr)
                     return
+            else:
+                with contextlib.suppress(Exception):
+                    listed = self._listing()
             with self._ingest:
                 launch = self._prepared_launch(sprint_id, token, listed)
                 prepared_pin = self._pinned
@@ -7818,13 +7812,14 @@ class ConsoleService(ActionPermit):
                 else:
                     launch = self._unexcluded_launch(launch, token, prepared_pin)
                 if launch is not None:
+                    launch = manager.checked_resume(launch, self._dirs())
                     self._client_live[launch.profile] += 1
             if launch is None:
                 return
             try:
                 reason = printed = None
                 try:
-                    printed = self._launcher(launch)
+                    launch, printed = manager.launch_or_fresh(self._launcher, launch)
                 except Exception as error:
                     reason = (str(error) if isinstance(error, manager.LaunchFailed)
                               else f"{type(error).__name__}: {error}")
@@ -7915,9 +7910,14 @@ class ConsoleService(ActionPermit):
                                     owner=sprints.open_owner_notices(self._owner_notices,
                                                                      project_id)), sprint_id,
             int(self._clock() * 1000))
+        resumed = {"resume": sprint.manager_session} if takeover else {}
+        if takeover and listed is not None:
+            resumed["unheld"] = revive.unheld_block(sprint, revive.unheld(
+                sprint, self._deliveries.values(), listed, self._engine_states))
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
                                   secret, self._sprint_secrets, takeover=takeover,
-                                  seen_after=sprint.manager_seen_seq or 0, notices=notices)
+                                  seen_after=sprint.manager_seen_seq or 0, notices=notices,
+                                  **resumed)
 
     def _unexcluded_launch(self, launch: manager.Launch, token: object,
                            prepared_pin: str | None) -> manager.Launch | None:

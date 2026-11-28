@@ -10,9 +10,10 @@ import threading
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import (capacity, deliveries, manager, nudge, permission, permit, revive,
-                                 service, sessions, sprints)
+from agent_tools.console import (capacity, deliveries, engine_runs, manager, nudge, permission,
+                                 permit, revive, service, sessions, sprints)
 from agent_tools.console.deliveries import DELIVERY_SEEN
+from agent_tools.delivery.engine_ledger import RunState
 
 from . import console_test_support as support
 from .test_console_messages import GOAL_TEXT, PARTS
@@ -28,6 +29,7 @@ GOAL = GOAL_TEXT
 LAUNCH_MODE = permission.Permission(permission.BYPASS, permission.NO_PRODUCTION)
 WAKE_MODE = permission.Permission(permission.AUTO, permission.NOT_ENFORCED)
 UNRESOLVED_MODE = {"mode": "auto", "reason": permission.UNRESOLVED}  # the real reader over /srv/p01
+STOPPED_12 = revive.UNHELD_HEAD + "\n- issue 12 at stage building\n" + revive.UNHELD_TAIL
 
 
 class ReviveCase(Case):
@@ -83,6 +85,22 @@ class ReviveCase(Case):
 
     def gone(self, svc):
         self.append(svc, [("session.gone", None, {"session_id": "s-1"})])
+
+    def fresh_prompt(self):
+        return (manager.TAKEOVER_LEAD.removesuffix(manager.GOAL_MARK).rstrip() + "\n\n"
+                + STOPPED_12 + "\n\n" + manager.GOAL_MARK + GOAL)
+
+    def transcript(self, session_id):
+        path = (support.profile_dir(self.store, "work") / "projects" / "-srv-p01"
+                / (session_id + ".jsonl"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+
+    def take_over_after_two_failed_wakes(self, svc):
+        self.gone(svc)
+        self.outcomes[:] = ["No conversation found", "No conversation found"]
+        for seconds in (120, 240, 360):
+            self.tick(svc, seconds)
 
     def drain(self):
         while self.queued.jobs:
@@ -449,12 +467,79 @@ class ReviveServiceTest(ReviveCase):
         self.assertEqual(len(self.revives()), 3)
         self.assertEqual(len(self.rows("manager.stalled")), 1)
 
+    def test_a_takeover_resumes_the_earlier_session_when_its_transcript_is_on_the_chosen_account(self):
+        svc = self.begin()
+        self.on_track(svc)
+        self.transcript("s-1")
+        self.take_over_after_two_failed_wakes(svc)
+        self.assertEqual(len(self.launches.calls), 2)
+        takeover = self.launches.calls[-1]
+        self.assertIs(takeover.takeover, True)
+        self.assertEqual(takeover.resume, "s-1")
+        self.assertEqual(takeover.prompt, manager.RESUME_LEAD.removesuffix(
+            manager.GOAL_MARK).rstrip() + "\n\n" + STOPPED_12 + "\n\n" + manager.GOAL_MARK + GOAL)
+        self.assertEqual(manager.launch_command(takeover, "darwin")[:5],
+                         ["claude-account", "run", "--resume", "s-1", "--bg"])
+        started = self.rows("manager.started")[-1]
+        self.assertEqual((started["takeover"], started["profile"]), (True, "work"))
+
+    def test_a_takeover_starts_fresh_when_the_chosen_account_has_no_transcript(self):
+        svc = self.begin()
+        self.on_track(svc)
+        self.take_over_after_two_failed_wakes(svc)
+        takeover = self.launches.calls[-1]
+        self.assertIsNone(takeover.resume)
+        self.assertEqual(takeover.prompt, self.fresh_prompt())
+        self.assertEqual(manager.launch_command(takeover, "darwin")[:3],
+                         ["claude-account", "run", "--bg"])
+
+    def test_a_resume_the_client_refuses_is_followed_by_one_fresh_start_in_the_same_job(self):
+        self.launches = support.Launches(fail=[None, "No conversation found"])
+        svc = self.begin()
+        self.on_track(svc)
+        self.transcript("s-1")
+        self.take_over_after_two_failed_wakes(svc)
+        self.assertEqual([c.resume for c in self.launches.calls], [None, "s-1", None])
+        self.assertEqual(self.launches.calls[-1].prompt, self.fresh_prompt())
+        self.assertEqual(self.rows("manager.failed"), [])
+        self.assertEqual(len(self.rows("manager.started")), 2)
+        self.assertTrue(self.rows("manager.started")[-1]["takeover"])
+        self.tick(svc, 361)
+        self.assertEqual(len(self.launches.calls), 3)
+
+    def test_a_takeover_names_the_in_work_delivery_whose_session_is_gone(self):
+        for held in ("none", "session", "engine"):
+            with self.subTest(held=held):
+                self.setUp()
+                svc = self.begin()
+                self.on_track(svc, seen=False)
+                state = deliveries.DeliveryState(
+                    "s-9", "r-1", 1, (deliveries.IssueStage(12, "building"),))
+                self.append(svc, [(DELIVERY_SEEN, "owner/p01", deliveries.seen_payload(state))])
+                if held == "session":
+                    self.listed["s-9"] = sessions.Observation(
+                        "s-9", "/srv/p01", 1, "busy", None, "a delivery", None)
+                if held == "engine":
+                    running = RunState(
+                        run="run-12", project="owner/p01", issue=12, stage="building", step=None,
+                        wait=None, stop=None, done=False, last_event=None, process=None,
+                        alive=False, engine_alive=True)
+                    svc._engine = mock.Mock(poll=lambda: engine_runs.EnginePoll((running,), ()))
+                    svc.poll_engine_runs()
+                self.tick(svc, 120)
+                prompt = self.launches.calls[-1].prompt
+                if held == "none":
+                    self.assertEqual(prompt, self.fresh_prompt())
+                else:
+                    self.assertNotIn(revive.UNHELD_HEAD, prompt)
+                    self.assertEqual(prompt, manager.TAKEOVER_LEAD + GOAL)
+
     def test_an_unknown_session_is_taken_over_by_one_new_manager(self):
         svc = self.begin()
         sid = self.on_track(svc, seen=False)
         self.tick(svc, 120)
         self.assertEqual(len(self.launches.calls), 2)
-        self.assertEqual(self.launches.calls[-1].prompt, manager.TAKEOVER_LEAD + GOAL)
+        self.assertEqual(self.launches.calls[-1].prompt, self.fresh_prompt())
         started = self.rows("manager.started")[-1]
         self.assertEqual((started["sprint_id"], started["takeover"], started["goal"]),
                          (sid, True, GOAL))
@@ -494,7 +579,7 @@ class ReviveServiceTest(ReviveCase):
         self.assertEqual(len(self.launches.calls), 1)
         self.tick(svc, 360)
         self.assertEqual(len(self.launches.calls), 2)
-        self.assertEqual(self.launches.calls[-1].prompt, manager.TAKEOVER_LEAD + GOAL)
+        self.assertEqual(self.launches.calls[-1].prompt, self.fresh_prompt())
         self.tick(svc, 361)
         self.assertEqual(len(self.launches.calls), 2)
         self.assertEqual(len(self.revives()), 2)
@@ -622,7 +707,7 @@ class ReviveServiceTest(ReviveCase):
                     self.drain()
                     self.tick(svc, 1000)
                 self.assertEqual(len(self.launches.calls), 2)
-                self.assertEqual(self.launches.calls[-1].prompt, manager.TAKEOVER_LEAD + GOAL)
+                self.assertEqual(self.launches.calls[-1].prompt, self.fresh_prompt())
                 self.assertTrue(self.rows("manager.started")[-1]["takeover"])
                 self.assertEqual(len(self.rows("manager.started")), 2)
 
@@ -674,7 +759,7 @@ class ReviveServiceTest(ReviveCase):
         svc.retry_manager("owner/p01", sid)
         self.drain()
         self.assertEqual(len(self.launches.calls), 2)
-        self.assertEqual(self.launches.calls[-1].prompt, manager.TAKEOVER_LEAD + GOAL)
+        self.assertEqual(self.launches.calls[-1].prompt, self.fresh_prompt())
         self.assertTrue(self.rows("manager.started")[-1]["takeover"])
         self.assertIsNone(svc._sprints[sid].stalled)
 
