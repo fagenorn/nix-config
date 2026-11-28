@@ -404,6 +404,31 @@ class CommandSummaryTest(unittest.TestCase):
         command = "sort <<'EOF'\nFix the reads of /etc/passwd paths\nEOF" + self.PAD
         self.assertEqual(self.summary(command), self.want(["sort"], [], ["/etc/passwd"]))
 
+    def test_a_feeder_that_changes_or_ignores_its_heredoc_leaves_the_script_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        encoded = "ZWNobyBoaSA+IC9ldGMvcGFzc3dk"
+        rows = [
+            (f"base64 -d <<'EOF' | bash\n{encoded}\nEOF", ["base64", "bash"]),
+            ("cat x.sh <<'EOF' | bash\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+            ("tr a-z A-Z <<'EOF' | bash\nrm -rf /etc/nginx\nEOF", ["tr", "bash"]),
+            ("rev <<'EOF' | bash\nxgnin/cte/ fr- mr\nEOF", ["rev", "bash"]),
+            ("cat -n <<'EOF' | bash\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+            (f"cat <<'EOF' | base64 -d | bash\n{encoded}\nEOF", ["cat", "base64", "bash"]),
+            (f"cat <<'EOF' | tee /tmp/log | gzip -d | bash\n{encoded}\nEOF", ["cat", "tee", "gzip", "bash"]),
+        ]
+        for command, runs in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["runs"], runs)
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_feeder_that_passes_its_heredoc_through_keeps_the_script_text(self):
+        for feeder in ("cat", "cat -", "tee /tmp/log"):
+            with self.subTest(feeder=feeder):
+                result = self.summary(f"{feeder} <<'EOF' | cat | bash\nrm -rf /etc/nginx\nEOF" + self.PAD)
+                self.assertEqual(result["scripts"], [{"program": "bash", "lines": 1, "paths": ["/etc/nginx"]}])
+
     def test_text_that_reaches_an_interpreter_by_another_route_still_counts(self):
         rm = "rm -rf /etc/nginx"
         py = "import shutil; shutil.rmtree('/etc/nginx')"

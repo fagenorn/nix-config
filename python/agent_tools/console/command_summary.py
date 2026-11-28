@@ -10,13 +10,15 @@ summary is a reading aid beside the verbatim command. It imports only the standa
 below, `{"read": False}` and never a partial summary; otherwise exactly
 
     {"read": True, "runs": [...], "writes": [...], "outside": [...],
-     "scripts": [{"program": str, "lines": int, "paths": [...]}, ...]}
+     "scripts": [{"program": str, "lines": int | None, "paths": [...]}, ...]}
 
 `runs` are the program words as written, `writes` the written or deleted paths as written (quotes
 removed), `outside` the touched paths that are not inside `root` (the normalized absolute path when it
 can be placed, else the word as written), `scripts` the interpreter code and here-documents, in text
-order. Every list is in first-seen order without duplicates. With no absolute `root` every path is
-outside.
+order. A here-document reaches its program unchanged only through `cat` without a file operand or option
+and `tee`; through any other feeder (`base64 -d`, `tr`, `cat x.sh`) the script's text is not known, and
+its entry is `{"program": str, "lines": None, "paths": []}`: no line count and no path is claimed. Every list is in first-seen order without
+duplicates. With no absolute `root` every path is outside.
 
 The grammar it reads, one left-to-right pass. Blanks are space and tab (a backslash before a newline is
 one); a `#` that begins a word starts a comment. Separators are newline, `;`, `&&`, `||`, `|`, `|&` and
@@ -519,6 +521,22 @@ class _Reader:
                 texts.append((item.word.value, item.word.value.count("\n") + 1))
         return texts
 
+    @classmethod
+    def passes_on(cls, chain):
+        """True when the first command of `chain` hands its here-document text, unchanged, to the end of
+        the chain: each command is a bare `cat` (or `cat -`) or a `tee`, and only the first has its own text."""
+        for at, (items, _) in enumerate(chain):
+            if at and cls.stdin_texts(items):
+                return False
+            words = [item.word.value for item in items if item.kind == "word"
+                     and not _ASSIGNMENT.match(item.word.value)]
+            name = posixpath.basename(words[0]) if words else ""
+            if name == "tee":
+                continue
+            if name != "cat" or any(value != "-" for value in words[1:]):
+                return False
+        return True
+
     def command(self, items, feeders=()):
         """Fold one simple command; return whether its standard input reaches a program other than a data reader.
 
@@ -539,11 +557,16 @@ class _Reader:
         if self.script_input and any(item.kind == "redir" and item.op in _READING_REDIRECTS for item in items):
             raise _Refuse("a program fed standard input from a file the console cannot read")
         if feeders and self.script_input and not self.stdin_texts(items):
-            fed = [text for before, reaches in feeders if not reaches for text in self.stdin_texts(before)]
+            fed = [(text, lines, self.passes_on(feeders[at:]))
+                   for at, (before, reaches) in enumerate(feeders) if not reaches
+                   for text, lines in self.stdin_texts(before)]
             if not fed:
                 raise _Refuse("a program fed standard input the console cannot read")
-            for text, lines in fed:
-                self.script(self.interpreter, text, lines)
+            for text, lines, intact in fed:
+                if intact:
+                    self.script(self.interpreter, text, lines)
+                else:
+                    self.scripts.append({"program": self.interpreter, "lines": None, "paths": []})
         if program is not None:
             if program.expanded or program.value in _RESERVED:
                 raise _Refuse("a program the console cannot read")
