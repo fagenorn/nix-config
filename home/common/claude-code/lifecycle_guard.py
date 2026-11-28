@@ -4177,11 +4177,10 @@ def is_pull_request_document(document):
 
 def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, memo):
     """Whether run `run_id` of `slug` is a pull request check run of its own open issue pull
-    request at that pull request's head with at least one failed job, whether or not that job is
-    a required check, as the console permit judges it. Any read that fails, or any
-    other shape, is False. Neither the row's declared `required_checks` nor the forge's
-    protection of the integration branch is read. `memo`, a dict shared by the calls of one
-    command, holds each read once."""
+    request at that pull request's head with a failed job, required or not, as the console permit
+    judges it. Any read that fails, or any other shape, is False. Neither the row's declared
+    `required_checks` nor the forge's protection of the integration branch is read. `memo`, a dict
+    shared by the calls of one command, holds each read once."""
     hook_host = os.environ.get("GH_HOST", "").strip().lower()
     if hook_host not in ("", "github.com"):
         return False
