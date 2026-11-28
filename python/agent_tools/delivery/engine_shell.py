@@ -200,6 +200,7 @@ from agent_tools.delivery import (
     engine_reply, engine_resume, engine_session, engine_slots, engine_stop, host_admission, procedure_terms,
     rule_reader,
 )
+from agent_tools.delivery.engine_admission import Admission
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.delivery.engine_ledger import creation_lock_path
 from agent_tools.project_contract import agent_platform, resolve_project
@@ -397,10 +398,10 @@ def check_project_commands() -> tuple[str, ...]:
     return CommandTable.from_snapshot(snapshot).project_ids()
 
 
-def _validate(directory: Path, table: CommandTable, caps: bool = False) -> dict:
-    """The entry procedure of `directory`, checked and runnable, or `Refused`; `caps` adds the size caps."""
-    absent = (None if (directory / f"{ENTRY}.json").is_file()
-              else Refused(f"no {ENTRY}.json in the procedures directory {directory}"))
+def _validate(directory: Path, table: CommandTable, caps: bool = False, entry: str = ENTRY) -> dict:
+    """The `entry` procedure of `directory`, checked and runnable, or `Refused`; `caps` adds the size caps."""
+    absent = (None if (directory / f"{entry}.json").is_file()
+              else Refused(f"no {entry}.json in the procedures directory {directory}"))
     try:
         _, document = engine_check.verdict(directory, table.project_ids(), caps=caps)
     except engine_check.CheckError as error:
@@ -417,10 +418,10 @@ def _validate(directory: Path, table: CommandTable, caps: bool = False) -> dict:
     if absent:
         raise absent
     try:
-        procedure = _load(directory / f"{ENTRY}.json")
+        procedure = _load(directory / f"{entry}.json")
     except (ValueError, OSError) as error:
         raise Refused(str(error)) from error
-    _refuse_unrunnable(procedure, directory, SUPPLIED_INPUTS, ENTRY)
+    _refuse_unrunnable(procedure, directory, SUPPLIED_INPUTS, entry)
     return procedure
 
 
@@ -488,8 +489,9 @@ def _superseded(run_dir: Path) -> bool:
     """Whether the run's procedure copy is in a format the engine does not read; a copy that does
     not parse is not (it is refused later, by `_validate`)."""
     try:
-        document = _load(run_dir / "procedure" / "deliver.json")
-    except (ValueError, OSError):
+        name = engine_ledger.read_run(run_dir)["procedure"]
+        document = _load(run_dir / "procedure" / f"{name}.json")
+    except (ValueError, OSError, KeyError, engine_ledger.LedgerError):
         return False
     return not procedure_terms.readable_format(document.get("format"))
 
@@ -503,7 +505,8 @@ def _supersede(run_dir: Path, clock: Callable[[], datetime]) -> None:
     engine_housekeeping.record_history(run_dir, clock)
 
 
-def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] | None = None,
+def deliver(issue: int, procedures_dir: Path, *, entry: str = ENTRY,
+            clock: Callable[[], datetime] | None = None,
             tracker: engine_housekeeping.Tracker | None = None) -> tuple[int, dict]:
     procedures_dir = Path(procedures_dir)
     snapshot, table = _resolve()
@@ -535,8 +538,8 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
 
     def stage(staged: Path) -> None:
         # The copy that runs is the copy checked; the lock is held before the run is visible.
-        if _validate(staged / "procedure", table, caps=True)["inputs"] != procedure["inputs"]:
-            raise Refused(f"the {ENTRY} procedure changed while its run was created")
+        if _validate(staged / "procedure", table, True, entry)["inputs"] != procedure["inputs"]:
+            raise Refused(f"the {entry} procedure changed while its run was created")
         held.append(_take_run_lock(staged, holder["started"]))
         if replaced is not None:
             # The replacement is judged on the bytes it publishes, before the
@@ -556,7 +559,7 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             # A new run's set is judged before the runs root or the issue's creation lock
             # exists; when either exists the judgement waits for the lock, so a running
             # or open run answers first.
-            checked = _validate(procedures_dir, table, caps=True)
+            checked = _validate(procedures_dir, table, True, entry)
     except (engine_ledger.LedgerError, OSError, KeyError) as error:
         raise Refused(str(error)) from error
     try:
@@ -575,13 +578,14 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             replaced = open_runs[0] if open_runs and _superseded(open_runs[0]) else None
             if open_runs and replaced is None:
                 run_dir = open_runs[0]
-                procedure = _validate(run_dir / "procedure", table)
-                inputs = engine_ledger.read_run(run_dir)["inputs"]
+                recorded = engine_ledger.read_run(run_dir)
+                procedure = _validate(run_dir / "procedure", table, entry=recorded["procedure"])
+                inputs = recorded["inputs"]
                 held.append(_take_run_lock(run_dir, holder["started"]))
                 continued = True
             else:
                 procedure = checked if checked is not None else _validate(
-                    procedures_dir, table, caps=True)
+                    procedures_dir, table, True, entry)
                 now = datetime.now(timezone.utc)
                 token = "".join(secrets.choice(engine_ledger.TOKEN_ALPHABET) for _ in range(4))
                 host = _host()
@@ -591,7 +595,7 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
                     if value is None:
                         raise Refused(f"input {name} has no value in this project")
                 run_dir = engine_ledger.create_run(
-                    project=project, issue=issue, procedure=ENTRY,
+                    project=project, issue=issue, procedure=entry,
                     procedures_dir=procedures_dir,
                     platform_revision=platform_revision(os.environ),
                     host=host, inputs=inputs, now=now, token=token,
@@ -709,28 +713,6 @@ def _lock_creation(issue: int) -> int:
 def _release(held: list[int]) -> None:
     while held:
         os.close(held.pop())
-
-
-class _Admission:
-    """Hands out the indexes of a call's items in list order, none once a fault is noted or the engine ends."""
-
-    def __init__(self, count: int) -> None:
-        self._count = count
-        self._next = 0
-        self._stopped = False
-        self._lock = threading.Lock()
-
-    def take(self) -> int | None:
-        with self._lock:
-            if self._stopped or self._next >= self._count or engine_session.ending():
-                return None
-            index = self._next
-            self._next += 1
-            return index
-
-    def fail(self) -> None:
-        with self._lock:
-            self._stopped = True
 
 
 def _record_grades(run_dir: Path, ledger: list[dict],
@@ -1195,7 +1177,7 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
         _graded(run_dir, step, action.visit, outcome)
         return
     items = [None] if action.items is None else list(action.items)
-    admission = _Admission(len(items))
+    admission = Admission(len(items))
     entries: dict[int, dict] = {}
     errors: dict[int, Exception] = {}
 

@@ -29,7 +29,10 @@ nothing and creates no directory:
   of 1 or more, runs of several projects with no `--project`, an unreadable `run.json`, or
   an event file the ledger refuses.
 
-`engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a procedure of
+`engine deliver <issue> [--procedures <dir>] [--plan blueprint|outline]` runs `<dir>/deliver.json`, or
+`<dir>/outline.json` with `--plan outline`, the entry procedure a new run records in its `run.json`
+(`--plan` absent or `blueprint` is `deliver`; any other value is a usage error); an open run
+continues on the procedure its `run.json` records, whatever `--plan` says (a procedure of
 `command`, `agent`, `decide`, `group` and `call` steps; an agent step runs as one headless session through the
 account launcher, graded by its structured reply unless a bound fires, its files kept under the
 run's `sessions/`; a step with no valid structured answer is asked once more on the same session and
@@ -82,6 +85,7 @@ from pathlib import Path
 from agent_tools.delivery import engine_check, engine_ledger, engine_shell, procedure_terms
 
 PROCEDURES_DIR = Path(__file__).with_name("procedures")
+PLAN_ENTRIES = {"blueprint": "deliver", "outline": "outline"}
 
 
 def compact(value: object) -> str:
@@ -126,6 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="run a procedure of command, agent, decide, group and call steps to done or a stop")
     deliver_parser.add_argument("issue", type=_issue_number)
     deliver_parser.add_argument("--procedures", type=Path, default=PROCEDURES_DIR)
+    deliver_parser.add_argument("--plan", choices=tuple(PLAN_ENTRIES), default="blueprint")
     return parser
 
 
@@ -179,9 +184,9 @@ def _stop_run(issue: int, project: str | None) -> int:
     return 1
 
 
-def _deliver(issue: int, procedures: Path) -> int:
+def _deliver(issue: int, procedures: Path, plan: str) -> int:
     try:
-        code, line = engine_shell.deliver(issue, procedures)
+        code, line = engine_shell.deliver(issue, procedures, entry=PLAN_ENTRIES[plan])
     except engine_shell.ProcedureRefused as error:
         sys.stdout.write(compact(error.document))
         return engine_shell.EXIT_REFUSED
@@ -204,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "stop":
         return _stop_run(args.issue, args.project)
     if args.command == "deliver":
-        return _deliver(args.issue, args.procedures)
+        return _deliver(args.issue, args.procedures, args.plan)
     if not args.procedures.is_dir():
         return _usage(f"--procedures is not a directory: {args.procedures}")
     try:

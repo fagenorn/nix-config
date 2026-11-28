@@ -187,7 +187,8 @@ class EngineProject:
 
     def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None,
                    keep_alive: dict | None = None,
-                   children: dict[str, dict] | None = None) -> Path:
+                   children: dict[str, dict] | None = None,
+                   outline: list[dict] | None = None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
 
         def write(name: str, steps: list[dict], inputs, stops) -> None:
@@ -203,6 +204,8 @@ class EngineProject:
             (directory / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
 
         write("deliver", steps, inputs, stops)
+        if outline is not None:
+            write("outline", outline, inputs, stops)
         for name, child in (children or {}).items():
             write(name, child["steps"], child["inputs"], child["stops"])
         return directory
@@ -211,9 +214,11 @@ class EngineProject:
         return [sys.executable, "-m", "agent_tools.delivery.engine", *words], {
             "cwd": cwd or self.root, "env": self.env, "text": True, **kwargs}
 
-    def deliver(self, procedures: Path, issue: int = 1512, cwd: Path | None = None):
+    def deliver(self, procedures: Path, issue: int = 1512, cwd: Path | None = None,
+                plan: str | None = None):
+        plan_words = ("--plan", plan) if plan is not None else ()
         argv, options = self.command("deliver", str(issue), "--procedures", str(procedures),
-                                     cwd=cwd)
+                                     *plan_words, cwd=cwd)
         return subprocess.run(argv, capture_output=True, timeout=120, **options)
 
     @contextlib.contextmanager
@@ -1381,14 +1386,95 @@ class LockTest(unittest.TestCase):
             self.assertEqual(lock_holder(run_dir), content)
 
 
+class PlanOptionTest(unittest.TestCase):
+    def two_entries(self, project: EngineProject) -> Path:
+        return project.procedures([step("a", "count-a", "done")],
+                                  outline=[step("b", "count-b", "done")])
+
+    def test_plan_outline_runs_the_outline_procedure_of_the_directory(self):
+        project = EngineProject(self)
+        procedures = self.two_entries(project)
+        done = project.deliver(procedures, plan="outline")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(project.calls("b"), 1)
+        self.assertEqual(project.calls("a"), 0)
+        runs = project.runs()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(engine_ledger.read_run(runs[0])["procedure"], "outline")
+
+    def test_no_plan_and_plan_blueprint_both_run_deliver(self):
+        project = EngineProject(self)
+        procedures = self.two_entries(project)
+        for issue, plan in ((1512, None), (1513, "blueprint")):
+            done = project.deliver(procedures, issue=issue, plan=plan)
+            self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(project.calls("a"), 2)
+        self.assertEqual(project.calls("b"), 0)
+        runs = project.runs()
+        self.assertEqual(len(runs), 2)
+        for run in runs:
+            self.assertEqual(engine_ledger.read_run(run)["procedure"], "deliver")
+
+    def test_an_unknown_plan_is_a_usage_error_that_creates_no_run(self):
+        project = EngineProject(self)
+        done = project.deliver(self.two_entries(project), plan="sketch")
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        self.assertEqual(project.runs(), [])
+
+    def test_plan_outline_without_an_outline_file_is_refused(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "count-a", "done")])
+        done = project.deliver(procedures, plan="outline")
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("no outline.json", done.stderr)
+        self.assertEqual(project.runs(), [])
+
+    def test_an_open_outline_run_continues_on_its_own_procedure_without_plan(self):
+        project = EngineProject(self)
+        procedures = project.procedures(
+            [step("a", "count-a", "done")],
+            outline=[step("b", "standin-gate", "done")])
+        stopped = project.deliver(procedures, plan="outline")
+        self.assertEqual(stopped.returncode, 3, stopped.stdout + stopped.stderr)
+        (project.tmp / "gate-open").write_text("open", encoding="utf-8")
+        (project.runs()[0] / "procedure" / "deliver.json").unlink()
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "done")
+        runs = project.runs()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(len(run_continued(project.events(runs[0]))), 1)
+        self.assertEqual(project.calls("a"), 0)
+
+    def test_an_open_outline_run_whose_copy_is_unreadable_is_superseded_by_a_new_one(self):
+        project = EngineProject(self)
+        procedures = project.procedures(
+            [step("a", "count-a", "done")],
+            outline=[step("b", "standin-gate", "done")])
+        stopped = project.deliver(procedures, plan="outline")
+        self.assertEqual(stopped.returncode, 3, stopped.stdout + stopped.stderr)
+        (old,) = project.runs()
+        copy = old / "procedure" / "outline.json"
+        document = json.loads(copy.read_text(encoding="utf-8"))
+        document["format"] = 2
+        copy.write_text(json.dumps(document), encoding="utf-8")
+        (project.tmp / "gate-open").write_text("open", encoding="utf-8")
+        done = project.deliver(procedures, plan="outline")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(project.runs()), 2)
+        self.assertEqual(project.events(old)[-1]["stop"], "superseded")
+
+
 class ShapeTest(unittest.TestCase):
-    def test_deliver_takes_only_an_issue_and_a_procedures_directory(self):
+    def test_deliver_takes_only_an_issue_a_procedures_directory_and_a_plan(self):
         import argparse
         parser = engine.build_parser()
         action = next(a for a in parser._actions
                       if isinstance(a, argparse._SubParsersAction))
         self.assertEqual({a.dest for a in action.choices["deliver"]._actions},
-                         {"help", "issue", "procedures"})
+                         {"help", "issue", "procedures", "plan"})
 
     def test_the_platform_revision_is_the_package_directory_or_source(self):
         self.assertEqual(platform_revision({}), "source")

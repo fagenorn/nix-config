@@ -464,7 +464,7 @@ class CallTest(unittest.TestCase):
         project = EngineProject(self)
         fault_seen = threading.Event()
         waited: list[bool] = []
-        real_fail = engine_shell._Admission.fail
+        real_fail = engine_shell.Admission.fail
 
         def fail(admission) -> None:
             real_fail(admission)
@@ -479,7 +479,7 @@ class CallTest(unittest.TestCase):
         spy = WalkSpy(REAL_WALK, before=before)
         procedures = project.procedures(FAN("standin-items-hold", 2), children=fan_children())
         with project.inside(), mock.patch.object(engine_shell, "_walk", spy), \
-                mock.patch.object(engine_shell._Admission, "fail", fail):
+                mock.patch.object(engine_shell.Admission, "fail", fail):
             with self.assertRaises(engine_shell.Fault):
                 engine_shell.deliver(1517, procedures)
         self.assertEqual(waited, [True])
