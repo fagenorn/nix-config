@@ -1,4 +1,4 @@
-"""The resume launch of a takeover manager, its fresh lead and its fresh fallback (#1962).
+"""The resume launch of a takeover manager, its fresh lead and its fresh fallback.
 
 Run: just agent-workflow-tests
 """
