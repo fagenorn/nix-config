@@ -21,10 +21,27 @@ from unittest import mock
 from agent_tools.delivery import job_time
 from agent_tools.delivery.cleanup_issue import Issue, Refusal
 from agent_tools.delivery.job_time import MARKER, GitHubJobTime, Reading, draft, run
+from tests.test_branch_protection import (
+    CLEANUP_WORKFLOW,
+    WORKFLOW,
+    WORKFLOWS,
+    _top_level_block,
+    green_without_work,
+    job_blocks,
+    job_if_expression,
+    job_names,
+    job_permission_lines,
+    required_contexts,
+    required_jobs,
+    step_blocks,
+    step_env,
+    workflow_permissions,
+)
 
 TIER = "integration"  # this module reads the git index and runs a wrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+JOB_TIME_WORKFLOW = WORKFLOWS / "job-time.yaml"
 WRAPPER = "home/common/verify-pending/checks/dotnet-job-wall"
 MERGE = "a" * 40
 LISTING = "repos/o/r/actions/workflows/ci.yaml/runs?branch=main&event=push"
@@ -319,6 +336,78 @@ class WrapperTest(unittest.TestCase):
         self.assertEqual((line["state"], line["job"], line["budget_seconds"]),
                          ("not_yet", NET, 240.0))
         self.assertEqual([row["run"] for row in line["runs"]], [101, 102, 103])
+
+
+class JobTimeWorkflowTest(unittest.TestCase):
+    """The job that files the job-time issue when a push run of CI on main completes."""
+
+    def test_runs_when_a_push_run_of_ci_on_main_completes_with_issue_write_and_no_other_write(self):
+        self.assertEqual(
+            ["  workflow_run:", "    workflows:", "      - CI", "    types:", "      - completed",
+             "    branches:", "      - main"],
+            [line for line in _top_level_block("on", JOB_TIME_WORKFLOW) if line.strip()],
+        )
+        # `workflows:` names the workflow by its `name:`.
+        self.assertIn("name: CI", WORKFLOW.read_text(encoding="utf-8").splitlines())
+        self.assertEqual(
+            "github.event.workflow_run.event == 'push'",
+            job_if_expression("job-time", JOB_TIME_WORKFLOW),
+        )
+        self.assertEqual(
+            {"actions": "read", "contents": "read", "issues": "write"},
+            workflow_permissions(JOB_TIME_WORKFLOW),
+        )
+        overrides = {
+            key: job_permission_lines(block)
+            for key, block in job_blocks(JOB_TIME_WORKFLOW).items()
+            if job_permission_lines(block)
+        }
+        self.assertEqual({}, overrides)
+
+    def test_readings_run_one_after_another(self):
+        self.assertEqual(
+            ["  group: job-time", "  cancel-in-progress: false", "  queue: max"],
+            [line for line in _top_level_block("concurrency", JOB_TIME_WORKFLOW) if line.strip()],
+        )
+
+    def test_the_job_stores_the_token_then_reads_the_job_time_through_the_command(self):
+        self.assertEqual({"Job Time": "job-time"}, job_names(JOB_TIME_WORKFLOW))
+        steps = step_blocks("job-time", JOB_TIME_WORKFLOW)
+        self.assertEqual(
+            ["Checkout", "Store the workflow token for gh", "Read the job time"], list(steps)
+        )
+        cleanup_token = step_blocks("cleanup-issue", CLEANUP_WORKFLOW)[
+            "Store the workflow token for gh"
+        ]
+        self.assertEqual(
+            [line for line in cleanup_token if line.strip()],
+            [line for line in steps["Store the workflow token for gh"] if line.strip()],
+        )
+        read_step = steps["Read the job time"]
+        self.assertEqual(
+            [
+                "      - name: Read the job time",
+                "        run: PYTHONPATH=python python3 -m agent_tools.delivery.job_time file"
+                " --repo \"$GITHUB_REPOSITORY\" --branch \"$GITHUB_REF_NAME\"",
+            ],
+            [line for line in read_step if line.strip()],
+        )
+        # No `env:` on the command step: no token reaches the command.
+        self.assertIsNone(step_env(read_step))
+        text = JOB_TIME_WORKFLOW.read_text(encoding="utf-8")
+        for key in ("defaults:", "shell:", "working-directory:", "continue-on-error:"):
+            self.assertNotIn(key, text)
+        self.assertEqual(
+            ["    name: Job Time", "    if: github.event.workflow_run.event == 'push'",
+             "    runs-on: ubuntu-24.04", "    timeout-minutes: 10", "    steps:"],
+            [line for line in job_blocks(JOB_TIME_WORKFLOW)["job-time"]
+             if line.startswith("    ") and not line.startswith("     ")],
+        )
+        self.assertEqual([], green_without_work(job_blocks(JOB_TIME_WORKFLOW)["job-time"], None))
+
+    def test_the_job_is_not_a_required_context(self):
+        self.assertNotIn("Job Time", required_contexts())
+        self.assertEqual(JOB_TIME_WORKFLOW, required_jobs()["Job Time"][0])
 
 
 if __name__ == "__main__":
