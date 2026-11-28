@@ -21,8 +21,8 @@ from collections.abc import Callable, Collection
 from typing import Any, NamedTuple
 
 from agent_tools.console import approve
-from agent_tools.console.lock_bump_tree import BRANCH, BumpRefused, pinned_revision, revision_of_branch
 from agent_tools.project_contract.adopt_conformance import LOCK_FILE
+from agent_tools.project_contract.lock_bump_tree import BRANCH, BumpRefused, pinned_revision, revision_of_branch
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
 

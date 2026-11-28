@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import approve, lock_bump
+from agent_tools.console import approve
 from agent_tools.console import console as console_module
-from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract import agent_platform, lock_bump
 from tests.test_console_lock_bump import ENTRIES, REV_B, FakeBuilder, FakeForge, FakeTracker
 from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 

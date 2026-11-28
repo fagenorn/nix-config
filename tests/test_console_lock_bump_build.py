@@ -12,8 +12,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import approve, lock_bump_tree
-from agent_tools.console.lock_bump_tree import BumpRefused, Built, GitBuilder, branch_for, bumped_lock
+from agent_tools.console import approve
+from agent_tools.project_contract import lock_bump_tree
+from agent_tools.project_contract.lock_bump_tree import BumpRefused, Built, GitBuilder, branch_for, bumped_lock
 from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from tests.test_console_lock_bump_tree import REV_A, REV_B, document, dumped, record
 

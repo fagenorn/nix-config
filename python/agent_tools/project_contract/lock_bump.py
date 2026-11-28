@@ -21,7 +21,7 @@ prints one `console: lock_bump <project> <action> <revision> <pull> <issue>` lin
 `console: lock_bump_failed` line when the pass is refused. `start` runs it in a daemon thread every ten
 minutes until its stop event is set, and that event is the pass's `cancel`.
 
-`python -m agent_tools.console.lock_bump observed --repo O/N --base BRANCH (--since STAMP [--within-days 7] |
+`python -m agent_tools.project_contract.lock_bump observed --repo O/N --base BRANCH (--since STAMP [--within-days 7] |
 --merge SHA --platform-repo O/N [--store FILE]) [--proven FILE]` is the evidence check, judged on the pull
 request's required contexts as the merge does, and met only when the lock of the merged tree pins the revision.
 With `--since` the revision is the first line of the proven record stamped at or after `STAMP` (the activation,
@@ -50,11 +50,11 @@ from pathlib import Path
 from typing import NamedTuple, Protocol, TextIO
 
 from agent_tools.console import activation_check, approve, service
-from agent_tools.console import lock_bump_forge
-from agent_tools.console.lock_bump_forge import Checks, GitHubBumpForge, OpenBump
-from agent_tools.console.lock_bump_tree import BumpRefused, Built, GitBuilder, branch_for, revision_of_branch
 from agent_tools.delivery import proof_run
-from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract import agent_platform, lock_bump_forge
+from agent_tools.project_contract.lock_bump_forge import Checks, GitHubBumpForge, OpenBump
+from agent_tools.project_contract.lock_bump_tree import (
+    BumpRefused, Built, GitBuilder, branch_for, revision_of_branch)
 from agent_tools.system import forge_api
 
 FORMAT = 1

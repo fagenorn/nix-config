@@ -5,7 +5,7 @@ Run: just agent-workflow-tests
 import base64
 import unittest
 
-from agent_tools.console.lock_bump_forge import Checks, GitHubBumpForge, OpenBump, QUERY
+from agent_tools.project_contract.lock_bump_forge import Checks, GitHubBumpForge, OpenBump, QUERY
 from agent_tools.system.forge_api import ForgeError
 from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from tests.test_console_lock_bump_tree import dumped, document

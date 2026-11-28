@@ -37,13 +37,13 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.hook_install",  # contract_draft
         "agent_tools.project_contract.schema_three",  # contract_draft
         "agent_tools.project_contract.adopt_apply",  # approve
+        "agent_tools.project_contract.lock_bump",  # console
         "agent_tools.claims.forge_markers",  # answer, inbox, look_check, look_kept_check
         "agent_tools.claims.forge_land_lock",  # movement, lock_wait_check
         "agent_tools.claims.forge_owner_action",  # answer, inbox
         "agent_tools.claims.owner_actions",  # inbox, look_check, movement, service
         "agent_tools.delivery.look_marker",  # inbox, look_check, look_kept_check
         "agent_tools.delivery.engine_ledger",  # console, engine_runs
-        "agent_tools.delivery.proof_run",  # lock_bump, lock_bump_tree
         "agent_tools.release.release_profile",  # release_card
         "agent_tools.release.transaction_history",  # movement
         "agent_tools.release.transaction_storage",  # movement
@@ -80,6 +80,11 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.delivery.verify_slot",  # omlx_memory_day
     }),
     "project_contract": frozenset({
+        "agent_tools.console.activation_check",  # lock_bump
+        "agent_tools.console.approve",  # lock_bump, lock_bump_forge, lock_bump_tree
+        "agent_tools.console.manager",  # lock_bump_tree
+        "agent_tools.console.service",  # lock_bump
+        "agent_tools.delivery.proof_run",  # lock_bump, lock_bump_tree
         "agent_tools.release.release_adapter",  # resolve_project, conformance_checks
         "agent_tools.release.release_profile",  # resolve_project, conformance_checks
         "agent_tools.delivery.hint_phases",  # adopt_inspection, adopt_planning

@@ -13,10 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import activation_check, lock_bump
-from agent_tools.console import lock_bump_forge
-from agent_tools.console.lock_bump_forge import Checks
-from agent_tools.console.lock_bump_tree import revision_of_branch
+from agent_tools.console import activation_check
+from agent_tools.project_contract import lock_bump, lock_bump_forge
+from agent_tools.project_contract.lock_bump_forge import Checks
+from agent_tools.project_contract.lock_bump_tree import revision_of_branch
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
 from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
@@ -154,7 +154,7 @@ class ObservedTest(unittest.TestCase):
         text = (Path(__file__).resolve().parent.parent / SCRIPT).read_text()
         self.assertTrue(text.startswith("#!/bin/sh\n"))
         self.assertTrue(text.endswith(
-            'PYTHONPATH=python exec python3 -m agent_tools.console.lock_bump observed "$@"\n'))
+            'PYTHONPATH=python exec python3 -m agent_tools.project_contract.lock_bump observed "$@"\n'))
         self.assertEqual(committed_mode(SCRIPT), "100755")
 
 

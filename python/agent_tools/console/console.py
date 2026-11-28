@@ -96,7 +96,7 @@ picture a manual check names inside one of them, beside the project's own checko
 on the check's card (`agent_tools.console.inbox`). With none given, only the project's checkout is read.
 
 `--lock-bump-project O/N`, `--lock-bump-branch B` and `--platform-repo O/N` (all three or none) make the
-console also run a lock bump pass for that one project every ten minutes (`agent_tools.console.lock_bump`):
+console also run a lock bump pass for that one project every ten minutes (`agent_tools.project_contract.lock_bump`):
 each proven revision is offered to it as one pull request that is merged on green required checks. The
 record of the last bump is `~/.agents/state/console/lock-bumps.json`; each step is a `console: lock_bump` line.
 """
@@ -113,9 +113,10 @@ from pathlib import Path
 
 import agent_tools
 from agent_tools.console import (
-    account_add, activation, activation_run, account_remove, approve, inbox, lock_bump, manager, movement, nudge,
+    account_add, activation, activation_run, account_remove, approve, inbox, manager, movement, nudge,
     probe, guest, project_question, register, service, signin, signin_run)
 from agent_tools.delivery import engine_ledger
+from agent_tools.project_contract import lock_bump
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 

@@ -8,10 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.console import lock_bump
-from agent_tools.console.lock_bump import Step
-from agent_tools.console.lock_bump_forge import Checks, OpenBump
-from agent_tools.console.lock_bump_tree import BumpRefused, Built, branch_for, revision_of_branch
+from agent_tools.project_contract import lock_bump
+from agent_tools.project_contract.lock_bump import Step
+from agent_tools.project_contract.lock_bump_forge import Checks, OpenBump
+from agent_tools.project_contract.lock_bump_tree import BumpRefused, Built, branch_for, revision_of_branch
 from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "fast"
