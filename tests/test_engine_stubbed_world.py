@@ -385,7 +385,7 @@ class StubTest(unittest.TestCase):
                     {"event": "process_started", "pid": sleepers[1].pid, "started": "2000-01-01T00:00:00Z"}]
         (directory / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in recorded), encoding="utf-8")
 
-        run._kill_started()
+        run.end_started()
 
         self.assertEqual(sleepers[0].wait(timeout=30), -signal.SIGKILL)
         self.assertIsNone(sleepers[1].poll())

@@ -10,7 +10,7 @@ The tiers are:
 |---|---|---|
 | `fast` | every push | A member of the `agent-workflow-tests` recipe that needs only the source tree and the standard library and runs alone in seconds; CI's `Agent Workflow Tests` job runs it on every push of a pull request and of `main`. |
 | `integration` | before merge | A member of the same recipe that needs more: git worlds with pinned ancestors, `nix shell`, node or spawned services; `just test` runs it on the final head and `Agent Workflow Tests` gates the merge on it. |
-| `nightly` | slow or paid, off the merge path | Never a member of that recipe: `just evals` (model calls), `just agent-installed-skill-tests` (a host build), `just agent-activated-skill-tests` (an activated host) and `just console-screenshots` (a browser); run by hand or on a schedule and never gating a merge. |
+| `nightly` | slow or paid, off the merge path | Never a member of that recipe: `just evals` (model calls), `just agent-installed-skill-tests` (a host build), `just agent-activated-skill-tests` (an activated host), `just console-screenshots` (a browser) and `just engine-cut-sweep` (the stubbed delivery cut after every event of its ledger, daily in CI's `Cut Sweep`); run by hand or on a schedule and never gating a merge. |
 
 ([ADR-delivery-015](../areas/delivery/adr/015-tests-carry-a-tier-and-ci-reports-suite-time-growth.md))
 
