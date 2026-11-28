@@ -1,4 +1,4 @@
-"""#1549: a session runs `engine deliver`; the delivery programs keep reading the old text unchanged.
+"""A session runs `engine deliver`; the delivery programs keep reading the old text unchanged.
 
 The shell examples of the session text are every inline code span, every line of a fenced block and every indented
 line, so an example in any of the three forms is judged the same way."""
