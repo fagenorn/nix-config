@@ -15,8 +15,10 @@ is not the branch); else `clear`. `pr` is the number for `duplicate` and `open-p
 `[{number, closes}]`, one per merged pull request the search found, in order, `closes` true only when
 its closing references list the issue.
 
-`plan-preflight --repo-root <path> --issue <n>` takes no holder: it runs `preflight` (same verdicts,
-exit codes and forge reads) and prints its members but `merged_refs`, plus `routed` and `route_detail`.
+`plan-preflight --repo-root <path> --issue <n> --branch <b> --worktree-path <p>` takes no holder: it runs
+`preflight` (same verdicts, exit codes and forge reads) for the branch and worktree the setup adopted, which
+it is handed and never derives again (a title edited since may select another branch), and prints its members
+but `merged_refs`, plus `routed` and `route_detail`.
 `routed` is `router`'s document at `planning` for the paths the issue text names (the lane rule's path
 grammar after a `:<line>` reference is dropped; a file the issue proposes to create counts), read in the
 issue worktree, never `--repo-root`; it is null, with `route_detail` saying why, when the text names no
@@ -219,6 +221,11 @@ def preflight(args: argparse.Namespace) -> dict:
         derived = issue_branch.derive(args.repo_root, args.issue)
     except issue_branch.BranchRefusal as refusal:
         raise _refusal(refusal) from None
+    return _judged(args, snapshot, derived)
+
+
+def _judged(args: argparse.Namespace, snapshot: Mapping, derived: Mapping) -> dict:
+    """`preflight`'s report for the issue on the `derived` branch and worktree path."""
     slug = snapshot["bindings"]["tracker"]["repo_slug"]
     branch = derived["branch"]
     try:
@@ -243,7 +250,8 @@ def preflight(args: argparse.Namespace) -> dict:
 
 
 def plan_preflight(args: argparse.Namespace) -> dict:
-    out = preflight(argparse.Namespace(**vars(args), holder=None))
+    adopted = {"branch": args.branch, "worktree_path": args.worktree_path}
+    out = _judged(argparse.Namespace(issue=args.issue, holder=None), _resolve(args.repo_root), adopted)
     del out["merged_refs"]
     out["routed"] = None
     worktree = Path(out["worktree_path"])
@@ -645,6 +653,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = commands.add_parser("plan-preflight")
     sub.add_argument("--repo-root", required=True)
     sub.add_argument("--issue", required=True, type=number)
+    sub.add_argument("--branch", required=True)
+    sub.add_argument("--worktree-path", required=True)
     for name in ("worktree", "worktree-check"):
         sub = commands.add_parser(name)
         sub.add_argument("--repo-root", required=True)

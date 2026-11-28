@@ -10,6 +10,8 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 
+from agent_tools.delivery import engine_commands
+from agent_tools.delivery.procedure_terms import REFUSAL_MEMBERS
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_check import PROCEDURES, compact, run_check, step
 
@@ -86,6 +88,24 @@ def reads_unreturned(kid: dict, parent: dict) -> None:
     step(parent, "use")["in"] = ["run.issue", "call.summary"]
 
 
+def refusal_ends_the_child(*paths: str) -> Change:
+    """The child's first command maps its refusal to `done`, and the parent returns `paths`."""
+    def change(kid: dict, parent: dict) -> None:
+        step(kid, "scope")["on"]["refused"] = "done"
+        step(parent, "call")["returns"] = list(paths)
+        step(parent, "use")["in"] = ["run.issue"]
+    return change
+
+
+def done_loops_back_exhausted_reads(stop_loops_back: bool) -> Change:
+    """A bounded call whose `done` runs it again, and whose `exhausted` leads to the reader of its member."""
+    def change(kid: dict, parent: dict) -> None:
+        call = step(parent, "call")
+        call["max_visits"] = 2
+        call["on"] = {"done": "call", "kid-stop": "call" if stop_loops_back else "kid-stop", "exhausted": "use"}
+    return change
+
+
 CALL_INVALID = [("parent", "call", "invalid_field")]
 CALL_UNPRODUCED = [("parent", "call", "unproduced_input")]
 CALL_UNKNOWN = [("parent", "call", "unknown_member")]
@@ -106,6 +126,15 @@ ROWS: list[tuple[str, Change, list[tuple[str, str, str]]]] = [
     ("a reader reached after the child stopped", reached_after_the_child_stopped,
      [("parent", "use", "unproduced_input")]),
     ("a read of a member nothing returns", reads_unreturned, [("parent", "use", "unknown_member")]),
+    ("a command member when its refusal ends the child done", refusal_ends_the_child("scope.files"),
+     CALL_UNPRODUCED),
+    ("a member read after exhaustion when the child's stop loops the call back",
+     done_loops_back_exhausted_reads(True), [("parent", "use", "unproduced_input")]),
+]
+OK_ROWS: list[tuple[str, Change]] = [
+    ("a refusal's own reason when the refusal ends the child done", refusal_ends_the_child("scope.reason")),
+    ("a refusal's own verdict when the refusal ends the child done", refusal_ends_the_child("scope.verdict")),
+    ("a member read after exhaustion of a call whose done loops back", done_loops_back_exhausted_reads(False)),
 ]
 
 
@@ -124,6 +153,17 @@ class ReturnsCheckTest(unittest.TestCase):
     def test_a_call_returning_a_member_its_child_stores_before_done_checks_ok(self):
         self.assertEqual(refusals_of(copy.deepcopy(KID), copy.deepcopy(PARENT)),
                          (0, compact({"procedures": ["kid", "parent"], "verdict": "ok"})))
+
+    def test_the_refusal_members_the_checker_allows_are_what_a_refused_command_stores(self):
+        self.assertEqual(sorted(engine_commands._refused("why", 0.0).result), sorted(REFUSAL_MEMBERS))
+
+    def test_a_returns_the_engine_can_publish_checks_ok(self):
+        for name, change in OK_ROWS:
+            with self.subTest(name):
+                kid, parent = copy.deepcopy(KID), copy.deepcopy(PARENT)
+                change(kid, parent)
+                self.assertEqual(refusals_of(kid, parent),
+                                 (0, compact({"procedures": ["kid", "parent"], "verdict": "ok"})))
 
     def test_each_bad_returns_or_read_is_refused_by_step_and_defect(self):
         for name, change, expected in ROWS:

@@ -341,6 +341,15 @@ def core_events(run_dir: Path, ledger: list[dict],
     return events
 
 
+def child_result_visits(run: str) -> dict[str, int]:
+    """The visit of each step's result a child run holds at the end of its walk, after every rewind."""
+    child = engine_ledger.runs_root() / run
+    document = engine_ledger.read_run(child)
+    procedure = _load(child / "procedure" / f"{document['procedure']}.json")
+    ledger = engine_ledger.replay(child / "events.jsonl")
+    return engine_core.result_visits(procedure, document["inputs"], core_events(child, ledger, _computed(procedure)))
+
+
 def read_head(root: str) -> str | None:
     """The full commit id `HEAD` names in `root`, or None when it cannot be read.
 
@@ -1244,8 +1253,9 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
                     "the engine is ending")
     ends = [entries[index] for index in range(len(items))]
     outcome = engine_core.call_outcome([entry["end"] for entry in ends])
+    visits = child_result_visits(ends[0]["run"]) if step.get("returns") and outcome == "done" else {}
     engine_ledger.store_result(run_dir, step=action.step, visit=action.visit,
-                               result={"items": ends, **engine_resume.returned(step, ends)}, at=_now(),
+                               result={"items": ends, **engine_resume.returned(step, ends, visits)}, at=_now(),
                                wall_seconds=time.monotonic() - started, turns=0,
                                tokens=dict(NO_TOKENS), spend_usd=0, outcome=outcome)
     _graded(run_dir, step, action.visit, outcome)

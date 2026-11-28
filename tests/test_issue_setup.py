@@ -285,8 +285,10 @@ class ForgeCommandTest(unittest.TestCase):
             tree.mkdir(parents=True, exist_ok=True)
         return standards, tree
 
-    def plan_preflight(self):
-        return run_setup(self.env, "plan-preflight", "--repo-root", str(self.root), "--issue", "7")
+    def plan_preflight(self, tree, branch="issue-7-add-a-greeting"):
+        """`plan-preflight` handed the branch and worktree the setup adopted."""
+        return run_setup(self.env, "plan-preflight", "--repo-root", str(self.root), "--issue", "7",
+                         "--branch", branch, "--worktree-path", str(tree))
 
     def issue(self, body):
         return {"number": 7, "title": "Add a greeting", "body": body, "state": "open", "labels": []}
@@ -298,7 +300,7 @@ class ForgeCommandTest(unittest.TestCase):
         hint.write_text("hint\n", encoding="utf-8")
         self.register_reads(self.issue("Fix `src/a.py:3` and add `src/new.py`; see https://x.org/src/b.py."),
                             pulls=[MENTION])
-        code, report = self.plan_preflight()
+        code, report = self.plan_preflight(worktree)
         self.assertEqual((code, report["verdict"]), (0, "clear"), (report, self.forge.calls()))
         self.assertNotIn("merged_refs", report)
         self.assertEqual(report["route_detail"], "")
@@ -319,9 +321,9 @@ class ForgeCommandTest(unittest.TestCase):
         for body, world, detail in rows:
             with self.subTest(body=body, world=world):
                 self.setUp()
-                self.routing_world(**world)
+                _, tree = self.routing_world(**world)
                 self.register_reads(self.issue(body))
-                code, report = self.plan_preflight()
+                code, report = self.plan_preflight(tree)
                 self.assertEqual((code, report["verdict"]), (0, "clear"), report)
                 self.assertIsNone(report["routed"])
                 want = detail(report)
@@ -330,6 +332,30 @@ class ForgeCommandTest(unittest.TestCase):
                                     report["route_detail"])
                 else:
                     self.assertEqual(report["route_detail"], want)
+
+    def test_plan_preflight_keeps_the_branch_and_worktree_setup_adopted_when_the_derivation_changed(self):
+        # The title now derives issue-7-add-a-greeting; setup adopted another branch of the issue.
+        standards, derived_tree = self.routing_world()
+        adopted_tree = derived_tree.parent / "worktree-issue-7-earlier-title"
+        hint = adopted_tree / ".agents/knowledge/hints/planning.md"
+        hint.parent.mkdir(parents=True)
+        hint.write_text("hint\n", encoding="utf-8")
+        own = {"number": 11, "state": "OPEN", "headRefName": "issue-7-earlier-title",
+               "closingIssuesReferences": []}
+        self.register_reads(self.issue("Fix `src/a.py`."), pulls=[own])
+        code, report = self.plan_preflight(adopted_tree, branch="issue-7-earlier-title")
+        self.assertEqual((code, report["verdict"]), (0, "clear"), (report, self.forge.calls()))
+        self.assertEqual((report["branch"], report["worktree_path"]),
+                         ("issue-7-earlier-title", str(adopted_tree)))
+        self.assertEqual(report["routed"]["hint"]["path"], str(hint))
+
+    def test_plan_preflight_requires_the_adopted_branch_and_worktree(self):
+        self.routing_world()
+        for flags in ([], ["--branch", "issue-7-x"], ["--worktree-path", "/w"]):
+            with self.subTest(flags=flags):
+                code, report = run_setup(self.env, "plan-preflight", "--repo-root", str(self.root),
+                                         "--issue", "7", *flags)
+                self.assertEqual((code, report["error"]), (2, "usage"), report)
 
     def test_preflight_reports_the_merged_references_and_routes_nothing(self):
         self.routing_world()

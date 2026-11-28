@@ -43,7 +43,7 @@
   },
   "steps": [
     {"id": "start", "stage": "setup", "kind": "call", "procedure": "setup", "holds": "run",
-     "returns": ["applies.details", "preflight.merged_refs"],
+     "returns": ["applies.details", "preflight.merged_refs", "preflight.branch", "preflight.worktree_path"],
      "on": {"done": "issue", "setup": "setup", "review-blocked": "review-blocked", "claimed": "claimed",
             "claim": "claim", "claim-lost": "claim-lost", "dirty": "dirty",
             "look-not-on-engine": "look-not-on-engine"}},
@@ -54,7 +54,7 @@
      "in": ["issue.body", "issue.marked", "issue.lane_paths"],
      "on": {"direct": "direct-lane", "standard": "plan-preflight"}},
     {"id": "plan-preflight", "stage": "planning", "kind": "command", "command": "issue-setup", "subcommand": "plan-preflight", "holds": "run",
-     "in": ["run.repo_root", "run.issue"],
+     "in": ["run.repo_root", "run.issue", "start.branch", "start.worktree_path"],
      "on": {"clear": "plan", "closed": "setup", "parked": "setup", "duplicate": "setup", "open-pr": "setup", "error": "setup", "refused": "setup"}},
     {"id": "plan", "stage": "planning", "kind": "agent", "role": "planner", "prompt": "plan.md", "reply": "plan.reply.json", "outcome_from": "status", "holds": "run", "mutates": true,
      "in": ["run.issue", "run.repo", "plan-preflight.issue_text", "plan-preflight.worktree_path", "plan-preflight.branch", "plan-preflight.integration_branch",

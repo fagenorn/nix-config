@@ -43,9 +43,10 @@ def step(doc: dict, step_id: str) -> dict:
 
 
 class PlanFactsTest(unittest.TestCase):
-    def refused(self, **members) -> tuple[StubbedRun, dict]:
+    def refused(self, platform: bool = True, **members) -> tuple[StubbedRun, dict]:
         run = StubbedRun(self, fixtures=FIXTURES, body=BODY, **members)
-        install_platform(run)
+        if platform:
+            install_platform(run)
         done = run.deliver()
         self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
         line = run.line(done)
@@ -74,10 +75,19 @@ class PlanFactsTest(unittest.TestCase):
             self.assertIn('"change":{"diff":null,"paths":["fixture/greet.py","secrets/x.yaml"]}', prompt, key)
             self.assertIn(python_shard, prompt, key)
 
+    def test_the_plan_and_revise_prompts_carry_null_and_the_reason_when_routing_is_unavailable(self):
+        run, _ = self.refused(platform=False, replies=REFUSED_REPLIES)
+
+        for key, prompt in self.first_prompts(run).items():
+            self.assertRegex(prompt, r"null router: no the-bar\.md in \S+", key)
+
     def test_the_plan_steps_read_the_setup_snapshot_route_only_while_planning_and_carry_no_spend_ceiling(self):
         deliver = procedure("deliver")
 
-        self.assertEqual(step(deliver, "start")["returns"], ["applies.details", "preflight.merged_refs"])
+        self.assertEqual(step(deliver, "start")["returns"],
+                         ["applies.details", "preflight.merged_refs", "preflight.branch", "preflight.worktree_path"])
+        self.assertEqual(step(deliver, "plan-preflight")["in"],
+                         ["run.repo_root", "run.issue", "start.branch", "start.worktree_path"])
         for key in PLAN_STEPS:
             planned = step(deliver, key)
             self.assertEqual(planned["in"][-4:], APPENDED, key)

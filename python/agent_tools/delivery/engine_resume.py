@@ -20,7 +20,7 @@ continued as a run of its own (with its own procedure copy) and walked again und
 ended keeps its end. A walked-again child owes the first-visit checks of a rewound call as its first walk did.
 A call visit whose result file a killed engine published before it appended `result_stored` records that file
 as its result and runs no child. A call's result also carries the members its `returns` names, read from its done
-child run (`returned`).
+child run's final replay state (`returned`), so a rewound child never yields a discarded visit's value.
 """
 
 from __future__ import annotations
@@ -152,21 +152,20 @@ def published_ends(run_dir: Path, ledger: list[dict], step: str, visit: int) -> 
     return items
 
 
-def returned(step: Mapping, ends: Sequence[Mapping]) -> dict:
+def returned(step: Mapping, ends: Sequence[Mapping], visits: Mapping[str, int]) -> dict:
     """The members a call's `returns` names, read from its done child run; `{}` for no `returns` or a stop.
 
-    Each `X.m` is member m of the result file the latest `result_stored` of step X in the child's ledger names.
-    A missing event, file or member is a ledger fault: the parent's result never silently lacks a member."""
+    `visits` is the child's final replay state (`engine_core.result_visits`): each `X.m` is member m of the visit
+    it holds for X, which a rewind may leave earlier than the last one stored. A missing visit, file or member
+    is a ledger fault, never a silent gap."""
     if not step.get("returns") or engine_core.call_outcome([e["end"] for e in ends]) != DONE:
         return {}
     child = engine_ledger.runs_root() / ends[0]["run"]
-    stored = {e["step"]: e["result"] for e in engine_ledger.replay(child / "events.jsonl")
-              if e["event"] == "result_stored"}
     members: dict = {}
     for path in step["returns"]:
         name, member = path.split(".", 1)
         try:
-            document = json.loads((child / stored[name]).read_text(encoding="utf-8"))
+            document = json.loads((child / f"results/{name}.{visits[name]}.json").read_text(encoding="utf-8"))
             members[member] = document[member]
         except (KeyError, OSError, ValueError, TypeError) as error:
             raise engine_ledger.LedgerError(f"the child run {ends[0]['run']} stores no {path}: {error!r}") from error

@@ -10,17 +10,20 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery import (
-    engine_commands, engine_ledger, engine_session, engine_shell, engine_stop,
+    engine_commands, engine_ledger, engine_resume, engine_session, engine_shell, engine_stop,
 )
 from tests.test_engine_deliver import EngineProject, step
 from tests.test_engine_session import (
@@ -579,6 +582,55 @@ class CallTest(unittest.TestCase):
         self.assertFalse([e for e in events if e["event"] == "call"])
         self.assertFalse([e for e in events
                           if e["event"] == "step_entered" and e["step"] == "fan"])
+
+
+class ReturnedAfterRewindTest(unittest.TestCase):
+    """A call publishes what its child's final replay state holds, not the child ledger's last stored visit."""
+
+    AT = "2026-11-21T00:00:00Z"
+    CHILD = {"format": 1, "inputs": ["issue"],
+             "stops": {"child-stop": {"need": "retry", "reenter": "gate"}},
+             "steps": [
+                 {"id": "produce", "stage": "building", "kind": "command", "holds": "run", "command": "c",
+                  "max_visits": 2, "on": {"ok": "gate", "failed": "child-stop", "refused": "child-stop"}},
+                 {"id": "gate", "stage": "building", "kind": "command", "holds": "run", "command": "c",
+                  "max_visits": 2, "on": {"ok": "done", "retry": "produce", "failed": "child-stop",
+                                          "refused": "child-stop", "exhausted": "child-stop"}}]}
+
+    def visit(self, run: Path, step_id: str, number: int, outcome: str, result: dict) -> None:
+        engine_ledger.append_event(run, {"event": "step_entered", "at": self.AT, "step": step_id,
+                                         "visit": number, "stage": "building"})
+        engine_ledger.store_result(run, step=step_id, visit=number, result=result, at=self.AT, wall_seconds=0,
+                                   turns=0, tokens=dict(engine_shell.NO_TOKENS), spend_usd=0, outcome=outcome)
+        engine_ledger.append_event(run, {"event": "outcome_graded", "at": self.AT, "step": step_id,
+                                         "visit": number, "outcome": outcome})
+
+    def test_a_child_rewound_past_a_later_visit_returns_the_visit_it_holds(self):
+        scratch = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        procedures = scratch / "procedures"
+        procedures.mkdir()
+        (procedures / "child.json").write_text(json.dumps(self.CHILD), encoding="utf-8")
+        root = scratch / "runs"
+        run = engine_ledger.create_run(
+            project="example/engine", issue=1974, procedure="child", procedures_dir=procedures,
+            platform_revision="source", host="test", inputs={"issue": 1974},
+            now=datetime(2026, 11, 21, tzinfo=timezone.utc), token="aaaa", root=root)
+        self.visit(run, "produce", 1, "ok", {"argv": ["first"]})
+        self.visit(run, "gate", 1, "retry", {})
+        self.visit(run, "produce", 2, "ok", {"argv": ["second"]})
+        self.visit(run, "gate", 2, "failed", {})
+        engine_ledger.append_event(run, {"event": "run_continued", "at": self.AT, "step": "gate", "visit": 1})
+        self.visit(run, "gate", 3, "ok", {})
+        step = {"id": "once", "returns": ["produce.argv"]}
+        ends = [{"end": "done", "item": None, "run": run.name}]
+
+        with mock.patch.object(engine_ledger, "runs_root", return_value=root):
+            visits = engine_shell.child_result_visits(run.name)
+            returned = engine_resume.returned(step, ends, visits)
+
+        self.assertEqual(visits, {"produce": 1, "gate": 3})
+        self.assertEqual(returned, {"argv": ["first"]})
 
 
 class PassThroughTest(unittest.TestCase):
