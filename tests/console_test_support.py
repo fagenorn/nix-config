@@ -231,7 +231,7 @@ def hook_body(name, **overrides):
 
 
 class Launches:
-    """A `launcher` stand-in: records each launch; `fail` is consumed per call (a str is a failure, an exception is raised as is).
+    """A `launcher` stand-in: records each launch; `fail` is consumed per call (a str fails, an exception is raised).
 
     `ids` is consumed per successful call and is what the launch printed (None once it runs out).
     """

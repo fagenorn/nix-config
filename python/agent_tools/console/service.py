@@ -7650,7 +7650,7 @@ class ConsoleService(ActionPermit):
 
     def _manager_sessions(self, sprint: sprints.SprintState,
                           ended: bool = False) -> Iterable[sessions.SessionState]:
-        """The folded sessions of the sprint's project that carry its manager's name and have not ended (or, with `ended`, any)."""
+        """The folded sessions of the sprint's project named for its manager, unended (with `ended`, any)."""
         name = manager.session_name(sprint.project_id, sprint.sprint_id)
         return (s for s in self._sessions.values()
                 if s.name == name and (ended or s.state != sessions.ENDED) and s.repo is not None
