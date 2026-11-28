@@ -561,10 +561,28 @@ def outline_preflight(args: argparse.Namespace) -> dict:
             "slices": [s["n"] for s in record["outline"]["slices"]]}
 
 
+def _slice_acceptance(record: Mapping, item: int, result: Mapping) -> tuple[list, list]:
+    """(entries, absent ids) of the criteria the approved outline assigns to slice `item`, from that slice's build."""
+    entries = result.get("acceptance")
+    entries = entries if isinstance(entries, list) else []
+    found, absent = [], []
+    for criterion in record["outline"]["criteria"]:
+        if criterion["slice"] != item:
+            continue
+        match = [e for e in entries if isinstance(e, Mapping) and str(e.get("id")).upper() == criterion["id"].upper()]
+        if match:
+            found.append(match[0])
+        else:
+            absent.append(criterion["id"])
+    return found, absent
+
+
 def outline_slice(args: argparse.Namespace) -> dict:
     run = outline_record.root_run(args.holder, args.issue)
     record = outline_record.approved(run)
-    if args.item in outline_record.built(run, record["digest"]):
+    # a built slice whose reply left out an assigned criterion is built again: keeping it would fail every build
+    built = outline_record.built(run, record["digest"]).get(args.item)
+    if built is not None and not _slice_acceptance(record, args.item, built)[1]:
         return {"verdict": "built"}
     chosen = _approved_slice(record, args.item)
     path, integration = record["worktree_path"], record["integration_branch"]
@@ -589,15 +607,10 @@ def outline_built(args: argparse.Namespace) -> dict:
     if not numbers or missing:
         raise Failure("slice_unbuilt", f"no built slice {missing or 'in an outline with no slice'}")
     results = [done[n] for n in numbers]
-    acceptance, absent = [], []
-    for criterion in record["outline"]["criteria"]:
-        entries = done[criterion["slice"]].get("acceptance")
-        found = [e for e in entries if isinstance(e, Mapping) and str(e.get("id")).upper() == criterion["id"].upper()
-                 ] if isinstance(entries, list) else []
-        if found:
-            acceptance.append(found[0])
-        else:
-            absent.append(criterion["id"])
+    by_slice = {n: _slice_acceptance(record, n, done[n]) for n in numbers}
+    absent = [i for n in numbers for i in by_slice[n][1]]
+    entries = {str(e["id"]).upper(): e for n in numbers for e in by_slice[n][0]}
+    acceptance = [entries[c["id"].upper()] for c in record["outline"]["criteria"] if not absent]
     if absent:
         raise Failure("acceptance_missing", f"the build of the slice assigned to {absent} returned no acceptance for it")
     return {"verdict": "built", "status": "done", "start_head": results[0]["start_head"],

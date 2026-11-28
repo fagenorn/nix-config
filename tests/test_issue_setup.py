@@ -935,12 +935,21 @@ class OutlineCommandsTest(unittest.TestCase):
     def test_outline_slice_of_a_slice_already_built_is_built_and_an_unknown_one_is_refused(self):
         self.store_note()
         self.built_parents = []
-        self.build_slice(1, {"status": "done", "commit": "b"})
+        self.build_slice(1, {"status": "done", "commit": "b", "acceptance": [{"id": "AC1"}]})
 
         self.assertEqual(self.command("outline-slice", *self.holder_issue(), "--item", "1"),
                          (0, {"verdict": "built"}))
         code, report = self.command("outline-slice", *self.holder_issue(), "--item", "3")
         self.assertEqual((code, report["error"]), (1, "slice_unknown"), report)
+
+    def test_outline_slice_of_a_built_slice_without_acceptance_for_its_criterion_is_built_again(self):
+        self.store_note()
+        self.built_parents = []
+        self.build_slice(1, {"status": "done", "commit": "b", "acceptance": []})
+
+        code, report = self.command("outline-slice", *self.holder_issue(), "--item", "1")
+
+        self.assertEqual((code, report["verdict"], report["slice"]), (0, "read", OUTLINE_SLICES[0]), report)
 
     def test_outline_slice_of_a_slice_built_under_an_earlier_approved_outline_is_built_again(self):
         self.store_note()
@@ -950,7 +959,7 @@ class OutlineCommandsTest(unittest.TestCase):
         code, report = self.command("outline-slice", *self.holder_issue(), "--item", "1")
 
         self.assertEqual((code, report["verdict"], report["slice"]), (0, "read", OUTLINE_SLICES[0]), report)
-        self.build_slice(1, {"status": "done", "commit": "b"})
+        self.build_slice(1, {"status": "done", "commit": "b", "acceptance": [{"id": "AC1"}]})
         self.assertEqual(self.command("outline-slice", *self.holder_issue(), "--item", "1"),
                          (0, {"verdict": "built"}))
 

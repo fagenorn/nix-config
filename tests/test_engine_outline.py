@@ -236,6 +236,15 @@ class OutlineBuildTest(OutlineScenario):
         self.assertEqual(len(self.launched(run, "build")), 2)
         self.assertEqual(len(self.committed(run, "fixture/one.txt")), 1)
 
+    def test_a_slice_reply_without_its_criterion_is_built_again_when_continued_not_kept_as_built(self):
+        bare = {"reply": dict(IMPLEMENTED["reply"], acceptance=[]), "commit": IMPLEMENTED["commit"]}
+        run = self.outlined({"build#1": bare, "build#2": building("fixture/two.txt", "TWO\n")})
+        self.finish(run, "task", "owner-decision")
+
+        self.finish(run, "done")
+
+        self.assertEqual(len(self.launched(run, "build")), 2)
+
     def test_an_issue_with_no_acceptance_criteria_builds_with_an_empty_acceptance_through_review_and_landing(self):
         body = "Add a greet() function to the fixture module, next to `secrets/x.yaml`.\n"
         free = dict(OUTLINE, criteria=[])
