@@ -7,8 +7,10 @@ import unittest
 from datetime import datetime, timezone
 
 from agent_tools.console import event_log, revive, sprints
+from agent_tools.console.deliveries import DeliveryState, IssueStage
 from agent_tools.console.event_log import (MANAGER_FAILED, MANAGER_STARTED, MANAGER_WAITING,
                                            Event)
+from agent_tools.delivery.engine_ledger import RunState
 from tests.test_console_sprints import CLOSING, PARTS, REPORT, SID
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -66,14 +68,25 @@ class Rows:
             payload["reason"] = reason
         return self.row(ms, event_log.MANAGER_WOKEN, payload)
 
-    def report(self, phase="running"):
+    def report(self, phase="running", issues=None):
         self.seq += 1
+        report = {**REPORT, "phase": phase}
+        if issues is not None:
+            report["issues"] = issues
         return Event(self.seq, iso(BASE + 1), event_log.SPRINT_REPORTED, "o/a",
-                     {"sprint_id": SID, "goal": "g", "report": {**REPORT, "phase": phase}})
+                     {"sprint_id": SID, "goal": "g", "report": report})
 
 
 def fold(rows):
     return sprints.sprint_states(rows)[SID]
+
+
+def engine_run(issue, project="p00", engine_alive=True, **members):
+    values = dict(run=f"run-{issue}", project=project, issue=issue, stage="building", step=None,
+                  wait=None, stop=None, done=False, last_event=None, process=None, alive=False,
+                  engine_alive=engine_alive)
+    values.update(members)
+    return RunState(**values)
 
 
 def with_rows(build, session=True, phase="running"):
@@ -240,6 +253,54 @@ class NextStepTest(unittest.TestCase):
         self.assertEqual(revive.stall_reason(state), revive.GONE_AGAIN_TEXT)
         self.assertEqual(revive.GONE_AGAIN_TEXT,
                          "the manager stopped again after it was brought back")
+
+
+class UnheldTest(unittest.TestCase):
+    def test_a_takeover_names_each_in_work_delivery_no_live_session_holds(self):
+        rows = Rows()
+        stages = [(12, "building"), (13, "landed"), (14, "planning"), (15, "queued"),
+                  (16, "verifying"), (17, "held"), (18, "working"), (19, "building"),
+                  (20, "final review"), (21, "building"), (22, "building"), (23, "building")]
+        state = fold([rows.goal(), *rows.brief(), rows.started(BASE),
+                      rows.report(issues=[{"issue": n, "stage": s} for n, s in stages])])
+        runs = [DeliveryState("s-gone", "r-1", 1, (IssueStage(12, "building"),), project="p00"),
+                DeliveryState("s-live", "r-2", 1, (IssueStage(14, "planning"),), project="p00"),
+                DeliveryState("s-live", "r-3", 1, (IssueStage(16, "verifying"),), project="p01"),
+                DeliveryState("s-live", "r-4", 1, (IssueStage(18, "building"),), project=None)]
+        live = {"s-live"}
+        engine = [engine_run(19), engine_run(20, project="p01"),
+                  engine_run(21, engine_alive=False), engine_run(22, done=True),
+                  engine_run(23, wait={"wait": "usage-limit", "until": None})]
+        found = revive.unheld(state, runs, live, engine)
+        block = revive.unheld_block(state, found)
+        self.assertEqual(found, (12, 16, 18, 20, 21, 22))
+        self.assertEqual(block, revive.UNHELD_HEAD + "\n- issue 12 at stage building"
+                         "\n- issue 16 at stage verifying\n- issue 18 at stage working"
+                         "\n- issue 20 at stage final review\n- issue 21 at stage building"
+                         "\n- issue 22 at stage building\n" + revive.UNHELD_TAIL)
+        self.assertNotIn("The goal: ", block)
+        self.assertEqual(revive.unheld(state, runs, live), (12, 16, 18, 19, 20, 21, 22, 23))
+
+    def test_a_sprint_with_no_report_or_no_unheld_issue_carries_no_block(self):
+        rows = Rows()
+        no_report = fold([rows.goal(), *rows.brief(), rows.started(BASE)])
+        held = fold([rows.goal(), *rows.brief(), rows.started(BASE), rows.report()])
+        runs = [DeliveryState("s-live", "r-1", 1, (IssueStage(12, "building"),), project="p00")]
+        live = {"s-live"}
+        self.assertEqual(revive.unheld(no_report, runs, live), ())
+        self.assertEqual(revive.unheld(held, runs, live), ())
+        self.assertEqual(revive.unheld_block(held, ()), "")
+        self.assertEqual(revive.unheld_block(held, (99,)), "")
+
+    def test_the_block_constants_are_the_prompt_texts(self):
+        self.assertEqual(revive.UNHELD_HEAD, "No running session holds these deliveries any more, "
+                         "though your sprint lists them as in work:")
+        self.assertEqual(revive.UNHELD_LINE, "- issue {issue} at stage {stage}")
+        self.assertEqual(revive.UNHELD_TAIL,
+                         "Before anything else, name each of them in your next report: say in its "
+                         "status line, in plain words and without their numbers, that they stopped, "
+                         "and in its next step how you resume each one.")
+        self.assertNotRegex(revive.UNHELD_TAIL, r"#\d")
 
 
 class RetryTest(unittest.TestCase):
