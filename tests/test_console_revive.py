@@ -7,7 +7,8 @@ import unittest
 from datetime import datetime, timezone
 
 from agent_tools.console import event_log, revive, sprints
-from agent_tools.console.deliveries import DeliveryState, IssueStage
+from agent_tools.console import deliveries
+from agent_tools.console.deliveries import DELIVERY_SEEN, DeliveryState, IssueStage
 from agent_tools.console.event_log import (MANAGER_FAILED, MANAGER_STARTED, MANAGER_WAITING,
                                            Event)
 from agent_tools.delivery.engine_ledger import RunState
@@ -272,14 +273,43 @@ class UnheldTest(unittest.TestCase):
                   engine_run(21, engine_alive=False), engine_run(22, done=True),
                   engine_run(23, wait={"wait": "usage-limit", "until": None})]
         found = revive.unheld(state, runs, live, engine)
-        block = revive.unheld_block(state, found)
-        self.assertEqual(found, (12, 16, 18, 20, 21, 22))
+        block = revive.unheld_block(found)
+        self.assertEqual(found, ((12, "building"), (16, "verifying"), (18, "working"),
+                                 (20, "final review"), (21, "building"), (22, "building")))
         self.assertEqual(block, revive.UNHELD_HEAD + "\n- issue 12 at stage building"
                          "\n- issue 16 at stage verifying\n- issue 18 at stage working"
                          "\n- issue 20 at stage final review\n- issue 21 at stage building"
                          "\n- issue 22 at stage building\n" + revive.UNHELD_TAIL)
         self.assertNotIn("The goal: ", block)
-        self.assertEqual(revive.unheld(state, runs, live), (12, 16, 18, 19, 20, 21, 22, 23))
+        self.assertEqual([issue for issue, _ in revive.unheld(state, runs, live)],
+                         [12, 16, 18, 19, 20, 21, 22, 23])
+
+    def test_a_takeover_judges_each_issue_by_the_stage_the_console_shows(self):
+        rows = Rows()
+        stages = [(12, "queued"), (13, "queued"), (14, "building"), (15, "queued"),
+                  (16, "building")]
+        report = rows.report(issues=[{"issue": n, "stage": s} for n, s in stages])
+        base = [rows.goal(), *rows.brief(), rows.started(BASE), report]
+
+        def observed(run, issue, stage, session="s-gone"):
+            state = DeliveryState(session, run, BASE + 60_000, (IssueStage(issue, stage),),
+                                  project="p00")
+            rows.seq += 1
+            return Event(rows.seq, iso(BASE + 60_000), DELIVERY_SEEN, "p00",
+                         deliveries.seen_payload(state))
+
+        state = fold([*base, observed("r-12", 12, "building"), observed("r-14", 14, "queued"),
+                      observed("r-15", 15, "verifying", "s-live"),
+                      observed("r-16", 16, "final review")])
+        runs = [DeliveryState("s-live", "r-15", 1, (IssueStage(15, "verifying"),), project="p00")]
+        found = revive.unheld(state, runs, {"s-live"},
+                              [engine_run(13, stage="verifying")])
+        self.assertEqual(found, ((12, "building"), (16, "final review")))
+        self.assertEqual(revive.unheld_block(found), revive.UNHELD_HEAD
+                         + "\n- issue 12 at stage building\n- issue 16 at stage final review\n"
+                         + revive.UNHELD_TAIL)
+        self.assertEqual(revive.unheld(fold(base), runs, {"s-live"}), ((14, "building"),
+                                                                      (16, "building")))
 
     def test_a_sprint_with_no_report_or_no_unheld_issue_carries_no_block(self):
         rows = Rows()
@@ -289,8 +319,7 @@ class UnheldTest(unittest.TestCase):
         live = {"s-live"}
         self.assertEqual(revive.unheld(no_report, runs, live), ())
         self.assertEqual(revive.unheld(held, runs, live), ())
-        self.assertEqual(revive.unheld_block(held, ()), "")
-        self.assertEqual(revive.unheld_block(held, (99,)), "")
+        self.assertEqual(revive.unheld_block(()), "")
 
     def test_the_block_constants_are_the_prompt_texts(self):
         self.assertEqual(revive.UNHELD_HEAD, "No running session holds these deliveries any more, "

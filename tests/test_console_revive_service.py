@@ -494,7 +494,8 @@ class ReviveServiceTest(ReviveCase):
                          ["claude-account", "run", "--bg"])
 
     def test_a_resume_the_client_refuses_is_followed_by_one_fresh_start_in_the_same_job(self):
-        self.launches = support.Launches(fail=[None, "No conversation found"])
+        refused = manager.ResumeRefused("No conversation found with session ID: s-1")
+        self.launches = support.Launches(fail=[None, refused])
         svc = self.begin()
         self.on_track(svc)
         self.transcript("s-1")
@@ -506,6 +507,70 @@ class ReviveServiceTest(ReviveCase):
         self.assertTrue(self.rows("manager.started")[-1]["takeover"])
         self.tick(svc, 361)
         self.assertEqual(len(self.launches.calls), 3)
+
+    def test_a_resume_that_may_have_started_a_session_is_recorded_not_retried_fresh(self):
+        for reason in ("the launch did not return within 60 s", "the launch exited 1"):
+            with self.subTest(reason=reason):
+                self.setUp()
+                self.launches = support.Launches(fail=[None, reason])
+                svc = self.begin()
+                self.on_track(svc)
+                self.transcript("s-1")
+                self.take_over_after_two_failed_wakes(svc)
+                self.assertEqual([c.resume for c in self.launches.calls], [None, "s-1"])
+                self.assertEqual([r["reason"] for r in self.rows("manager.failed")], [reason])
+                self.assertEqual(len(self.rows("manager.started")), 1)
+
+    def test_a_resume_is_bare_when_the_account_still_records_the_session_else_named(self):
+        for shown, bare in ((("s-1",), True), ((), False)):
+            with self.subTest(shown=shown):
+                self.setUp()
+                asked = []
+                svc = self.begin(full_listing=lambda profile, cwd: asked.append((profile, cwd))
+                                 or set(shown))
+                self.on_track(svc)
+                self.transcript("s-1")
+                self.take_over_after_two_failed_wakes(svc)
+                takeover = self.launches.calls[-1]
+                self.assertEqual(takeover.resume, "s-1")
+                self.assertIs(takeover.recorded, bare)
+                self.assertEqual(asked[-1], ("work", "/srv/p01"))
+                command = manager.launch_command(takeover, "darwin")
+                named = ["--name", takeover.session_name, "--settings", str(takeover.settings)]
+                self.assertEqual(command, ["claude-account", "run", "--resume", "s-1", "--bg",
+                                           *([] if bare else named), takeover.prompt])
+
+    def test_a_takeover_resumes_the_session_its_launch_id_names_not_a_later_namesake(self):
+        launched = "bbbbbbbb-2222-4222-8222-222222222222"
+        namesake = "cccccccc-3333-4333-8333-333333333333"
+        self.launches = support.Launches(ids=["bbbbbbbb"])
+        svc = self.begin()
+        sid = self.on_track(svc, seen=False)
+        for session in (launched, namesake):
+            self.append(svc, [("session.seen", "owner/p01", {
+                "session_id": session, "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+                "name": self.name(sid)})])
+        for session in (launched, namesake):
+            self.append(svc, [("session.gone", None, {"session_id": session})])
+            self.transcript(session)
+        self.outcomes[:] = ["No conversation found", "No conversation found"]
+        for seconds in (120, 240, 360):
+            self.tick(svc, seconds)
+        self.assertEqual(len(self.launches.calls), 2)
+        self.assertEqual(self.launches.calls[-1].resume, launched)
+
+    def test_a_delivery_the_ordinary_listing_missed_is_not_declared_stopped(self):
+        svc = self.begin()
+        self.on_track(svc, seen=False)
+        state = deliveries.DeliveryState(
+            "s-9", "r-1", 1, (deliveries.IssueStage(12, "building"),))
+        self.append(svc, [(DELIVERY_SEEN, "owner/p01", deliveries.seen_payload(state))])
+        self.listed["s-9"] = sessions.Observation(
+            "s-9", "/srv/p01", 1, "busy", None, "a delivery", None)
+        svc._listing = lambda: {}
+        self.tick(svc, 120)
+        self.assertEqual(len(self.launches.calls), 2)
+        self.assertEqual(self.launches.calls[-1].prompt, manager.TAKEOVER_LEAD + GOAL)
 
     def test_a_takeover_names_the_in_work_delivery_whose_session_is_gone(self):
         for held in ("none", "session", "engine"):

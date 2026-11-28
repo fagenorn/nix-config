@@ -39,18 +39,18 @@ that are `ok` and `back`. A wake has failed when `not (ok and back)`.
 `GONE_AGAIN_TEXT`.
 
 `unheld(state, runs, live, engine=())` is what the service calls when it prepares a takeover launch.
-It returns, ascending, each issue of `state.report.issues` whose stage is not `queued`, `landed` or
-`held` (the view's "in work" group) and that no holder holds; with no report it returns `()`. A
-holder is a session run in `runs` that lists the issue while its `project` is the sprint's
+It returns, ascending, an `(issue, stage)` for each issue of `state.report.issues` whose effective
+stage (`view.effective_stages` with the sprint's engine runs: the stage the console shows, so a run
+seen after the report or a moving engine run counts) is not `queued`, `landed`, `held`, `dropped` or
+`closed out` and that no holder holds; `stage` is that effective stage. With no report it returns
+`()`. A holder is a session run in `runs` that lists the issue while its `project` is the sprint's
 `project_id` and its `session_id` is in `live`, or an engine run in `engine` for the issue with the
 sprint's project whose `engine_runs.reading` is `moving` or `waiting` (a live engine process that is
 neither done nor stopped).
 
-`unheld_block(state, issues)` is the text a takeover prompt carries about those issues: `""` for none;
-else `UNHELD_HEAD`, one `UNHELD_LINE` per issue in the given order with the stage the last report
-lists for it (an issue the report does not list is left out, and `""` when none is left), then
-`UNHELD_TAIL`, joined by newlines. No line holds `The goal: `, which the prompt's goal parsing
-looks for.
+`unheld_block(found)` is the text a takeover prompt carries about those `(issue, stage)` pairs: `""`
+for none; else `UNHELD_HEAD`, one `UNHELD_LINE` per pair in the given order, then `UNHELD_TAIL`,
+joined by newlines. No line holds `The goal: `, which the prompt's goal parsing looks for.
 """
 
 from collections.abc import Collection, Iterable, Sequence
@@ -121,25 +121,26 @@ def next_step(state: SprintState, waiting: int, last_listed_ms: int, now_ms: int
 
 
 def unheld(state: SprintState, runs: Iterable[deliveries.DeliveryState], live: Collection[str],
-           engine: Iterable[RunState] = ()) -> tuple[int, ...]:
+           engine: Iterable[RunState] = ()) -> tuple[tuple[int, str], ...]:
     if state.report is None:
         return ()
+    engine = tuple(engine)
     held = {stage.issue for run in runs
             if run.project == state.project_id and run.session_id in live
             for stage in run.issues}
     held |= {run.issue for run in engine if run.project == state.project_id
              and engine_runs.reading(run) in ("moving", "waiting")}
-    idle = (deliveries.QUEUED, sprints.LANDED, sprints.HELD)
-    return tuple(sorted(issue for issue, stage in state.report.issues
-                        if stage not in idle and issue not in held))
+    shown = engine_runs.sprint_engine(engine, state.project_id,
+                                      {issue for issue, _ in state.report.issues}, None)
+    idle = (deliveries.QUEUED, sprints.LANDED, sprints.HELD, sprints.DROPPED, sprints.CLOSED_OUT)
+    return tuple((issue, stage) for issue, stage, _ in view.effective_stages(state, shown)
+                 if stage not in idle and issue not in held)
 
 
-def unheld_block(state: SprintState, issues: Sequence[int]) -> str:
-    stages = dict(state.report.issues) if state.report is not None else {}
-    lines = [UNHELD_LINE.format(issue=issue, stage=stages[issue]) for issue in issues
-             if issue in stages]
-    if not lines:
+def unheld_block(found: Sequence[tuple[int, str]]) -> str:
+    if not found:
         return ""
+    lines = [UNHELD_LINE.format(issue=issue, stage=stage) for issue, stage in found]
     return "\n".join([UNHELD_HEAD, *lines, UNHELD_TAIL])
 
 

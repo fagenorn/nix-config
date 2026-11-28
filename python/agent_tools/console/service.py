@@ -97,8 +97,7 @@ owner's port. The stale-file probe, the bind and the listen run under an exclusi
 listening and unlinks its file; `close` takes the same lock around its inode check and unlink, so a
 console stopping never unlinks the socket of one starting at the same path. A folder that holds an
 ACL allow entry (`guest_acl_reader`, default `guest.acl_reader_for(sys.platform)`; macOS only) is a
-`GuestSocketError` (`EPERM`). `close` and a
-failed construction remove the socket file this console bound (the same device and inode) and nothing else.
+`GuestSocketError` (`EPERM`). `close` and a failed construction remove the socket file this console bound (the same device and inode) and nothing else.
 Every guest connection is judged in `verify_request` before a byte is read: `guest.door_refusal` on
 the `os.lstat` of the folder and the socket (any bit beyond 0700 or 0600, or not the owner's, refuses),
 the socket path still naming the file this console bound (same device and inode, else the listener
@@ -116,8 +115,7 @@ and picture ids derived under them): the handler reads `ConsoleService.guest_sna
 and the recorded reading, the decision, the state read and the picture check all use that snapshot; the
 service replaces the snapshot as one assignment.
 `GET /api/whoami` is answered to any request before admission, except `403` `guest.NAME_UNREAD_TEXT` while
-sharing is on and no name is read: it reports the `Host` and the
-`X-Forwarded-Host` it saw, how many of each and of the login headers arrived, whether `X-Forwarded-For` did, and whether the login named
+sharing is on and no name is read: it reports the `Host` and the `X-Forwarded-Host` it saw, how many of each and of the login headers arrived, whether `X-Forwarded-For` did, and whether the login named
 by `X-Console-Probe` arrived as a login header, and never repeats a login. After admission an
 owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
 `/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
@@ -125,9 +123,7 @@ its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`)
 scoped view (`guest.scoped`, `guest.scrub`; it carries the pool and each running sprint's account label,
 `guest.pool_view`, `guest.sprint_labels`, each reading `yours` for an account the colleague added
 himself and `Account <n>` for every other, and `own_signin`, the state of his own profile's latest
-sign-in run, #1343): `GET /` is the guest page (`GUEST_PAGE`: the page with its
-door meta set to `guest`, so it draws the
-desk page with the guest's own controls only) carrying the guest token, `GET
+sign-in run, #1343): `GET /` is the guest page (`GUEST_PAGE`: the page with its door meta set to `guest`, so it draws the desk page with the guest's own controls only) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
 stream of it, which re-admits on every publish and ends when the colleague or the sharing is gone or the
 read tailnet name moved or went, even when the change came and went while a frame was being written
@@ -249,18 +245,12 @@ re-admits on every publish, so a removed colleague's open stream and a switched-
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
 `capacity.reading` and `capacity.stop` (see `capacity.py`). The hook route's checks run in this
-order, each refusal closing the connection: a loopback
-`Host` (else 403 as above); no `Origin` header (a browser page sends one: 403
-`text/plain` `origin refused`); a `Content-Type` whose media type is
-`application/json` (else 415 `json only`); a `Content-Length` that is a
-non-negative integer (else 411 `length required`) of at most `MAX_HOOK_BYTES`
-(else 413 `too large`, the body unread). Then the body is read, the `204` is
-written and flushed, and only then is the hook ingested (`ingest_hook`): the
-session that sent it never waits for the log. The hook's time is taken from the
-service clock before the `204`, not when the log row is written, so a session
+order, each refusal closing the connection: a loopback `Host` (else 403 as above); no `Origin` header (a browser page sends one: 403 `text/plain` `origin refused`); a `Content-Type` whose media type is
+`application/json` (else 415 `json only`); a `Content-Length` that is a non-negative integer (else 411 `length required`) of at most `MAX_HOOK_BYTES`
+(else 413 `too large`, the body unread). Then the body is read, the `204` is written and flushed, and only then is the hook ingested (`ingest_hook`): the
+session that sent it never waits for the log. The hook's time is taken from the service clock before the `204`, not when the log row is written, so a session
 that updates its registry record after the answer is newer than the hook. A body that is not UTF-8 JSON
-is one stderr line `console: hook_unreadable <message>`; any other failure is
-`console: hook_failed <Type>: <message>`; the handler never raises. An
+is one stderr line `console: hook_unreadable <message>`; any other failure is `console: hook_failed <Type>: <message>`; the handler never raises. An
 ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
@@ -1789,18 +1779,12 @@ again after the permission read, with a fresh conclusive listing. Nothing listed
 `revive()` keeps in `_move_notes` a `capacity.MoveNote` for each sprint whose move would be due but for the cancel mark and says why it is not moving:
 no other account has room (no move offered), its session is unmatched (`_unmatched`) or its move was called off (a move is offered). The sprint line shows the note and, with a move offered, `POST /api/retry-manager` moves the manager, not retries it: it clears the marks and reserves a
 `_ListedMoveReservation` with `asked` set on `_move_target`, refusing with `capacity.NO_ROOM_REFUSAL` when none is left.
-Any other outcome cancels the move as #1279 does and a failed stop or listing writes
-`console: quota_move_failed <sprint_id> <reason>`. The takeover's
-`manager.started` row carries `"moved": true` and the sprint leaves `_quota_held`, so the digest says the
-sprint moved to another account and the new manager's first send is not an after-the-reset resume. A launch
-is a takeover when it was reserved by the bring-back
+Any other outcome cancels the move as #1279 does and a failed stop or listing writes `console: quota_move_failed <sprint_id> <reason>`. The takeover's `manager.started` row carries `"moved": true` and the sprint leaves `_quota_held`, so the digest says the
+sprint moved to another account and the new manager's first send is not an after-the-reset resume. A launch is a takeover when it was reserved by the bring-back
 or is a retry of a stalled sprint or of a manager row that is a takeover; every manager row it writes
-(`manager.started`, `manager.failed` including the missing-secret one, `manager.waiting`) carries
-`"takeover": true` and `"goal"`, every `manager.started` carries `"seen_after"` (the sprint's
-`manager_seen_seq` when the launch was prepared, 0 if none) so the fold keeps a session seen while the
-launcher returned, and the launch uses `manager.new_launch(..., takeover=True)`. A takeover passes `resume=` the sprint's `manager_session` and, from a listing that a retry or a move also reads (a raise leaves none), `unheld=` the `revive.unheld_block` of the in-work issues no listed session or engine run holds; under the lock `manager.checked_resume` judges the transcript on the launch's own profile, and `manager.launch_or_fresh` follows a refused resume with one fresh launch in the same job, recording only its outcome. The
-nudger, launcher and listing are never called with the ingest lock held; the owner's text and the
-secret appear in no new row or stderr line.
+(`manager.started`, `manager.failed` including the missing-secret one, `manager.waiting`) carries `"takeover": true` and `"goal"`, every `manager.started` carries `"seen_after"` (the sprint's
+`manager_seen_seq` when the launch was prepared, 0 if none) so the fold keeps a session seen while the launcher returned, and the launch uses `manager.new_launch(..., takeover=True)`.
+A takeover passes `resume=` `manager.earlier_session` (the session the sprint's recorded launch id names, never a later session of the same name) and, from the conclusive listing that a retry or a move also reads (a raise leaves none), `unheld=` the `revive.unheld_block` of the in-work issues (effective stage) no listed session or engine run holds. Under the lock `manager.checked_resume` judges the transcript on the launch's own profile; off it a resume sets `Launch.recorded` when the profile's full listing (`_wake_settings`) shows the session's record, and `manager.launch_or_fresh` follows a refused resume (`manager.ResumeRefused` only) with one fresh launch in the same job, recording only its outcome. The nudger, launcher and listing are never called with the ingest lock held; the owner's text and the secret appear in no new row or stderr line.
 
 Idle managers (#929, ADR-console-020): a manager listed in state `idle` or `limit` while its sprint has
 work is told to go on. `_quota_wait(sprint)`, under the ingest lock, is `manager.quota_wait` over
@@ -7664,11 +7648,12 @@ class ConsoleService(ActionPermit):
         """The folded session a listed manager is: the lowest session id carrying its name, or None."""
         return min(self._manager_sessions(sprint), key=lambda s: s.session_id, default=None)
 
-    def _manager_sessions(self, sprint: sprints.SprintState) -> Iterable[sessions.SessionState]:
-        """The folded sessions of the sprint's project that carry its manager's name and have not ended."""
+    def _manager_sessions(self, sprint: sprints.SprintState,
+                          ended: bool = False) -> Iterable[sessions.SessionState]:
+        """The folded sessions of the sprint's project that carry its manager's name and have not ended (or, with `ended`, any)."""
         name = manager.session_name(sprint.project_id, sprint.sprint_id)
         return (s for s in self._sessions.values()
-                if s.name == name and s.state != sessions.ENDED and s.repo is not None
+                if s.name == name and (ended or s.state != sessions.ENDED) and s.repo is not None
                 and project_for(s.repo, self._states) == sprint.project_id)
 
     def _manager_listed(self, sprint: sprints.SprintState) -> bool:
@@ -7782,14 +7767,18 @@ class ConsoleService(ActionPermit):
                     return
             elif isinstance(token, _TakeoverReservation):
                 try:
-                    listed = self._listing()
+                    listed = self._conclusive_listing()
                 except Exception as error:
                     print(f"console: revive_failed {type(error).__name__}: {error}",
                           file=sys.stderr)
                     return
             else:
-                with contextlib.suppress(Exception):
-                    listed = self._listing()
+                with self._ingest:
+                    sprint = self._sprints.get(sprint_id)
+                    takeover = sprint is not None and self._replaces_manager(sprint, token)
+                if takeover:
+                    with contextlib.suppress(Exception):
+                        listed = self._conclusive_listing()
             with self._ingest:
                 launch = self._prepared_launch(sprint_id, token, listed)
                 prepared_pin = self._pinned
@@ -7819,6 +7808,9 @@ class ConsoleService(ActionPermit):
             try:
                 reason = printed = None
                 try:
+                    if launch.resume is not None:
+                        launch = dataclasses.replace(launch, recorded=self._wake_settings(
+                            launch.sprint_id, launch.resume, launch.profile, launch.cwd)[0] is None)
                     launch, printed = manager.launch_or_fresh(self._launcher, launch)
                 except Exception as error:
                     reason = (str(error) if isinstance(error, manager.LaunchFailed)
@@ -7834,6 +7826,14 @@ class ConsoleService(ActionPermit):
             with self._ingest:
                 self._release(sprint_id, token)
                 self._settled[sprint_id] = int(self._clock() * 1000)
+
+    @staticmethod
+    def _replaces_manager(sprint: sprints.SprintState, token: object) -> bool:
+        """Whether the reserved launch replaces a manager that is gone (the first launch does not)."""
+        return isinstance(token, (_TakeoverReservation, _MoveReservation)) or (
+            isinstance(token, _RetryReservation)
+            and (sprint.stalled is not None
+                 or (sprint.manager is not None and sprint.manager.takeover)))
 
     def _prepared_launch(self, sprint_id: str, token: object,
                          listed: Mapping[str, sessions.Observation] | None = None
@@ -7874,10 +7874,7 @@ class ConsoleService(ActionPermit):
                 or (isinstance(token, _RetryReservation) and not self._manager_state(sprint)[2])):
             self._release(sprint_id, token)
             return None
-        takeover = isinstance(token, (_TakeoverReservation, _MoveReservation)) or (
-            isinstance(token, _RetryReservation)
-            and (sprint.stalled is not None
-                 or (sprint.manager is not None and sprint.manager.takeover)))
+        takeover = self._replaces_manager(sprint, token)
         marks = {"takeover": True, "goal": sprint.goal} if takeover else {}
         project_id = sprint.project_id
         secret = sprints.read_secret(self._sprint_secrets, sprint_id)
@@ -7910,9 +7907,11 @@ class ConsoleService(ActionPermit):
                                     owner=sprints.open_owner_notices(self._owner_notices,
                                                                      project_id)), sprint_id,
             int(self._clock() * 1000))
-        resumed = {"resume": sprint.manager_session} if takeover else {}
+        resumed = {"resume": manager.earlier_session(sprint, {
+            *(s.session_id for s in self._manager_sessions(sprint, True)),
+            *manager.transcript_ids(self._dirs(), sprint.manager_short_id)})} if takeover else {}
         if takeover and listed is not None:
-            resumed["unheld"] = revive.unheld_block(sprint, revive.unheld(
+            resumed["unheld"] = revive.unheld_block(revive.unheld(
                 sprint, self._deliveries.values(), listed, self._engine_states))
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
                                   secret, self._sprint_secrets, takeover=takeover,
