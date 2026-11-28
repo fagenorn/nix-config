@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -1877,10 +1876,9 @@ class DirectLaneRoutingTest(unittest.TestCase):
 
     def test_deliver_direct_claims_with_forge_claim(self):
         """#635: step 1 claims through forge-claim and goes on only on its holding verdicts;
-        the hot instruction bytes do not grow. The cap is 6400 since #1549: the file carries the
-        session's text and the programs' text."""
+        the hot instruction bytes do not grow."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 6400)
+        self.assertLessEqual(len(raw), 5120)
         text = normalized(raw.decode("utf-8"))
         step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
         for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id> --branch <branch>`",
@@ -1905,10 +1903,9 @@ class DirectLaneRoutingTest(unittest.TestCase):
 
     def test_deliver_direct_holds_the_land_lock_from_sync_through_merge(self):
         """#677: step 6 carries the consumed forms in ship order: waiting acquire, sync merge, push,
-        required-check wait, the holding verdict before the merge, release; the hot bytes stay within their cap.
-        The cap is 6400 since #1549: the file carries the session's text and the programs' text."""
+        required-check wait, the holding verdict before the merge, release; the hot bytes stay within their cap."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 6400)
+        self.assertLessEqual(len(raw), 5120)
         text = normalized(raw.decode("utf-8"))
         land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
         at = 0
@@ -1961,81 +1958,6 @@ class DirectLaneRoutingTest(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, step7)
         self.assertNotIn("comment what remains", text)
-
-
-class DirectLaneEngineEntryTest(unittest.TestCase):
-    """#1549: a session runs `engine deliver`; the delivery programs keep reading the old text unchanged."""
-
-    SKILL = DirectLaneRoutingTest.DELIVER_DIRECT
-    COMMANDS = (
-        "engine", "git", "gh", "forge-claim", "forge-issue",
-        "look-approval", "resolve-project", "verify-pending",
-    )
-    LIFECYCLE = re.compile(r"forge-claim|worktree|\bpush\b|\bmerge\b|gh pr (?:create|merge)")
-    PROGRAM_DIGEST = "7da6115f67b6bcf6a72e7dccf4d13524b118b3f3c79583882ffb1b0f1eaf2280"
-
-    @staticmethod
-    def session(text):
-        return text[text.index("**Session.**"):text.index("**Delivery programs.**")]
-
-    @staticmethod
-    def spans(text):
-        return re.findall(r"`([^`]+)`", text)
-
-    def test_the_session_runs_engine_deliver_and_no_lifecycle_command(self):
-        text = normalized(self.SKILL.read_text(encoding="utf-8"))
-        self.assertIn("**Session.**", text)
-        self.assertIn("**Delivery programs.**", text)
-        found = self.spans(self.session(text))
-        shell = [s for s in found if s.split()[0] in self.COMMANDS]
-        self.assertTrue(shell)
-        self.assertEqual(set(shell), {"engine deliver <n>"})
-        for span in found:
-            with self.subTest(span=span):
-                self.assertIsNone(self.LIFECYCLE.search(span))
-
-    def test_the_session_starts_in_the_background_and_reruns_on_retry(self):
-        text = normalized(self.SKILL.read_text(encoding="utf-8"))
-        found = self.spans(self.session(text))
-        shell = [s for s in found if s.split()[0] in self.COMMANDS]
-        self.assertEqual(shell.count("engine deliver <n>"), 2)
-        for token in ("run_in_background: true", "end", "need", "detail",
-                      "done", "retry", "owner-decision"):
-            with self.subTest(token=token):
-                self.assertIn(token, found)
-
-    def test_the_lane_stops_send_standard_design_and_marked_issues_elsewhere(self):
-        text = normalized(self.SKILL.read_text(encoding="utf-8"))
-        self.assertLess(text.index("**Session.**"), text.index("**Lane stops.**"))
-        lane = self.spans(text[text.index("**Lane stops.**"):text.index("**Delivery programs.**")])
-        self.assertEqual(lane.count("deliver-standard"), 2)
-        for token in ("ineligible", "look-not-on-engine", "lane: direct"):
-            with self.subTest(token=token):
-                self.assertIn(token, lane)
-
-    def test_the_session_holds_no_step_list_and_no_continuation_value(self):
-        text = normalized(self.SKILL.read_text(encoding="utf-8"))
-        self.assertIsNone(re.search(r"(?:^|\s)\d+\. \*\*", self.session(text)))
-        self.assertNotIn("cont", self.spans(self.session(text)))
-        self.assertNotIn("args.cont", self.session(text))
-
-    def test_the_programs_text_is_the_base_text_byte_for_byte(self):
-        raw = self.SKILL.read_text(encoding="utf-8")
-        start = raw.index("Run `resolve-project resolve")
-        self.assertLess(raw.index("**Delivery programs.**"), start)
-        self.assertEqual(hashlib.sha256(raw[start:].encode("utf-8")).hexdigest(), self.PROGRAM_DIGEST)
-
-    def test_the_session_text_stays_within_its_cap(self):
-        raw = self.SKILL.read_bytes().decode("utf-8")
-        session = raw[raw.index("**Session.**"):raw.index("**Delivery programs.**")]
-        self.assertLessEqual(len(session.encode("utf-8")), 1280)
-        self.assertLessEqual(len(raw.encode("utf-8")), 6400)
-
-    def test_the_eval_cases_point_at_the_programs_steps(self):
-        cases = json.loads((self.SKILL.parent / "evals/evals.json").read_text(encoding="utf-8"))["evals"]
-        for case in cases:
-            with self.subTest(case=case["id"]):
-                self.assertIn("**Delivery programs.**", self.spans(case["prompt"]))
 
 
 class LookBeforeMergeContractsTest(unittest.TestCase):
