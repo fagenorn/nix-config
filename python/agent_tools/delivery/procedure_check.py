@@ -179,6 +179,7 @@ SUBCOMMAND_LISTS: Mapping[tuple[str, str], frozenset[str]] = {
     ("verify-rounds", "round-reviewed"): frozenset({"guards", "problems", "results"}),
     ("verify-rounds", "fix-range"): frozenset({"changed_paths"}),
     ("verify-rounds", "retested"): frozenset(),
+    ("issue-setup", "outline-preflight"): frozenset({"slices"}),
 }
 
 HOLDS = ("run", "head", "live", "read")

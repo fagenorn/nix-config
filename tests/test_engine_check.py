@@ -41,7 +41,7 @@ def compact(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
 
 
-SHIPPED_OK = compact({"procedures": ["close-out", "deliver", "direct", "land", "land-attempt", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
+SHIPPED_OK = compact({"procedures": ["close-out", "deliver", "direct", "land", "land-attempt", "outline", "outline-build", "outline-slice", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
 REPEAT_SCOPE_REFUSED = compact({"breaches": [], "refusals": [{"defect": "duplicate_step", "detail": "the step id 'scope' is used more than once.", "procedure": "toy", "step": "scope"}], "verdict": "refused"})
 
 
