@@ -16,9 +16,10 @@ below, `{"read": False}` and never a partial summary; otherwise exactly
 removed), `outside` the touched paths that are not inside `root` (the normalized absolute path when it
 can be placed, else the word as written), `scripts` the interpreter code and here-documents, in text
 order. A here-document reaches its program unchanged only through `cat` without a file operand or option
-and `tee` writing only plain files, none of them standard output, with no redirection on either command; through any other feeder (`base64 -d`, `tr`, `cat x.sh`) the script's text is not known, and
-its entry is `{"program": str, "lines": None, "paths": []}`: no line count and no path is claimed. Every list is in first-seen order without
-duplicates. With no absolute `root` every path is outside.
+and `tee` writing only plain files, none of them standard output, with no redirection on either command;
+through any other feeder (`base64 -d`, `tr`, `cat x.sh`) the script's text is not known, and its entry is
+`{"program": str, "lines": None, "paths": []}`: no line count and no path is claimed. Every list is in
+first-seen order without duplicates. With no absolute `root` every path is outside.
 
 The grammar it reads, one left-to-right pass. Blanks are space and tab (a backslash before a newline is
 one); a `#` that begins a word starts a comment. Separators are newline, `;`, `&&`, `||`, `|`, `|&` and
