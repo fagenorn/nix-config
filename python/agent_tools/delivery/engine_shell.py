@@ -88,7 +88,7 @@ rewound to a new visit as before, its `run_continued` clearing the stop and clos
 appends no `run_continued`, so the continuing call closes every wait the killed engine left open with a
 `wait_ended` of its kind (a usage-limit or `host-slot` wait) before the visit launches.
 The same holds with earlier results stale when each stale step is a `read` command that answers as it did
-(`_unchanged`), and for a `call` visit a killed engine left interrupted (`engine_resume`, `_owed_at_entry`).
+(`engine_resume.unchanged`), and for a `call` visit a killed engine left interrupted (`engine_resume`, `_owed_at_entry`).
 
 A `group` step runs its members beside each other, one thread each: each member
 records `step_entered`, `process_started`, its stored result and
@@ -136,9 +136,12 @@ Continuing: the issue's runs that are not done are found under the creation lock
 refused, naming them. One is continued on its own procedure copy (`procedures_dir` is not read) with the
 inputs of its `run.json`: a visit whose result is stored with its outcome but lacks its grading or its
 transition (either may be the one a kill left; a group member's lacks only its grading, the group's own
-grade being the core's) is first completed from the stored outcome; unless the
+grade being the core's) is first completed from the stored outcome, after a pending visit's result file and
+staged event a kill left with no `result_stored` are recorded as staged (`engine_resume.adopt_staged`); unless the
 walk is already `Done`, `engine_core.reentry` (given the current repository head) names the step to
-re-enter and a `run_continued` event records it; the loop then runs as for a new run. A mutating command
+re-enter and a `run_continued` event records it, except that when every stale step is a `read` command that
+answers as it did the pending action stays in place and only its own entered visit is rewound
+(`engine_resume.pending_reentry`); the loop then runs as for a new run. A mutating command
 step's `check` runs first on every visit that replays one a continue discarded (`RunCommand.recheck`; a
 group member's likewise, and in the child runs of a call that replays one, the first visit of each mutating
 command),
@@ -630,6 +633,8 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     computed = _computed(procedure)
     members = {member["step"] for name in computed for member in steps[name]["members"]}
     ledger = engine_ledger.replay(run_dir / "events.jsonl")
+    ledger = engine_resume.adopt_staged(
+        run_dir, ledger, engine_core.replay(procedure, inputs, core_events(run_dir, ledger, computed)).action)
     for entry in [e for e in ledger if e["event"] == "step_entered" and e["step"] not in computed]:
         name, visit = entry["step"], entry["visit"]
         stored = [e for e in ledger if e["event"] == "result_stored"
@@ -650,44 +655,36 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     if isinstance(action, engine_core.Stop) and (not ledger or ledger[-1]["event"] != "stop_reached"):
         return  # the owner never saw this stop: the walk reports it before anything is re-entered
     point = engine_core.reentry(procedure, inputs, events, read_head(table.root))
-    if (isinstance(action, engine_core.StartSession)
-            and engine_resume.resumed(run_dir, ledger, action.step, action.visit) is not None
-            and ((action.step, action.visit) == (point.step, point.visit)
-                 or _unchanged(run_dir, table, procedure, inputs, ledger, point.stale))):
+
+    def same_read(stale: tuple[str, ...]) -> bool:
+        return engine_resume.unchanged(
+            procedure, inputs, ledger, stale, events=lambda part: core_events(run_dir, part, computed),
+            rerun=lambda pending: engine_commands.run(
+                table, pending.command, pending.subcommand, pending.args, guard=_guard(),
+                on_start=lambda pid: None, timeout=table.wall_seconds(pending.command)))
+
+    def end_waits() -> None:
         for wait in engine_resume.open_waits(ledger):  # no run_continued closes what the killed engine left open
             engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(), "wait": wait})
+
+    if (isinstance(action, engine_core.StartSession)
+            and engine_resume.resumed(run_dir, ledger, action.step, action.visit) is not None
+            and ((action.step, action.visit) == (point.step, point.visit) or same_read(point.stale))):
+        end_waits()
         return  # the interrupted visit resumes its own session: no rewind, no new visit
     if (isinstance(action, engine_core.RunCall) and (action.step, action.visit) == (point.step, point.visit)
             and engine_resume.named_children(ledger, action.step, action.visit)):
         return  # the interrupted call walks its child runs again in place: no rewind, no new child run
+    if (not isinstance(action, engine_core.Stop) and point.stale
+            and (point.step, point.visit) != (action.step, action.visit) and same_read(point.stale)):
+        point = engine_resume.pending_reentry(action, ledger)  # an unchanged read leaves the pending action in place
+        if point is None:
+            end_waits()
+            return  # the pending action was never entered, so nothing is rewound
     event = {"event": "run_continued", "at": _now(), "step": point.step}
     if point.visit is not None:
         event["visit"] = point.visit
     engine_ledger.append_event(run_dir, event)
-
-
-def _unchanged(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict, ledger: list[dict],
-               stale: tuple[str, ...]) -> bool:
-    """Whether every stale step is a `read` command that, run again under the guard, answers with the outcome its
-    latest visit stored (`engine_resume`)."""
-    steps = {item["id"]: item for item in procedure["steps"]}
-    for name in stale:
-        step = steps[name]
-        if step["holds"] != "read":
-            return False
-        entered = [i for i, e in enumerate(ledger) if e["event"] == "step_entered" and e["step"] == name]
-        visit = ledger[entered[-1]]["visit"]
-        recorded = next((e.get("outcome") for e in ledger if e["event"] == "result_stored"
-                         and (e["step"], e["visit"]) == (name, visit)), None)
-        pending = engine_core.replay(procedure, inputs,
-                                     core_events(run_dir, ledger[:entered[-1]], _computed(procedure))).action
-        if not isinstance(pending, engine_core.RunCommand) or pending.step != name:
-            return False
-        ran = engine_commands.run(table, pending.command, pending.subcommand, pending.args, guard=_guard(),
-                                  on_start=lambda pid: None, timeout=table.wall_seconds(pending.command))
-        if ran.timed_out or recorded is None or ran.outcome != recorded:
-            return False
-    return True
 
 
 def _lock_creation(issue: int) -> int:

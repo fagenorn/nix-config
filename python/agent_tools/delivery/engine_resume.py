@@ -14,6 +14,11 @@ recorded and a rewinding walk runs the step as a visit. One that answers otherwi
 so a read that changed (an issue parked meanwhile) is never walked past, and one that cannot have changed (the
 repository head) never discards a session.
 
+A visit the walk still has pending, whose result file and staged event a killed engine left with no
+`result_stored`, is recorded from the staged event and the continue grades it; a file with no staged event is
+left as before. An unchanged read (`unchanged`) re-enters in place: the pending action is kept, whatever it is,
+and only its own entered visit is rewound.
+
 A call visit with `call` events naming child runs and no recorded stop after its entry gets no `run_continued`,
 no new visit and no new child run. Each named child that is not done or at a stop of its own procedure is
 continued as a run of its own (with its own procedure copy) and walked again under the same name; one that
@@ -27,8 +32,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
-from agent_tools.delivery import engine_ledger, engine_session, engine_stop, procedure_terms
+from agent_tools.delivery import engine_core, engine_ledger, engine_session, engine_stop, procedure_terms
 
 DONE = "done"
 ENGINE_STOPS = (*procedure_terms.ENGINE_STOPS, engine_stop.STOPPED_BY_REQUEST)
@@ -148,6 +154,68 @@ def published_ends(run_dir: Path, ledger: list[dict], step: str, visit: int) -> 
                                               for item in items):
         raise engine_ledger.LedgerError(f"results/{step}.{visit}.json is not a call result")
     return items
+
+
+def pending_visits(action: engine_core.Action) -> tuple[tuple[str, int], ...]:
+    """The visits the replayed walk still has pending for `action`: its own, or each waiting member's."""
+    if isinstance(action, (engine_core.RunCommand, engine_core.StartSession)):
+        return ((action.step, action.visit),)
+    if isinstance(action, engine_core.RunGroup):
+        return tuple((member.step, member.visit) for member in action.members)
+    return ()
+
+
+def adopt_staged(run_dir: Path, ledger: list[dict], action: engine_core.Action) -> list[dict]:
+    """Record, as staged, the `result_stored` of each pending visit whose result file and staged event a killed
+    engine left with no such event; the ledger as replayed afterwards, or `ledger` when nothing was recorded.
+
+    A visit the walk does not have pending (a rewound visit's orphan) and a result file with no staged event are
+    left alone. The result document is never read: the outcome, head and use are the staged ones."""
+    appended = False
+    for name, visit in pending_visits(action):
+        if any(e["event"] == "result_stored" and (e["step"], e["visit"]) == (name, visit) for e in ledger):
+            continue
+        if not (run_dir / "results" / f"{name}.{visit}.json").is_file():
+            continue
+        staged = engine_ledger.staged_event(run_dir, name, visit)
+        if staged is not None:
+            engine_ledger.append_event(run_dir, staged)
+            appended = True
+    return engine_ledger.replay(run_dir / "events.jsonl") if appended else ledger
+
+
+def pending_reentry(action: engine_core.Action, ledger: list[dict]) -> engine_core.Reentry | None:
+    """Where a continue that leaves the pending `action` in place re-enters: its own visit when the ledger entered
+    it, None when it was never entered (so nothing is rewound)."""
+    if not isinstance(action, (engine_core.RunCommand, engine_core.StartSession, engine_core.RunGroup,
+                               engine_core.RunCall)):
+        return None
+    entered = any(e["event"] == "step_entered" and (e["step"], e["visit"]) == (action.step, action.visit)
+                  for e in ledger)
+    return engine_core.Reentry(action.step, action.visit, ()) if entered else None
+
+
+def unchanged(procedure: dict, inputs: dict, ledger: list[dict], stale: tuple[str, ...], *,
+              events: Callable[[list[dict]], list[dict]],
+              rerun: Callable[[engine_core.RunCommand], object]) -> bool:
+    """Whether every stale step is a `read` command that, run again through `rerun`, answers with the outcome its
+    latest visit stored. `events` turns a ledger part into the core's events."""
+    steps = {item["id"]: item for item in procedure["steps"]}
+    for name in stale:
+        step = steps[name]
+        if step["holds"] != "read":
+            return False
+        entered = [i for i, e in enumerate(ledger) if e["event"] == "step_entered" and e["step"] == name]
+        visit = ledger[entered[-1]]["visit"]
+        recorded = next((e.get("outcome") for e in ledger if e["event"] == "result_stored"
+                         and (e["step"], e["visit"]) == (name, visit)), None)
+        pending = engine_core.replay(procedure, inputs, events(ledger[:entered[-1]])).action
+        if not isinstance(pending, engine_core.RunCommand) or pending.step != name:
+            return False
+        ran = rerun(pending)
+        if ran.timed_out or recorded is None or ran.outcome != recorded:
+            return False
+    return True
 
 
 def ended(child_dir: Path) -> str | None:
