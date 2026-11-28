@@ -931,8 +931,9 @@ class ContractTextTest(unittest.TestCase):
     def test_the_manager_contract_states_the_rerun_rule_as_built(self):
         text = " ".join((REPO_ROOT / "python/agent_tools/console/manager-contract.md").read_text(
             encoding="utf-8").split())
-        self.assertIn("of a run with at least one failed job, whether or not that job is a required check: "
-                      "a check run of its own pull requests", text)
+        self.assertIn("of a run with at least one failed job, whether or not that job is a required check, "
+                      "when every job of the run has finished and the run is at the current head of its pull "
+                      "request: a check run of its own pull requests", text)
         self.assertNotIn("failed job that is a required check", text)
 
 
