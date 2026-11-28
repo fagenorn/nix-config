@@ -1,7 +1,7 @@
 """A session runs `engine deliver`; the delivery programs keep reading the old text unchanged.
 
-The shell examples of the session text are every inline code span, every line of a fenced block and every indented
-line, so an example in any of the three forms is judged the same way."""
+The shell examples of the session text are every inline code span, every line of a fenced block (backtick or tilde
+fence) and every indented line, so an example in any of the three forms is judged the same way."""
 import hashlib
 import json
 from pathlib import Path
@@ -22,7 +22,7 @@ LIFECYCLE = re.compile(
 START = "engine deliver <n>"
 RELEASE = "forge-claim release --repo <slug> --issue <n> --holder <host>/<run>"
 PROGRAM_DIGEST = "7da6115f67b6bcf6a72e7dccf4d13524b118b3f3c79583882ffb1b0f1eaf2280"
-FENCE = re.compile(r"^[ \t]*(`{3,})")
+FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 
 
 def normalized(text):
@@ -39,9 +39,10 @@ def examples(text):
     for line in text.split("\n"):
         match = FENCE.match(line)
         if fence is None and match:
-            fence = len(match.group(1))
+            fence = match.group(1)
         elif fence is not None:
-            if match and len(match.group(1)) >= fence and line.strip() == match.group(1):
+            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence) \
+                    and line.strip() == match.group(1):
                 fence = None
             elif line.strip():
                 found.append(line.strip())
@@ -89,6 +90,9 @@ class DirectLaneEngineEntryTest(unittest.TestCase):
             "unlabeled fence": "Then run:\n\n```\n$ git worktree add x\n```\n",
             "long fence": "Then run:\n\n````bash\n```\ngit commit -m x\n```\n````\n",
             "another command": "Then run:\n\n    git commit -m x\n",
+            "tilde fence": "Then run:\n\n~~~sh\ngit push origin HEAD\n~~~\n",
+            "long tilde fence": "Then run:\n\n~~~~\n~~~\ngit commit -m x\n~~~\n~~~~\n",
+            "backticks inside tilde fence": "Then run:\n\n~~~\n```\ngit push origin HEAD\n```\n~~~\n",
         }
         for name, form in forms.items():
             with self.subTest(name):
