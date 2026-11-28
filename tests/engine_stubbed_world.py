@@ -42,6 +42,7 @@ A resumed session that answered replays its recorded answer and runs no effect a
 `engine deliver` and kills its process group once `cut()` holds; an entry's `sleep` keeps a session open until then.
 `deliver` and `deliver_until` take `plan=` and pass `--plan <plan>`; the stand-in's `<step>#<k>` entries, `reads` and
 `result` effects are described in its docstring.
+`end_started()` kills every process a run recorded as started that is still that process, and `run_dirs()` lists every run directory.
 `answer(step, entry)` sets `replies[step]` to `entry` with its effects filled the same way and rewrites
 the scenario file (`self.scenario`) the stub reads, so the next `deliver()` answers `step` with `entry`.
 
@@ -324,7 +325,7 @@ class StubbedRun:
         the test's cleanup kills any that are still alive."""
         engine = subprocess.Popen(self._engine_argv(procedures, plan=plan), cwd=self.fixture.root, env=self.env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-        self.test.addCleanup(self._kill_started)
+        self.test.addCleanup(self.end_started)
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline and engine.poll() is None and not cut():
             time.sleep(poll)
@@ -334,11 +335,11 @@ class StubbedRun:
             pass
         engine.communicate()
 
-    def _kill_started(self) -> None:
+    def end_started(self) -> None:
         """SIGKILL every process any run started that is still the process it recorded (the cleanup of
         `deliver_until`): a group id the host has since given to another process is left alone."""
         with mock.patch.dict(os.environ, {"PATH": self.env["PATH"]}):  # the fake forge leaves `ps` off this process's
-            for run in self._run_dirs():
+            for run in self.run_dirs():
                 for event in self.events(run):
                     if (event["event"] == "process_started"
                             and engine_stop.same_process(event["pid"], event["started"])):
@@ -366,7 +367,7 @@ class StubbedRun:
             raise AssertionError(f"expected one result line, got {done.stdout!r} ({done.stderr!r})")
         return json.loads(lines[0])
 
-    def _run_dirs(self) -> list[Path]:
+    def run_dirs(self) -> list[Path]:
         root = self.world.home / ".agents/state/engine/runs"
         if not root.is_dir():
             return []
@@ -377,10 +378,10 @@ class StubbedRun:
         return json.loads((run / "run.json").read_text(encoding="utf-8")).get("parent")
 
     def runs(self) -> list[Path]:
-        return [run for run in self._run_dirs() if self._parent(run) is None]
+        return [run for run in self.run_dirs() if self._parent(run) is None]
 
     def children(self, run: Path) -> list[Path]:
-        return [child for child in self._run_dirs() if self._parent(child) == run.name]
+        return [child for child in self.run_dirs() if self._parent(child) == run.name]
 
     @staticmethod
     def events(run: Path) -> list[dict]:
@@ -390,7 +391,7 @@ class StubbedRun:
     def visited_steps(self) -> set[tuple[str, str]]:
         """The (procedure, step) of every `step_entered` and `transition_taken` event of every run, root and child."""
         return {(json.loads((run / "run.json").read_text(encoding="utf-8"))["procedure"], event["step"])
-                for run in self._run_dirs() for event in self.events(run)
+                for run in self.run_dirs() for event in self.events(run)
                 if event["event"] in ("step_entered", "transition_taken")}
 
     def visited(self) -> set[str]:

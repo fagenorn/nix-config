@@ -34,6 +34,13 @@ pkgs.runCommand "agent-platform-check"
     diff -r ${standards} "$root/standards"
     cmp ${manifest} "$root/platform-manifest.json"
 
+    exe=${platform}/libexec/agent-platform/agent-tools
+    test -x "$exe" || { echo "libexec/agent-platform/agent-tools is not executable" >&2; exit 1; }
+    test ! -e ${platform}/bin/agent-tools || { echo "bin/agent-tools exists: the .NET executable must stay off PATH" >&2; exit 1; }
+    mkdir "$TMPDIR/dotnet-home"
+    HOME="$TMPDIR/dotnet-home" DOTNET_CLI_TELEMETRY_OPTOUT=1 "$exe" commands > "$TMPDIR/commands.txt"
+    grep -qx commands "$TMPDIR/commands.txt" || { echo "agent-tools commands does not list commands" >&2; exit 1; }
+
     python3 - "$root/platform-revision.json" <<'PY'
     import json, re, sys
     record = json.load(open(sys.argv[1]))

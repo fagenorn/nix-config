@@ -15,6 +15,8 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
     stop-request   a pending stop request for the lock holder it names (engine_stop)
     results/<step>.<visit>.json
                         a step visit's stored result
+    results/<step>.<visit>.event.json
+                        the visit's `result_stored` event, staged before its result file
     sessions/<step>.<visit>.{system.md,prompt.md,json,resume.json,resume.prompt.md,denied.json,denied.prompt.md}
     sessions/<step>.<visit>.continue-<n>.{json,prompt.md}
                         an agent step visit's launch files and raw result (the `continue-<n>` ones
@@ -42,12 +44,15 @@ continued run resumes an interrupted visit's recorded session in the same visit,
 `step_entered` and one `session_starting` however many launches it took, and its `session_resuming`
 attempts count on from the earlier ones.
 
-Order rule: a result file is written to a writer-owned temporary file (fsynced), then linked into place,
-which refuses a result that exists, before its `result_stored` event is appended; `append_event` refuses
+Order rule: the `result_stored` event is first staged (written to a temporary file, fsynced, and renamed over
+any staged event a cut left), then a result file is written to a writer-owned temporary file (fsynced), then
+linked into place, which refuses a result that exists, before the event is appended; `append_event` refuses
 that event while the file is absent. A crash between the two leaves a result with no event, never an
-event naming no result. An append first cuts a write that was cut short back to the last newline, so a
-torn tail never joins the next event; the cut and the write run under an exclusive `flock` on
-`events.jsonl`.
+event naming no result. A writer holds an exclusive `flock` on `results/` from its check that the result is
+absent until the result is linked, so two writers of one visit never interleave: the staged event is always
+the event of the writer whose result file was published. An append first cuts a write that was cut short
+back to the last newline, so a torn tail never joins the next event; the cut and the write run under an
+exclusive `flock` on `events.jsonl`.
 
 The ledger holds no credential: `run.json` carries only the inputs its caller passes, plus the starting
 session id the shell reads from `CLAUDE_CODE_SESSION_ID`.
@@ -55,6 +60,7 @@ session id the shell reads from `CLAUDE_CODE_SESSION_ID`.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -519,12 +525,59 @@ def _write_result(path: Path, document: object) -> None:
     _publish(path, _compact(document).encode("utf-8"))
 
 
+def staged_path(run_dir: Path, step: str, visit: int) -> Path:
+    return Path(run_dir) / "results" / f"{step}.{visit}.event.json"
+
+
+def _write_staged(path: Path, event: Mapping[str, object]) -> None:
+    """Replace `path` with the compact `event`, atomically: a cut leaves the old file or the new one."""
+    token = "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(8))
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{token}.tmp")
+    try:
+        _write_file(temporary, _compact(event).encode("utf-8"))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    _fsync_path(path.parent)
+
+
+def staged_event(run_dir: Path, step: str, visit: int) -> dict | None:
+    """The `result_stored` event staged for the visit, None when none is staged; `LedgerError` for a file
+    that cannot be read or that is not the visit's own event."""
+    path = staged_path(run_dir, step, visit)
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise LedgerError(f"{path.name} is not readable: {error}") from error
+    try:
+        event = parse_event_line(data.rstrip(b"\n"))
+    except LedgerError as error:
+        raise LedgerError(f"{path.name}: {error}") from error
+    if (event["event"], event.get("step"), event.get("visit"), event.get("result")) != (
+            "result_stored", step, visit, f"results/{step}.{visit}.json"):
+        raise LedgerError(f"{path.name} is not the result_stored event of {step} visit {visit}")
+    return event
+
+
+@contextlib.contextmanager
+def _results_lock(run_dir: Path):
+    """An exclusive `flock` on the run's `results/` directory, held from a writer's absence check to its publish."""
+    descriptor = os.open(Path(run_dir) / "results", os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: str,
                  wall_seconds: float, turns: int, tokens: Mapping[str, int],
                  spend_usd: float, head: str | None = None,
                  outcome: str | None = None, startup_seconds: float | None = None,
                  adopt: bool = False) -> Path:
-    """Write the step visit's result file, then append its `result_stored` event.
+    """Stage the step visit's `result_stored` event, write its result file, then append the event.
 
     `head`, `outcome` and `startup_seconds` are in the event only when given. With `adopt` a result file already
     published for the visit (a killed engine's, never recorded) is kept as it is and only the event is appended."""
@@ -538,9 +591,11 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
                             "tokens": dict(tokens), "spend_usd": spend_usd, **optional})
     path = run_dir / relative
     if not adopt:
-        if os.path.lexists(path):
-            raise LedgerError(f"{relative} is already stored")
-        _write_result(path, result)
+        with _results_lock(run_dir):
+            if os.path.lexists(path):
+                raise LedgerError(f"{relative} is already stored")
+            _write_staged(staged_path(run_dir, step, visit), event)
+            _write_result(path, result)
     append_event(run_dir, event)
     return path
 

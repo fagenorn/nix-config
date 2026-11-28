@@ -67,7 +67,8 @@ EVALUATED_ATTRIBUTE = (
 # The steps `Nix Eval` runs for the platform package (#1439): each is a name and one
 # single-line `run:`, with no `|| true`, `if:` or `continue-on-error:` to make it pass empty.
 PLATFORM_PACKAGE_STEPS = (
-    ("Build the platform package", "nix build --no-link '.#packages.x86_64-linux.agent-platform'"),
+    ("Build the platform package",
+     "nix build --no-link --print-out-paths '.#packages.x86_64-linux.agent-platform'"),
     ("Evaluate the macOS platform package",
      "nix eval --raw '.#packages.aarch64-darwin.agent-platform.drvPath'"),
     ("Check the platform package runs with no home configuration",
@@ -140,7 +141,7 @@ BASE_PLATFORM_STEP = [
     "          jq -e '.compatibility.compatible' \"$RUNNER_TEMP/base-status.json\"",
 ]
 CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
-REQUIRED_CONTEXTS = ("Nix Eval", "Agent Workflow Tests", "Conformance")
+REQUIRED_CONTEXTS = ("Nix Eval", "Agent Workflow Tests", "Conformance", ".NET Solution")
 EXPECTED_PROTECTION_PAYLOAD = {
     "required_status_checks": {
         "strict": True,
@@ -951,6 +952,12 @@ class WorkflowShape(unittest.TestCase):
         self.assertEqual(CONFORMANCE_WORKFLOW, conformance_path)
         self.assertEqual("conformance", conformance_key)
         self.assertEqual([], conformance_job_problems(conformance_path))
+        self.assertEqual((WORKFLOW, "dotnet-solution"), jobs[".NET Solution"])
+        dotnet_body = job_body("dotnet-solution", WORKFLOW)
+        for run in ("nix build --no-link '.#packages.x86_64-linux.agent-tools-dotnet'",
+                    "nix build --no-link --print-build-logs "
+                    "'.#checks.x86_64-linux.agent-tools-dotnet-tests'"):
+            self.assertIn(f"        run: {run}", dotnet_body)
 
 
 
@@ -1132,12 +1139,12 @@ class ProtectionPayload(unittest.TestCase):
 class CommittedProtectionTest(unittest.TestCase):
     """The lease a landing holds from green rests on strict protection: a head behind its base cannot merge."""
 
-    def test_the_committed_protection_is_strict_with_the_three_required_contexts(self):
+    def test_the_committed_protection_is_strict_with_the_required_contexts(self):
         checks = json.loads(PROTECTION.read_text(encoding="utf-8"))["required_status_checks"]
         self.assertIs(True, checks["strict"])
-        self.assertEqual({"Nix Eval", "Agent Workflow Tests", "Conformance"},
+        self.assertEqual(set(REQUIRED_CONTEXTS),
                          {check["context"] for check in checks["checks"]})
-        self.assertEqual(3, len(checks["checks"]))
+        self.assertEqual(len(REQUIRED_CONTEXTS), len(checks["checks"]))
 
 
 def required_context_sentence_problems(text):
@@ -1161,7 +1168,9 @@ class ProjectInstructions(unittest.TestCase):
     def test_a_stale_sentence_is_caught(self):
         text = INSTRUCTIONS.read_text(encoding="utf-8")
         mutations = {
-            "stale count": text.replace("three contexts", "two contexts"),
+            "stale count": text.replace(
+                f"{COUNT_WORDS[len(REQUIRED_CONTEXTS)]} contexts",
+                f"{COUNT_WORDS[len(REQUIRED_CONTEXTS) - 1]} contexts"),
             "unbackticked context": text.replace("`Conformance`", "Conformance"),
             "sentence twice": text + PROTECTION_SENTENCE,
             "sentence removed": text.replace(PROTECTION_SENTENCE, ""),

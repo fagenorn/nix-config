@@ -512,3 +512,110 @@ class CallContinueTest(unittest.TestCase):
         self.assertEqual(third.returncode, 3, third.stdout + third.stderr)
         self.assertEqual(project.argvs("effect"), [m1, k, m2, k])
         self.assertEqual(project.argvs("checks"), [m1, m2])
+
+
+def cut_ledger(root: Path, event: str, *, keep: bool, step_id: str) -> int:
+    """Truncate the root's ledger at the first `event` line of `step_id` (before it, or after it with `keep`)."""
+    lines = (root / "events.jsonl").read_text().splitlines(keepends=True)
+    found = next(i for i, line in enumerate(lines)
+                 if json.loads(line)["event"] == event and json.loads(line).get("step") == step_id)
+    cut = found + 1 if keep else found
+    (root / "events.jsonl").write_text("".join(lines[:cut]), encoding="utf-8")
+    return cut
+
+
+def drop_result(root: Path, step_id: str) -> None:
+    for name in (f"{step_id}.1.json", f"{step_id}.1.event.json"):
+        (root / "results" / name).unlink()
+
+
+class StagedResultContinueTest(unittest.TestCase):
+    """A result file a killed engine published before it appended `result_stored` is recorded as staged."""
+
+    def holding(self, project: EngineProject) -> Path:
+        a = step("a", "count-a", "b")
+        a["holds"] = "head"
+        return project.procedures([a, step("b", "count-b", "done")])
+
+    def test_a_command_result_published_but_never_recorded_is_recorded_from_its_staged_event_and_not_run_again(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "count-a", "done")])
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (root,) = project.runs()
+        cut = cut_ledger(root, "result_stored", keep=False, step_id="a")
+
+        second = project.deliver(procedures)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["end"], "done")
+        self.assertEqual(project.calls("a"), 1)
+        after = project.events(root)[cut:]
+        self.assertEqual(shape(after), [
+            ("result_stored", "a", 1), ("outcome_graded", "a", 1), ("transition_taken", "a", 1),
+            ("run_done", None, None)])
+        self.assertEqual(after[0]["outcome"], "ok")
+
+    def moved_or_not(self, moved: bool) -> tuple[EngineProject, str, list[dict]]:
+        project = EngineProject(self)
+        procedures = self.holding(project)
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (root,) = project.runs()
+        recorded = heads(project.events(root), "a")[0]
+        self.assertEqual(recorded, head(project))
+        cut = cut_ledger(root, "result_stored", keep=False, step_id="a")
+        drop_result(root, "b")
+        if moved:
+            project.world.git(project.root, "commit", "--quiet", "--allow-empty", "-m", "moved")
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        return project, recorded, project.events(root)[cut:]
+
+    def test_a_head_holding_command_adopted_after_the_head_moved_is_redone(self):
+        project, recorded, after = self.moved_or_not(True)
+        self.assertEqual((after[0]["event"], after[0]["step"], after[0]["head"]), ("result_stored", "a", recorded))
+        self.assertNotEqual(recorded, head(project))
+        self.assertIn("a", [e["step"] for e in run_continued(after)])
+        self.assertEqual((project.calls("a"), project.calls("b")), (2, 2))
+
+    def test_a_head_holding_command_adopted_on_an_unmoved_head_is_not_run_again(self):
+        project, recorded, after = self.moved_or_not(False)
+        self.assertEqual((after[0]["event"], after[0]["step"], after[0]["head"]), ("result_stored", "a", recorded))
+        self.assertEqual(project.calls("a"), 1)
+
+
+class InPlaceContinueTest(unittest.TestCase):
+    """A read that answers as it did leaves the pending action where it is; one that changed rewinds."""
+
+    def delivered_and_cut(self) -> tuple[EngineProject, Path, Path, int]:
+        project = EngineProject(self)
+        read = step("r", "standin-gate", None, on={"ok": "a", "failed": "a"}, holds="read")
+        procedures = project.procedures([read, step("a", "count-a", "b"), step("b", "count-b", "done")])
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (root,) = project.runs()
+        cut = cut_ledger(root, "transition_taken", keep=True, step_id="a")
+        drop_result(root, "b")
+        return project, procedures, root, cut
+
+    def test_a_continue_after_a_graded_step_re_reads_an_unchanged_read_and_does_not_rewind(self):
+        project, procedures, root, cut = self.delivered_and_cut()
+
+        second = project.deliver(procedures)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["end"], "done")
+        self.assertEqual([project.calls(n) for n in ("gate", "a", "b")], [2, 1, 2])
+        self.assertEqual(run_continued(project.events(root)[cut:]), [])
+
+    def test_a_continue_whose_read_answers_differently_rewinds_to_it(self):
+        project, procedures, root, cut = self.delivered_and_cut()
+        (project.tmp / "gate-open").write_text("go", encoding="utf-8")
+
+        second = project.deliver(procedures)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual([(e["step"], e["visit"]) for e in run_continued(project.events(root)[cut:])],
+                         [("r", 1)])
+        self.assertEqual(project.calls("a"), 2)

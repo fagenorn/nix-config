@@ -1324,7 +1324,7 @@ def _millis(text: str) -> int:
     return int(datetime.fromisoformat(text).timestamp() * 1000)
 
 
-def _effective_stages(
+def effective_stages(
         state: SprintState,
         engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE) -> list[tuple[int, str, str]]:
     seen = {item.issue: item.stage for item in state.observed}
@@ -1355,7 +1355,7 @@ def sprint_open_issues(state: SprintState) -> frozenset[int]:
     with no report."""
     if state.report is None:
         return frozenset()
-    return frozenset(issue for issue, stage, _ in _effective_stages(state)
+    return frozenset(issue for issue, stage, _ in effective_stages(state)
                      if stage not in (LANDED, HELD, DROPPED, CLOSED_OUT))
 
 
@@ -1875,7 +1875,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
     closing = state.closing
     stages = (sorted((issue, stage, CLOSING_OUTCOME_TEXT[stage])
                      for issue, stage in closing.issues) if closing is not None
-              else [] if report is None else _effective_stages(state, engine))
+              else [] if report is None else effective_stages(state, engine))
     waiting = sprint_waiting(state, records)
     checks = sprint_checks(state, records)
     groups = [(issue, stage if stage in (LANDED, HELD, QUEUED) else "delivery")

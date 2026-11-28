@@ -212,6 +212,7 @@ agent-workflow-tests *args:
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
     tests/test_engine_cut_continue.py \
+    tests/test_engine_cut_sweep.py \
     tests/test_engine_resume.py \
     tests/test_engine_housekeeping.py \
     tests/test_engine_history_steps.py \
@@ -358,6 +359,7 @@ agent-workflow-tests *args:
     tests/test_comment_lint.py \
     tests/test_cleanup_issue.py \
     tests/test_lint_time.py \
+    tests/test_job_time.py \
     tests/test_ruff_lint.py \
     tests/test_suite_source.py \
     tests/test_skipped_test_lint.py \
@@ -370,6 +372,7 @@ agent-workflow-tests *args:
     tests/test_cache_keepalive.py \
     tests/test_claude_account_routing.py \
     tests/test_branch_protection.py \
+    tests/test_dotnet_solution_job.py \
     tests/test_devenv_cache_ignored.py \
     tests/test_suite_part.py \
     tests/test_suite_runner.py \
@@ -504,6 +507,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_warnings.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
+    tests/test_console_manager_resume.py \
     tests/test_console_launch_short_id.py \
     tests/test_console_permission.py \
     tests/test_console_manager_service.py \
@@ -577,6 +581,14 @@ console-screenshots out="":
   browsers=$(nix build --no-link --print-out-paths --impure --expr "($pkgs).playwright-driver.browsers")
   dir="{{out}}"
   PLAYWRIGHT_BROWSERS_PATH="$browsers" PYTHONPATH="{{agent_tools_path}}" "$py/bin/python3" -m tests.console_screenshots --out "${dir:-$HOME/tmp/clarity-screenshots}"
+
+# Cut the stubbed delivery after each event and result file of its ledger and continue it (nightly, daily in CI).
+engine-cut-sweep:
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v tests/test_engine_cut_sweep_daily.py
+
+# Rewrite the committed record of the uninterrupted stubbed delivery that the cut sweeps compare against.
+engine-cut-reference:
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" ENGINE_CUT_RECORD=write PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v tests/test_engine_cut_sweep_daily.py -k test_the_uninterrupted_run_matches_the_committed_record
 
 # Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build
