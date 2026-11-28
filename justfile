@@ -193,6 +193,7 @@ agent-workflow-tests *args:
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
     tests/test_engine_check.py \
+    tests/test_engine_check_returns.py \
     tests/test_engine_check_process.py \
     tests/test_engine_direct_procedures.py \
     tests/test_engine_graders.py \
@@ -223,6 +224,7 @@ agent-workflow-tests *args:
     tests/test_engine_stubbed_guard.py \
     tests/test_engine_stubbed_findings.py \
     tests/test_engine_stubbed_world.py \
+    tests/test_engine_plan_facts.py \
     tests/test_proof_run.py \
     tests/test_bound_issues.py \
     tests/test_engine_step_coverage.py \

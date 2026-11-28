@@ -103,7 +103,7 @@ admitted in list order, and admission stops at the first fault, while the
 children already admitted finish, and a worker that cannot start stops admission
 the same way. The parent records a `call` event for each child before that child
 walks (a child whose event cannot be recorded is removed unwalked), stores `{"items": [{"end", "item", "run"}, ...]}`
-and takes `engine_core.call_outcome` of the ends. A fault in any child faults
+and the members its `returns` names (`engine_resume.returned`), and takes `engine_core.call_outcome` of the ends. A fault in any child faults
 the parent with no call outcome. `engine status` reads the root run, never a
 child. A group's and a call's wait runs under `engine_session.reaping`, so a SIGTERM ends
 every live session, admits no further child, starts no further step in any walk and exits
@@ -339,6 +339,15 @@ def core_events(run_dir: Path, ledger: list[dict],
                 outcome["head"] = heads[(event["step"], event["visit"])]["head"]
             events.append(outcome)
     return events
+
+
+def child_visits(run: str) -> dict[str, int]:
+    """The visit of each step's result a child run holds at the end of its walk, after every rewind."""
+    child = engine_ledger.runs_root() / run
+    document = engine_ledger.read_run(child)
+    procedure = _load(child / "procedure" / f"{document['procedure']}.json")
+    events = core_events(child, engine_ledger.replay(child / "events.jsonl"), engine_core.group_ids(procedure))
+    return engine_core.result_visits(procedure, document["inputs"], events)
 
 
 def read_head(root: str) -> str | None:
@@ -617,17 +626,12 @@ def _end_leftover(run_dir: Path) -> None:
         engine_stop.end_leftover(state.process["pid"])
 
 
-def _computed(procedure: dict) -> frozenset[str]:
-    """The steps the core grades itself: the groups."""
-    return frozenset(item["id"] for item in procedure["steps"] if item["kind"] == "group")
-
-
 def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     """Record where the run's next walk re-enters; a stored but ungraded visit is graded first."""
     _end_leftover(run_dir)
     procedure = _load(run_dir / "procedure" / f"{engine_ledger.read_run(run_dir)['procedure']}.json")
     steps = {item["id"]: item for item in procedure["steps"]}
-    computed = _computed(procedure)
+    computed = engine_core.group_ids(procedure)
     members = {member["step"] for name in computed for member in steps[name]["members"]}
     ledger = engine_ledger.replay(run_dir / "events.jsonl")
     for entry in [e for e in ledger if e["event"] == "step_entered" and e["step"] not in computed]:
@@ -680,7 +684,7 @@ def _unchanged(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict
         recorded = next((e.get("outcome") for e in ledger if e["event"] == "result_stored"
                          and (e["step"], e["visit"]) == (name, visit)), None)
         pending = engine_core.replay(procedure, inputs,
-                                     core_events(run_dir, ledger[:entered[-1]], _computed(procedure))).action
+                                     core_events(run_dir, ledger[:entered[-1]], engine_core.group_ids(procedure))).action
         if not isinstance(pending, engine_core.RunCommand) or pending.step != name:
             return False
         ran = engine_commands.run(table, pending.command, pending.subcommand, pending.args, guard=_guard(),
@@ -794,7 +798,7 @@ def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
     procedure = _load(run_dir / "procedure" / f"{name}.json")
     stop = scope.stop
     steps = {item["id"]: item for item in procedure["steps"]}
-    computed = _computed(procedure)
+    computed = engine_core.group_ids(procedure)
     ran = 0
     while True:
         ledger = engine_ledger.replay(run_dir / "events.jsonl")
@@ -894,8 +898,7 @@ def _record_core_transitions(run_dir: Path, ledger: list[dict], walk: engine_cor
         if (transition.step, transition.visit) not in taken:
             engine_ledger.append_event(run_dir, {
                 "event": "transition_taken", "at": _now(), "step": transition.step,
-                "visit": transition.visit, "outcome": transition.outcome,
-                "to": transition.target,
+                "visit": transition.visit, "outcome": transition.outcome, "to": transition.target,
                 **({"dropped": list(transition.dropped)} if transition.dropped else {})})
 
 
@@ -1117,7 +1120,7 @@ def _owed_at_entry(run_dir: Path, run: dict, action: engine_core.RunCall) -> boo
     if cut is None:
         return False
     pending = engine_core.replay(procedure, run["inputs"],
-                                 core_events(run_dir, ledger[:cut], _computed(procedure))).action
+                                 core_events(run_dir, ledger[:cut], engine_core.group_ids(procedure))).action
     return isinstance(pending, engine_core.RunCall) and pending.recheck
 
 
@@ -1246,7 +1249,7 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
     ends = [entries[index] for index in range(len(items))]
     outcome = engine_core.call_outcome([entry["end"] for entry in ends])
     engine_ledger.store_result(run_dir, step=action.step, visit=action.visit,
-                               result={"items": ends}, at=_now(),
+                               result={"items": ends, **engine_resume.returned(step, ends, child_visits)}, at=_now(),
                                wall_seconds=time.monotonic() - started, turns=0,
                                tokens=dict(NO_TOKENS), spend_usd=0, outcome=outcome)
     _graded(run_dir, step, action.visit, outcome)

@@ -13,6 +13,9 @@ only when no walk that fires none takes that edge, so it never stands in for an 
 edge reachable only after a bound, such as a recovery step); an edge no
 terminal walk takes is reported in `Coverage.unwalked`, never dropped.
 
+A call that ends `done` also carries, for each path of its step's `returns`, the bare member valued with the path
+string (as `result_for` values a string member); a stopped call stores only its `items`.
+
 `no-reply` is the shell's outcome when no valid reply came back, so its event
 carries the empty result `{}` the shell stores, not a sampled reply.
 
@@ -224,6 +227,9 @@ def walk_edges(
             for outcome in ("done",) if not entries else outcomes[action.step]:
                 ends = ["done"] * len(entries) if outcome == "done" else [outcome] + ["done"] * (len(entries) - 1)
                 result = {"items": [{"end": end, "item": item, "run": RUN} for end, item in zip(ends, entries)]}
+                if outcome == "done":
+                    owner = next(item for item in procedure["steps"] if item["id"] == action.step)
+                    result.update({path.split(".", 1)[1]: path for path in owner.get("returns", [])})
                 queue.append(events + _reported(action.step, outcome, result))
             continue
         end = "done" if isinstance(action, Done) else action.name

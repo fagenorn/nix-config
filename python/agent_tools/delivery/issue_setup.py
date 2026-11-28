@@ -11,7 +11,18 @@ origin). The verdict is the first gate that refuses, in this order: `closed` (th
 not open), `parked` (it carries the label `needs-verification` or `parked`), `duplicate` (a
 merged pull request whose closing references list the issue; one that only mentions it does
 not count), `open-pr` (an open pull request found by searching the issue number whose head
-is not the branch); else `clear`. `pr` is the number for `duplicate` and `open-pr`.
+is not the branch); else `clear`. `pr` is the number for `duplicate` and `open-pr`. `merged_refs` is
+`[{number, closes}]`, one per merged pull request the search found, in order, `closes` true only when
+its closing references list the issue.
+
+`plan-preflight --repo-root <path> --issue <n> --branch <b> --worktree-path <p>` takes no holder: it runs
+`preflight` (same verdicts, exit codes and forge reads) for the branch and worktree the setup adopted, which
+it is handed and never derives again (a title edited since may select another branch), and prints its members
+but `merged_refs`, plus `routed` and `route_detail`.
+`routed` is `router`'s document at `planning` for the paths the issue text names (the lane rule's path
+grammar after a `:<line>` reference is dropped; a file the issue proposes to create counts), read in the
+issue worktree, never `--repo-root`; it is null, with `route_detail` saying why, when the text names no
+path, the worktree does not exist or the router refuses. Neither changes the verdict.
 
 `worktree --repo-root <path> --branch <b> --worktree-path <p>` prints `{verdict, worktree,
 branch, head, base_sha, status, detail}` after `git fetch origin`. It makes or adopts the
@@ -86,8 +97,8 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from agent_tools.delivery import issue_branch, lane_rule, look_marker
-from agent_tools.project_contract import resolve_project
+from agent_tools.delivery import issue_branch, lane_rule, look_marker, router
+from agent_tools.project_contract import agent_platform, resolve_project
 from agent_tools.system import forge_api
 
 GIT_TIMEOUT = 120
@@ -155,6 +166,22 @@ def judge(issue: Mapping, pulls: Sequence[Mapping], branch: str, number: int) ->
     return "clear", None
 
 
+def merged_refs(pulls: Sequence[Mapping], number: int) -> list[dict]:
+    """Each merged pull request, in list order, with whether its closing references list the issue."""
+    return [{"number": pull.get("number"),
+             "closes": number in {ref.get("number") for ref in pull.get("closingIssuesReferences") or ()}}
+            for pull in pulls if pull.get("state") == "MERGED"]
+
+
+# A `:<line>` or `:<from>-<to>` reference after an extension, which the path grammar would refuse whole.
+LINE_REF = re.compile(r"(\.[A-Za-z][A-Za-z0-9]{0,9}):\d+(?:[-:]\d+)?(?![\w/])")
+
+
+def planning_paths(text: str) -> list[str]:
+    """The paths the issue text names by the lane rule's grammar, line references dropped, no existence test."""
+    return sorted(set(lane_rule.named_paths(LINE_REF.sub(r"\1", text))))
+
+
 def _refusal(refusal: issue_branch.BranchRefusal) -> Failure:
     """`issue-branch`'s refusal as a failure; a forge failure it wrapped keeps its own flag."""
     wrapped = refusal.detail if isinstance(refusal.detail, dict) else {}
@@ -194,6 +221,11 @@ def preflight(args: argparse.Namespace) -> dict:
         derived = issue_branch.derive(args.repo_root, args.issue)
     except issue_branch.BranchRefusal as refusal:
         raise _refusal(refusal) from None
+    return _judged(args, snapshot, derived)
+
+
+def _judged(args: argparse.Namespace, snapshot: Mapping, derived: Mapping) -> dict:
+    """`preflight`'s report for the issue on the `derived` branch and worktree path."""
     slug = snapshot["bindings"]["tracker"]["repo_slug"]
     branch = derived["branch"]
     try:
@@ -213,7 +245,28 @@ def preflight(args: argparse.Namespace) -> dict:
               "open-pr": f"pull request {pr} is open for the issue on another branch"}[verdict]
     return {"verdict": verdict, "branch": branch, "worktree_path": derived["worktree_path"],
             "integration_branch": snapshot["bindings"]["vcs"]["integration_branch"],
-            "issue_text": issue_text(issue, comments), "plan": plan, "pr": pr, "detail": detail}
+            "issue_text": issue_text(issue, comments), "plan": plan, "pr": pr, "detail": detail,
+            "merged_refs": merged_refs(pulls, args.issue)}
+
+
+def plan_preflight(args: argparse.Namespace) -> dict:
+    adopted = {"branch": args.branch, "worktree_path": args.worktree_path}
+    out = _judged(argparse.Namespace(issue=args.issue, holder=None), _resolve(args.repo_root), adopted)
+    del out["merged_refs"]
+    out["routed"] = None
+    worktree = Path(out["worktree_path"])
+    paths = planning_paths(out["issue_text"])
+    if not paths:
+        out["route_detail"] = "the issue names no path"
+    elif not worktree.is_dir():
+        out["route_detail"] = f"the worktree {worktree} does not exist"
+    else:
+        try:
+            out["routed"] = router.routed(worktree, "planning", paths, agent_platform.standards_dir())
+            out["route_detail"] = ""
+        except (ValueError, OSError) as error:
+            out["route_detail"] = f"router: {error}"
+    return out
 
 
 def read(args: argparse.Namespace) -> dict:
@@ -597,6 +650,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--repo-root", required=True)
     sub.add_argument("--issue", required=True, type=number)
     sub.add_argument("--holder")
+    sub = commands.add_parser("plan-preflight")
+    sub.add_argument("--repo-root", required=True)
+    sub.add_argument("--issue", required=True, type=number)
+    sub.add_argument("--branch", required=True)
+    sub.add_argument("--worktree-path", required=True)
     for name in ("worktree", "worktree-check"):
         sub = commands.add_parser(name)
         sub.add_argument("--repo-root", required=True)
@@ -628,8 +686,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-COMMANDS = {"preflight": preflight, "worktree": worktree, "worktree-check": worktree_check,
-            "note": note, "plan-read": plan_read, "plan-note": plan_note, "read": read, "lane": lane}
+COMMANDS = {"preflight": preflight, "plan-preflight": plan_preflight, "worktree": worktree,
+            "worktree-check": worktree_check, "note": note, "plan-read": plan_read,
+            "plan-note": plan_note, "read": read, "lane": lane}
 
 
 def main(argv: list[str] | None = None) -> int:
