@@ -119,6 +119,7 @@
       packages = inputs.nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" ] (system: {
         agent-platform = import ./lib/agent-tools.nix {
           pkgs = platformPkgs system;
+          agentToolsDotnet = (dotnetSolution system).package;
           revision = {
             owner = "fagenorn";
             repo = "nix-config";

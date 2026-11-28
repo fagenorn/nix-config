@@ -355,6 +355,7 @@ agent-workflow-tests *args:
     tests/test_comment_lint.py \
     tests/test_cleanup_issue.py \
     tests/test_lint_time.py \
+    tests/test_job_time.py \
     tests/test_ruff_lint.py \
     tests/test_suite_source.py \
     tests/test_skipped_test_lint.py \
@@ -367,6 +368,7 @@ agent-workflow-tests *args:
     tests/test_cache_keepalive.py \
     tests/test_claude_account_routing.py \
     tests/test_branch_protection.py \
+    tests/test_dotnet_solution_job.py \
     tests/test_devenv_cache_ignored.py \
     tests/test_suite_part.py \
     tests/test_suite_runner.py \

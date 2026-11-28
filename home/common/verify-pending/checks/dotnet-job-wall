@@ -1,0 +1,4 @@
+#!/bin/sh
+# Verify check: the median wall time of the .NET Solution job over the first --runs green push runs of ci.yaml on
+# --branch from --merge on is under the committed budget. Exit 0 met, 1 not met, 75 not yet, 2 unreadable.
+PYTHONPATH=python exec python3 -B -m agent_tools.delivery.job_time observed "$@"

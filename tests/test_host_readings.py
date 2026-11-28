@@ -782,6 +782,7 @@ class RunReadsEachHostOnce(unittest.TestCase):
         "tests/test_host_readings.py": "the cache's own tests",
         "tests/test_branch_protection.py": "CI's Nix Eval job text, not an evaluation",
         "tests/test_verification_command.py": "CI's Nix Eval step text, not an evaluation",
+        "tests/test_dotnet_solution_job.py": "CI's Nix Eval step name, not an evaluation",
     }
 
     @staticmethod

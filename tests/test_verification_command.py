@@ -624,20 +624,59 @@ BASE_PLATFORM_READ = "\n".join([
     "jq -e '.compatibility.compatible' \"$RUNNER_TEMP/base-status.json\"",
 ])
 CHECKOUT, INSTALL = "actions/checkout@v4", "DeterminateSystems/nix-installer-action@v4"
+QUICK_INSTALL, NIX_CACHE = "nixbuild/nix-quick-install-action@v36", "nix-community/cache-nix-action@v7"
+DOTNET_FORMAT_PROOF = "\n".join([
+    "PYTHONPATH=python python3 -m agent_tools.delivery.dotnet_format_lint "
+    '--root "$GITHUB_WORKSPACE"',
+    "printf 'namespace AgentTools.Hosts;\\n\\npublic static class Planted\\n{\\n"
+    "public static int Value => 1;\\n}\\n' > dotnet/Hosts/Planted.cs",
+    "code=0",
+    "PYTHONPATH=python python3 -m agent_tools.delivery.dotnet_format_lint "
+    '--root "$GITHUB_WORKSPACE" 2> "$RUNNER_TEMP/format.err" || code=$?',
+    'cat "$RUNNER_TEMP/format.err"',
+    'test "$code" = 1',
+    "grep -qx 'dotnet-format-lint: dotnet format would change files' \"$RUNNER_TEMP/format.err\"",
+])
+DOTNET_GC_ROOTS = "\n".join([
+    'mkdir -p "$RUNNER_TEMP/gcroots"',
+    "nix build --out-link \"$RUNNER_TEMP/gcroots/package\" "
+    "'.#packages.x86_64-linux.agent-tools-dotnet'",
+    "nix build --out-link \"$RUNNER_TEMP/gcroots/package-inputs\" "
+    "'.#packages.x86_64-linux.agent-tools-dotnet.inputDerivation'",
+    "nix build --out-link \"$RUNNER_TEMP/gcroots/tests\" "
+    "'.#checks.x86_64-linux.agent-tools-dotnet-tests'",
+    "nix build --out-link \"$RUNNER_TEMP/gcroots/tests-inputs\" "
+    "'.#checks.x86_64-linux.agent-tools-dotnet-tests.inputDerivation'",
+])
 SETUP = ("not-lint", "runner setup")
 
 CI_STEP_CLASSES = {
     ("ci.yaml", "flake-checker", CHECKOUT): SETUP,
     ("ci.yaml", "flake-checker", INSTALL): SETUP,
     ("ci.yaml", "nix-eval", CHECKOUT): SETUP,
-    ("ci.yaml", "nix-eval", INSTALL): SETUP,
+    ("ci.yaml", "nix-eval", QUICK_INSTALL): SETUP,
+    ("ci.yaml", "nix-eval", NIX_CACHE): ("not-lint", "restores the .NET Solution job's Nix store"),
+    ("ci.yaml", "dotnet-solution", CHECKOUT): SETUP,
+    ("ci.yaml", "dotnet-solution", QUICK_INSTALL): SETUP,
+    ("ci.yaml", "dotnet-solution", NIX_CACHE):
+        ("not-lint", "restores the Nix store and saves it on a push to main"),
+    ("ci.yaml", "dotnet-solution", "nix build --no-link '.#packages.x86_64-linux.agent-tools-dotnet'"):
+        ("not-lint", "builds the .NET package"),
+    ("ci.yaml", "dotnet-solution",
+     "nix build --no-link --print-build-logs '.#checks.x86_64-linux.agent-tools-dotnet-tests'"):
+        ("not-lint", "runs the .NET tests"),
+    ("ci.yaml", "dotnet-solution", DOTNET_GC_ROOTS):
+        ("not-lint", "roots the .NET builds' outputs and inputs through the Nix store collection"),
+    ("ci.yaml", "dotnet-solution", DOTNET_FORMAT_PROOF):
+        ("not-lint", "proves the dotnet-format lint member fails a planted unformatted file"),
     ("ci.yaml", "agent-workflow-tests-shard", CHECKOUT): SETUP,
     ("ci.yaml", "agent-workflow-tests-shard", INSTALL): SETUP,
     ("ci.yaml", "agent-workflow-tests", CHECKOUT): SETUP,
     ("ci.yaml", "flake-checker", "DeterminateSystems/flake-checker-action@v5"):
         ("not-lint", "annotates flake.lock health and never fails a run"),
     ("ci.yaml", "nix-eval", CI_EVAL): ("not-lint", "evaluates a host configuration"),
-    ("ci.yaml", "nix-eval", "nix build --no-link '.#packages.x86_64-linux.agent-platform'"):
+    ("ci.yaml", "nix-eval",
+     "nix build --no-link --print-out-paths '.#packages.x86_64-linux.agent-platform'"):
         ("not-lint", "builds the platform package"),
     ("ci.yaml", "nix-eval", "nix eval --raw '.#packages.aarch64-darwin.agent-platform.drvPath'"):
         ("not-lint", "evaluates the macOS platform package"),
