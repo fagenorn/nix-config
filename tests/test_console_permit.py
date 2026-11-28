@@ -407,7 +407,7 @@ class JudgeTest(unittest.TestCase):
                 self.assertRefused(self.rerun, permit.DEPLOY_RERUN.format(run=55, event=event))
 
     def test_a_run_whose_failed_jobs_are_none_of_them_required_checks_is_rerun(self):
-        """#1991: the rerun changes no code and no production state, so a failed job need not be required."""
+        """The rerun changes no code and no production state, so a failed job need not be required."""
         for name, change in (("optional", {"failed": ["deploy-preview"]}),
                              ("two optional", {"failed": ["deploy-preview", "Late Optional"]})):
             with self.subTest(name):
