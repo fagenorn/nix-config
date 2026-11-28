@@ -534,6 +534,20 @@ class CommandSummaryTest(unittest.TestCase):
         self.assertEqual(self.summary(f"grep -f /dev/stdin x <<'EOF'\n{rm}\nEOF" + self.PAD)["scripts"],
                          [{"program": "grep", "lines": 1, "paths": ["/etc/nginx"]}])
 
+    def test_jq_or_yq_reading_its_program_from_standard_input_shows_a_script_line(self):
+        for program in ("jq -n -f -", "jq -n -f /dev/stdin", "jq -nf /dev/stdin", "jq --from-file -",
+                        "jq --from-file /dev/stdin", "jq --from-file=/dev/stdin", "yq -f -",
+                        "yq --from-file /dev/stdin"):
+            with self.subTest(program=program):
+                result = self.summary(f"{program} <<'EOF'\n$ENV\nEOF\n# " + "x" * 220)
+                self.assertEqual([(entry["program"], entry["lines"]) for entry in result["scripts"]],
+                                 [(program.split()[0], 1)])
+        for program in ("jq .", "jq -n -f prog.jq", "jq --from-file prog.jq", "yq .a", "yq -f prog.yq"):
+            with self.subTest(program=program):
+                result = self.summary(f"{program} <<'EOF'\n$ENV\nEOF" + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [])
+
     def test_a_versioned_interpreters_code_argument_is_a_script(self):
         for program, flag in (("ruby3.3", "-e"), ("php", "-r"), ("pypy3", "-c"), ("fish", "-c")):
             with self.subTest(program=program):

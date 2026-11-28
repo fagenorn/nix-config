@@ -76,6 +76,8 @@ _DATA_READERS = frozenset(
     "bunzip2 bzcat xz unxz xzcat tac rev nl fold fmt column paste comm diff od xxd hexdump md5sum sha1sum "
     "sha256sum shasum cksum".split())
 _PATTERN_FILE_READERS = frozenset({"grep", "egrep", "fgrep"})
+_PROGRAM_FILE_READERS = frozenset({"jq", "yq"})
+_STDIN_FILES = frozenset({"-", "/dev/stdin"})
 _VERSIONED_NAME = re.compile(r"([A-Za-z]+)(?:[-_]?[0-9][0-9._]*(?:-?dbg|[dmtu])?|-dbg)")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
 _COPIERS = frozenset({"cp", "mv", "ln", "install"})
@@ -452,7 +454,8 @@ class _Reader:
     @staticmethod
     def reads_data(program, arguments):
         """True for a program on the closed allowlist of plain-data readers of standard input; `grep` and
-        its kin only without a pattern file (`-f`, `--file`), which is code-like input."""
+        its kin only without a pattern file (`-f`, `--file`), and `jq` and `yq` only when their program file
+        (`-f`, `--from-file`) is standard input, both of which are code-like input."""
         name = posixpath.basename(program)
         if name not in _DATA_READERS:
             return False
@@ -461,6 +464,18 @@ class _Reader:
                 value = item.word.value
                 if value.startswith("--file") or (value.startswith("-") and not value.startswith("--")
                                                   and value != "-" and "f" in value.split("=", 1)[0]):
+                    return False
+        if name in _PROGRAM_FILE_READERS:
+            values = [item.word.value for item in arguments]
+            for index, value in enumerate(values):
+                if value.startswith("--from-file="):
+                    given = value.split("=", 1)[1]
+                elif index + 1 < len(values) and (value == "--from-file" or (
+                        value.startswith("-") and not value.startswith("--") and "f" in value)):
+                    given = values[index + 1]
+                else:
+                    continue
+                if given in _STDIN_FILES:
                     return False
         return True
 
