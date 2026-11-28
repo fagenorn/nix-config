@@ -8,10 +8,13 @@ from agent_tools.delivery import engine_session
 
 
 class Admission:
-    """Hands out the indexes of a call's items in list order, none once a fault is noted or the engine ends."""
+    """Hands out the indexes of a call's items in list order, none once a fault is noted or the engine ends.
 
-    def __init__(self, count: int) -> None:
+    A sequential admission also hands out none once told of a child end other than `done`."""
+
+    def __init__(self, count: int, sequential: bool = False) -> None:
         self._count = count
+        self._sequential = sequential
         self._next = 0
         self._stopped = False
         self._lock = threading.Lock()
@@ -23,6 +26,10 @@ class Admission:
             index = self._next
             self._next += 1
             return index
+
+    def ended(self, end: str) -> None:
+        if self._sequential and end != "done":
+            self.fail()
 
     def fail(self) -> None:
         with self._lock:

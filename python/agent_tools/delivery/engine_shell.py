@@ -1177,7 +1177,8 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
         _graded(run_dir, step, action.visit, outcome)
         return
     items = [None] if action.items is None else list(action.items)
-    admission = Admission(len(items))
+    sequential = step.get("sequential", False)
+    admission = Admission(len(items), sequential)
     entries: dict[int, dict] = {}
     errors: dict[int, Exception] = {}
 
@@ -1187,6 +1188,7 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
                 try:
                     entries[index] = _child(run_dir, table, run, step, action, items[index],
                                             index, len(items), scope)
+                    admission.ended(entries[index]["end"])
                 except Exception as error:
                     errors[index] = error
                     admission.fail()
@@ -1225,10 +1227,10 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
         drain()  # after a stop `reaping` has killed the sessions: this returns
     if errors:
         engine_session.raise_first([errors[index] for index in sorted(errors)])
-    if len(entries) != len(items):
+    ends = [entries[index] for index in sorted(entries)]
+    if len(entries) != len(items) and not (sequential and any(entry["end"] != "done" for entry in ends)):
         raise Fault(f"step {action.step} stops before its items are all run: "
                     "the engine is ending")
-    ends = [entries[index] for index in range(len(items))]
     outcome = engine_core.call_outcome([entry["end"] for entry in ends])
     engine_ledger.store_result(run_dir, step=action.step, visit=action.visit,
                                result={"items": ends, **engine_resume.returned(step, ends, child_visits)}, at=_now(),

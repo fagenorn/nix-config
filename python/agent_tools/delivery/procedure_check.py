@@ -32,7 +32,9 @@ requires one and no other step carries one); `agent`: `role`,
 `in` paths, only on a step whose `role` is in `WHOLE_SHELL_ROLES`); `decide`: `grader`; `group`: `members`, a non-empty list of
 objects with exactly `step` and `pass` (distinct strings); `call`: `procedure`,
 optional `each` (one of the step's `in` paths), `parallel` (an integer >= 1,
-only with `each`) and `returns` (only without `each`: a non-empty list of distinct `<step>.<member>` paths of the child
+only with `each`), `sequential` (`true`, only with `each` and never with `parallel`: the call runs its items one at a time, in
+list order, and admits no item after a child whose end is not `done`, so its `items` list the children that ran and its
+outcome is that of the child that stopped) and `returns` (only without `each`: a non-empty list of distinct `<step>.<member>` paths of the child
 procedure, never `run.<input>`, no two with the same member name and none named `items`; each member is published under its
 bare name on the call's result when the call ends `done`). A member a level does not define is `undefined_field`.
 
@@ -187,7 +189,7 @@ KIND_MEMBERS = {
     "agent": (("role", "prompt", "reply", "outcome_from"), ("worktree",)),
     "decide": (("grader",), ()),
     "group": (("members",), ()),
-    "call": (("procedure",), ("each", "parallel", "returns")),
+    "call": (("procedure",), ("each", "parallel", "sequential", "returns")),
 }
 
 
@@ -406,6 +408,13 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid("each must be one of the step's in paths.")
         if "parallel" in item and not (_is_int(item["parallel"]) and item["parallel"] >= 1 and "each" in item):
             invalid("parallel must be an integer >= 1 and needs each.")
+        if "sequential" in item:
+            if item["sequential"] is not True:
+                invalid("sequential must be true.")
+            if "each" not in item:
+                invalid("sequential needs each.")
+            if "parallel" in item:
+                invalid("sequential does not go with parallel.")
         if "returns" in item:
             _returns_shape(item, invalid)
 

@@ -923,6 +923,42 @@ class RefusalTableTest(unittest.TestCase):
                          set(procedure_check.DEFECTS))
 
 
+def _sequential_call(sequential: object, each: bool, parallel: int | None) -> Callable[[dict], None]:
+    """The toy's `children` call with `sequential` set, and with `each` and `parallel` as given."""
+    def change(toy: dict) -> None:
+        children = step(toy, "children")
+        children["sequential"] = sequential
+        if not each:
+            del children["each"]
+        if parallel is None:
+            del children["parallel"]
+        else:
+            children["parallel"] = parallel
+    return change
+
+
+class SequentialCallTest(unittest.TestCase):
+    def test_sequential_needs_true_each_and_no_parallel(self):
+        refused = [
+            ("yes", True, None, "sequential must be true."),
+            (True, False, None, "sequential needs each."),
+            (True, True, 2, "sequential does not go with parallel."),
+        ]
+        for sequential, each, parallel, detail in refused:
+            with self.subTest(detail):
+                directory = broken_copy(editing("toy", _sequential_call(sequential, each, parallel)))
+                code, out, _ = run_check("--procedures", str(directory))
+                document = json.loads(out)
+                self.assertEqual((code, document["verdict"]), (1, "refused"))
+                self.assertEqual([(r["step"], r["defect"], r["detail"]) for r in document["refusals"]],
+                                 [("children", "invalid_field", detail)])
+
+    def test_a_sequential_call_over_each_without_parallel_is_accepted(self):
+        directory = broken_copy(editing("toy", _sequential_call(True, True, None)))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
+
+
 class RefusalDetailTest(unittest.TestCase):
     def test_a_schema_outside_the_subset_names_the_schema_and_the_construct(self):
         directory = broken_copy(_editing_draft_reply(_summary_with_min_length))

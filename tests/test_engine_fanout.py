@@ -25,6 +25,7 @@ from unittest import mock
 from agent_tools.delivery import (
     engine_commands, engine_ledger, engine_resume, engine_session, engine_shell, engine_stop,
 )
+from agent_tools.delivery.engine_admission import Admission
 from tests.test_engine_deliver import EngineProject, step
 from tests.test_engine_session import (
     DRAFT_REPLY, RESULT_NORMAL, canned_result, copy_roles, install_stub,
@@ -72,12 +73,40 @@ def FAN(items_command: str, parallel: int) -> list[dict]:
     ]
 
 
+def sequential(steps: list[dict]) -> list[dict]:
+    """The same steps with the fan call running its items one at a time, stopping at the first that does not end done."""
+    fan = next(item for item in steps if item["id"] == "fan")
+    del fan["parallel"]
+    fan["sequential"] = True
+    return steps
+
+
 def fan_children(work: str = "standin-stamp") -> dict[str, dict]:
     return {"fan-child": child([
         {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": work,
          "in": ["run.item"], "on": {"ok": "judge", "failed": "child-stop", "refused": "child-stop"}},
         {"id": "judge", "stage": "building", "kind": "decide", "holds": "run", "grader": "toy-tally",
          "in": ["run.item"], "on": {"accept": "done", "revise": "child-stop"}}])}
+
+
+class AdmissionTest(unittest.TestCase):
+    def test_a_sequential_admission_stops_handing_out_indexes_after_an_end_other_than_done(self):
+        admission = Admission(3, sequential=True)
+        self.assertEqual(admission.take(), 0)
+        admission.ended("task")
+        self.assertIsNone(admission.take())
+
+    def test_a_sequential_admission_continues_after_done(self):
+        admission = Admission(3, sequential=True)
+        self.assertEqual(admission.take(), 0)
+        admission.ended("done")
+        self.assertEqual(admission.take(), 1)
+
+    def test_a_plain_admission_ignores_the_ends(self):
+        admission = Admission(3)
+        self.assertEqual(admission.take(), 0)
+        admission.ended("task")
+        self.assertEqual(admission.take(), 1)
 
 
 class WalkSpy:
@@ -375,6 +404,33 @@ class CallTest(unittest.TestCase):
         self.assertEqual([entry["end"] for entry in items], ["done", "child-stop", "done"])
         stopped = project.events(root.parent / items[1]["run"])[-1]
         self.assertEqual((stopped["event"], stopped["stop"]), ("stop_reached", "child-stop"))
+
+    def test_a_sequential_call_admits_no_item_after_a_child_that_stops(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(sequential(FAN("standin-items-mixed", 1)),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        (root,) = roots(project)
+        events = project.events(root)
+        self.assertEqual([e["outcome"] for e in graded(events, "fan")], ["child-stop"])
+        items = result(root, "fan.1.json")["items"]
+        self.assertEqual([entry["end"] for entry in items], ["done", "child-stop"])
+        self.assertEqual(len(children_of(project)), 2)
+        self.assertEqual([e["index"] for e in events if e["event"] == "call"], [0, 1])
+
+    def test_a_sequential_call_whose_children_all_end_done_runs_every_item_in_order(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(sequential(FAN("standin-items", 1)),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (root,) = roots(project)
+        calls = [e for e in project.events(root) if e["event"] == "call"]
+        self.assertEqual([c["index"] for c in calls], [0, 1, 2])
+        items = result(root, "fan.1.json")["items"]
+        self.assertEqual([entry["end"] for entry in items], ["done"] * 3)
+        self.assertEqual([entry["run"] for entry in items], [c["child"] for c in calls])
+        self.assertEqual(len(children_of(project)), 3)
 
     def test_a_call_without_each_runs_one_child(self):
         project = EngineProject(self)
