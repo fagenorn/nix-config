@@ -83,21 +83,6 @@ def direct_delivery(root, run_id, started, entered):
     write_run(root, f"{run_id}-d", started, events, "direct", parent=run_id)
 
 
-WRAPPER_DELIVERED = f"{CHECKS}/engine-direct-delivered"
-
-
-def delivered_root(root, label, started, done_at, *, lane="direct", landed=True, done=True, parent=None):
-    """A deliver root `label` that took `lane`, merged at `done_at` when `landed` and ended `run_done` when `done`."""
-    events = [entry(started, step="start"),
-              ("transition_taken", "lane", started, {"visit": 1, "outcome": lane, "to": "direct-lane"})]
-    if landed:
-        events.append(("transition_taken", "landing", done_at, {"visit": 1, "outcome": "done", "to": "closing"}))
-    write_run(root, label, started, events, "deliver", parent=parent)
-    if done:  # write_run adds a step member to every line, which a run_done line may not carry
-        with (Path(root) / rid(label) / "events.jsonl").open("a", encoding="utf-8") as ledger:
-            ledger.write(json.dumps({"event": "run_done", "at": stamp(done_at)}) + "\n")
-
-
 class PastSetupVerdictTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
@@ -386,7 +371,7 @@ class LedgerContractTest(unittest.TestCase):
                 self.assertEqual(got, wanted)
 
 
-class ActivatedRepo:
+class EngineDeliverPastSetupTest(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
@@ -412,8 +397,6 @@ class ActivatedRepo:
         log.append([("activation.finished", None, {"root": "/r", "commit": self.shas["C"], "ok": ok,
                                                    "reason": None, "next_step": None})])
 
-
-class EngineDeliverPastSetupTest(ActivatedRepo, unittest.TestCase):
     def test_no_qualifying_activation_is_not_yet(self):
         direct_delivery(self.runs, "r", HOUR, 2 * HOUR)
         self.activate(ok=False)
@@ -448,99 +431,6 @@ class EngineDeliverPastSetupTest(ActivatedRepo, unittest.TestCase):
                               "--log", str(self.store), "--repo-root", str(self.repo)])
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
         self.assertIn("verify-checks: runs_unreadable:", done.stderr)
-
-
-class EngineDirectDeliveredTest(ActivatedRepo, unittest.TestCase):
-    def delivered(self, now):
-        return verify_checks.engine_direct_delivered(
-            self.shas["S"], runs_root=self.runs, log=self.store, repo_root=self.repo, now=ANCHOR + now)
-
-    def test_a_direct_root_that_landed_and_ended_done_is_met(self):
-        self.activate()
-        delivered_root(self.runs, "r", HOUR, 2 * HOUR)
-        code, report = self.delivered(3 * HOUR)
-        self.assertEqual(code, 0)
-        self.assertEqual(report, {"met": True, "verdict": "met", "anchor": verify_checks._stamp(ANCHOR),
-                                  "run": rid("r"), "issue": 1, "at": verify_checks._stamp(ANCHOR + 2 * HOUR)})
-
-    def test_a_standard_lane_root_is_skipped(self):
-        self.activate()
-        delivered_root(self.runs, "r", HOUR, 2 * HOUR, lane="standard")
-        code, report = self.delivered(3 * HOUR)
-        self.assertEqual((code, report["verdict"], report["run"]), (75, "not_yet", None))
-        code, report = self.delivered(15 * DAY)
-        self.assertEqual((code, report["verdict"]), (1, "not_met"))
-
-    def test_a_direct_root_that_stopped_is_not_yet_then_not_met(self):
-        self.activate()
-        delivered_root(self.runs, "r", HOUR, 2 * HOUR, landed=False, done=False)
-        code, report = self.delivered(3 * HOUR)
-        self.assertEqual((code, report["verdict"]), (75, "not_yet"))
-        code, report = self.delivered(15 * DAY)
-        self.assertEqual((code, report["verdict"]), (1, "not_met"))
-
-    def test_a_done_after_fourteen_days_is_not_met(self):
-        self.activate()
-        delivered_root(self.runs, "r", HOUR, 15 * DAY)
-        code, report = self.delivered(16 * DAY)
-        self.assertEqual((code, report["verdict"]), (1, "not_met"))
-
-    def test_a_root_started_before_the_anchor_is_skipped(self):
-        self.activate()
-        delivered_root(self.runs, "r", -HOUR, 2 * HOUR)
-        code, report = self.delivered(3 * HOUR)
-        self.assertEqual((code, report["verdict"]), (75, "not_yet"))
-
-    def test_a_child_run_is_not_a_root(self):
-        self.activate()
-        delivered_root(self.runs, "c", HOUR, 2 * HOUR, parent="x")
-        write_run(self.runs, "x", HOUR, [entry(HOUR, step="start")], "deliver")
-        code, report = self.delivered(3 * HOUR)
-        self.assertEqual((code, report["verdict"]), (75, "not_yet"))
-
-    def test_no_qualifying_activation_is_not_yet(self):
-        self.activate(ok=False)
-        delivered_root(self.runs, "r", HOUR, 2 * HOUR)
-        code, report = self.delivered(3 * HOUR)
-        self.assertEqual((code, report["verdict"]), (75, "not_yet"))
-        self.assertIsNone(report["anchor"])
-
-    def test_a_later_root_counts_when_the_first_stopped(self):
-        self.activate()
-        delivered_root(self.runs, "a", HOUR, 2 * HOUR, landed=False, done=False)
-        delivered_root(self.runs, "b", 2 * HOUR, 3 * HOUR)
-        code, report = self.delivered(4 * HOUR)
-        self.assertEqual((code, report["run"]), (0, rid("b")))
-
-    def test_done_without_a_landing_done_is_not_met(self):
-        self.activate()
-        delivered_root(self.runs, "r", HOUR, 2 * HOUR, landed=False, done=True)
-        code, _ = self.delivered(15 * DAY)
-        self.assertEqual(code, 1)
-
-    def test_the_staged_wrapper_runs_from_the_root(self):
-        self.assertEqual(committed_mode(WRAPPER_DELIVERED), "100755")
-        self.activate()
-        delivered_root(self.runs, "r", HOUR, 2 * HOUR)
-        argv = [WRAPPER_DELIVERED, "--since", self.shas["S"], "--runs-root", str(self.runs),
-                "--log", str(self.store), "--repo-root", str(self.repo)]
-        met = run_from_root(argv)
-        self.assertEqual(met.returncode, 0, met.stderr)
-        self.assertTrue(json.loads(met.stdout)["met"])
-        unreadable = self.dir / "runs-file"
-        unreadable.write_text("x", encoding="utf-8")
-        argv[argv.index("--runs-root") + 1] = str(unreadable)
-        done = run_from_root(argv)
-        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
-        self.assertIn("runs_unreadable", done.stderr)
-
-    def test_a_root_the_ledger_refuses_is_skipped(self):
-        self.activate()
-        delivered_root(self.runs, "r", HOUR, 2 * HOUR)
-        with (self.runs / rid("r") / "events.jsonl").open("a", encoding="utf-8") as events:
-            events.write(json.dumps({"event": "run_done", "at": stamp(2 * HOUR), "step": "s"}) + "\n")
-        code, report = self.delivered(3 * HOUR)
-        self.assertEqual((code, report["verdict"]), (75, "not_yet"))
 
 
 if __name__ == "__main__":

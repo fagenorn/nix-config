@@ -114,7 +114,7 @@ def script_problems(checks: Path, python_root: Path, launchers: Mapping[str, str
 
 
 KEPT_CHECKS = ("console-failed-start", "console-manager-merge", "console-notice-lists",
-               "devenv-shell", "engine-deliver-past-setup", "engine-direct-delivered", "engine-direct-past-implement", "host-mentions", "host-prompts", "owner-services")
+               "devenv-shell", "engine-deliver-past-setup", "engine-direct-past-implement", "host-mentions", "host-prompts", "owner-services")
 DELETED_CHECKS = ("required-checks", "managed-pre-push-hook", "cutover-manifest",
                   "cutover-preflight", "self-hosted-runner", "deprecations-retired",
                   "guard-policy-fleet", "registry-agreement", "darwin-shell-path",

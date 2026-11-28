@@ -125,17 +125,6 @@ ledger reads them (`engine_run_evidence`): a runs root that cannot be listed (an
 named at or after the anchor's second that does not read as a run, is exit 2 (`runs_unreadable`, `run_unreadable`),
 never a verdict; a root whose events the ledger would not replay has no lane.
 
-`engine-direct-delivered --since SHA [--runs-root DIR] [--log PATH] [--repo-root DIR]`
-(`verify_checks.engine_direct_delivered`, issue 1549) is met when a direct-lane engine delivery after activation ended
-done with its pull request merged within 14 days of the activation. The anchor is found as `engine-direct-past-implement`
-finds it (none: `not_yet`, 75, with `anchor` null). A root counts when its `run.json` has procedure `deliver`, no `parent`
-and a `started` at or after the anchor's whole second, its first `lane` transition is `direct`, it has a `landing`
-transition with outcome `done` (the merge) and a `run_done` event, and that `run_done` is at or before anchor plus 14
-days; any such root meets it (0), not only the first. With none, it is not met (1) once the clock is past anchor plus
-14 days, else `not_yet` (75). A root whose events the ledger would not replay is skipped, never a verdict, and a runs
-root that cannot be listed is exit 2 (`runs_unreadable`). The report is `{"met", "verdict", "anchor", "run", "issue",
-"at"}`.
-
 `console-notice-lists --port N --notice PROJECT=N1,N2,... [--notice ...]` (`verify_checks.console_notice_lists`,
 issue 1291) reads `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a
 JSON object is `unreachable`, exit 75) and looks up each wanted project among the entries of `"type": "project"`,
@@ -1011,55 +1000,6 @@ def engine_deliver_past_setup(since: str, *, runs_root: Path | None = None, log:
                               now if now is not None else _utcnow())
 
 
-DELIVERED_WINDOW = timedelta(days=14)
-
-
-def _direct_done_at(run_dir: Path) -> datetime | None:
-    """When a direct-lane run ended done with its landing merged, else None.
-
-    None when the ledger would not replay the run (`engine_run_evidence.event` refuses a line)."""
-    try:
-        events = [engine_run_evidence.event(line) for line in engine_run_evidence.lines(run_dir)]
-    except ValueError:
-        return None
-    transitions = [event for event in events if event["event"] == "transition_taken"]
-    lane = next((event["outcome"] for event in transitions if event["step"] == "lane"), None)
-    landed = any(event["step"] == "landing" and event["outcome"] == "done" for event in transitions)
-    done = next((event for event in events if event["event"] == "run_done"), None)
-    if lane != "direct" or not landed or done is None:
-        return None
-    return parse_rfc3339_utc(done["at"])
-
-
-def delivered_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tuple[int, dict]:
-    """A direct-lane root from `anchor` on ended done with its pull request merged within the window."""
-    report = {"met": False, "verdict": "not_yet", "anchor": _stamp(anchor), "run": None, "issue": None,
-              "at": None}
-    end = anchor + DELIVERED_WINDOW
-    whole_second = anchor.replace(microsecond=0)  # the ledger keeps a run's start to the second
-    for started, run_id, run_dir, document in engine_run_evidence.runs(runs_root, whole_second):
-        if document.get("procedure") != "deliver" or "parent" in document or started < whole_second:
-            continue
-        done_at = _direct_done_at(run_dir)
-        if done_at is not None and done_at <= end:
-            return 0, {**report, "met": True, "verdict": "met", "run": run_id, "issue": document.get("issue"),
-                       "at": _stamp(done_at)}
-    if now > end:
-        return 1, {**report, "verdict": "not_met"}
-    return 75, report
-
-
-def engine_direct_delivered(since: str, *, runs_root: Path | None = None, log: Path | None = None,
-                            repo_root: Path = Path("."), now: datetime | None = None) -> tuple[int, dict]:
-    """A direct engine delivery after activation of `since` ended done with its pull request merged in time."""
-    store = log if log is not None else agent_platform.state_root() / "console" / "events.sqlite3"
-    anchor = _manager_merge_anchor(_log_rows(store, ("activation.finished",)), since, repo_root)
-    if anchor is None:
-        return 75, {"met": False, "verdict": "not_yet", "anchor": None, "run": None, "issue": None, "at": None}
-    return delivered_verdict(runs_root if runs_root is not None else agent_platform.engine_runs_root(), anchor,
-                             now if now is not None else _utcnow())
-
-
 def _proxy_answers(port: int, timeout: float) -> bool:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
@@ -1369,13 +1309,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     past_setup.add_argument("--runs-root", type=Path)
     past_setup.add_argument("--log", type=Path)
     past_setup.add_argument("--repo-root", type=Path, default=Path("."))
-    direct_delivered = checks.add_parser(
-        "engine-direct-delivered",
-        help="a direct-lane engine delivery after activation ended done with its pull request merged within 14 days")
-    direct_delivered.add_argument("--since", type=_merge_sha, required=True)
-    direct_delivered.add_argument("--runs-root", type=Path)
-    direct_delivered.add_argument("--log", type=Path)
-    direct_delivered.add_argument("--repo-root", type=Path, default=Path("."))
     notices = checks.add_parser(
         "console-notice-lists",
         help="issue 1291: the owner's notice for each project names every one of its issues")
@@ -1431,15 +1364,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             code, report = engine_deliver_past_setup(args.since, runs_root=args.runs_root, log=args.log,
                                                      repo_root=args.repo_root)
-        except (ToolError, GitError, engine_run_evidence.EvidenceError) as error:
-            print(f"verify-checks: {getattr(error, 'kind', 'git_error')}: {error}", file=sys.stderr)
-            return 2
-        print(json.dumps(report, sort_keys=True))
-        return code
-    if args.check == "engine-direct-delivered":
-        try:
-            code, report = engine_direct_delivered(args.since, runs_root=args.runs_root, log=args.log,
-                                                   repo_root=args.repo_root)
         except (ToolError, GitError, engine_run_evidence.EvidenceError) as error:
             print(f"verify-checks: {getattr(error, 'kind', 'git_error')}: {error}", file=sys.stderr)
             return 2
