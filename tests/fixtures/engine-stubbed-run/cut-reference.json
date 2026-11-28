@@ -1,0 +1,47 @@
+{
+  "end": "done",
+  "state": {
+    "issue state": "closed",
+    "issue labels": [],
+    "issues created": 0,
+    "comments": [
+      "claim",
+      "end"
+    ],
+    "live claims": 0,
+    "released claims": 1,
+    "lock refs": [],
+    "pull requests": [
+      [
+        1,
+        "MERGED",
+        "issue-41-add-a-greeting"
+      ]
+    ],
+    "main change": [
+      ":000000 100644 0000000000000000000000000000000000000000 3c811f2579089eb29004a4144e86b2404a8a6e93 A\tfixture/farewell.py"
+    ],
+    "main subjects": [
+      "Merge remote-tracking branch 'origin/issue-41-add-a-greeting'",
+      "stub change"
+    ],
+    "local main at origin": true,
+    "branch on origin": false,
+    "local branches": [
+      "refs/heads/adopt-*",
+      "refs/heads/main"
+    ],
+    "worktree": false
+  },
+  "effects": {
+    "comment posted": 2,
+    "issue created": 0,
+    "pull request created": 1,
+    "pull request merged": 1
+  },
+  "fresh_steps": {
+    "applies": 1,
+    "implement": 1,
+    "lite-review": 1
+  }
+}

@@ -17,9 +17,10 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.delivery import engine_ledger, engine_resume, engine_session, engine_stop
+from agent_tools.delivery import engine_core, engine_ledger, engine_resume, engine_session, engine_stop
 from tests.process_liveness import process_alive
 from tests.test_engine_continue import gated
 from tests.test_engine_deliver import EngineProject, run_continued, shape, start_deliver, step
@@ -643,6 +644,28 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(stored["tokens"], {"input": 13, "cache_write": 25, "cache_read": 37, "output": 49})
         self.assertAlmostEqual(stored["wall_seconds"], 13.845)
 
+    def test_an_agent_result_published_before_its_event_is_recorded_with_its_use(self):
+        log = install_answers(self.project, [self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
+        last = next(i for i, line in enumerate(lines) if json.loads(line)["event"] == "result_stored")
+        original = json.loads(lines[last])
+        for member in ("turns", "wall_seconds", "spend_usd"):
+            self.assertTrue(original[member], member)
+        self.assertIn("startup_seconds", original)
+        self.assertTrue(any(original["tokens"].values()))
+        (run / "events.jsonl").write_text("".join(lines[:last]), encoding="utf-8")
+
+        second = self.project.deliver(procedures)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        (stored,) = [e for e in self.project.events(run) if e["event"] == "result_stored"]
+        self.assertEqual(stored, original)
+        self.assertEqual(len(self.records(log)), 1)
+
     def test_a_second_interruption_resumes_again_under_the_next_attempt(self):
         log = install_answers(self.project, [self.hang(), self.hang(), self.normal()])
         procedures = one_step(self.project)
@@ -792,6 +815,182 @@ class ResumeTest(unittest.TestCase):
         self.assertNotIn("--resume", records[1]["argv"])
         self.assertEqual(self.entered(run), [1, 2])
         self.assertEqual(len(run_continued(self.project.events(run))), 1)
+
+
+AT = "2026-11-21T16:02:31Z"
+ZERO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
+
+
+class AdoptStagedTest(unittest.TestCase):
+    """`engine_resume.adopt_staged` over a run directory a cut left with a result file and its staged event."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = engine_ledger.create_run(
+            project="example/project", issue=1511, procedure="toy",
+            procedures_dir=Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures",
+            platform_revision="0" * 40, host="host-a", inputs={"issue": 1511},
+            now=datetime(2026, 11, 21, tzinfo=timezone.utc), token="a1b2", root=Path(self.tmp.name))
+
+    def enter(self, step_id: str, visit: int) -> None:
+        engine_ledger.append_event(self.run, {"event": "step_entered", "at": AT, "step": step_id,
+                                              "visit": visit, "stage": "setup"})
+
+    def store(self, step_id: str, visit: int, **overrides) -> None:
+        arguments = dict(result={"verdict": "ok"}, at="2026-11-21T16:02:40Z", wall_seconds=0.0,
+                         turns=0, tokens=dict(ZERO_TOKENS), spend_usd=0)
+        arguments.update(overrides)
+        engine_ledger.store_result(self.run, step=step_id, visit=visit, **arguments)
+
+    def cut_before_result(self) -> list[dict]:
+        """Truncate the ledger before its last `result_stored`, leaving the result file and the staged event."""
+        path = self.run / "events.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        last = max(i for i, line in enumerate(lines) if json.loads(line)["event"] == "result_stored")
+        path.write_text("".join(lines[:last]), encoding="utf-8")
+        return engine_ledger.replay(path)
+
+    def events(self) -> list[dict]:
+        return engine_ledger.replay(self.run / "events.jsonl")
+
+    def command(self, step_id: str, visit: int) -> engine_core.RunCommand:
+        return engine_core.RunCommand(step_id, visit, "c", None, ())
+
+    def test_a_pending_visits_staged_result_is_recorded_as_staged(self):
+        self.enter("a", 1)
+        self.store("a", 1, outcome="made", head="1" * 40, wall_seconds=2.5, turns=0,
+                   tokens={"input": 1, "cache_write": 2, "cache_read": 3, "output": 4}, spend_usd=0.25)
+        ledger = self.cut_before_result()
+        staged = engine_ledger.staged_event(self.run, "a", 1)
+        self.assertEqual(staged["spend_usd"], 0.25)
+
+        adopted = engine_resume.adopt_staged(self.run, ledger, self.command("a", 1))
+
+        self.assertEqual(self.events()[len(ledger):], [staged])
+        self.assertEqual(adopted, self.events())
+
+    def test_a_reply_whose_own_field_is_bound_keeps_its_staged_outcome(self):
+        self.enter("draft", 1)
+        self.store("draft", 1, result={"bound": "done"}, outcome="done")
+        ledger = self.cut_before_result()
+        action = engine_core.StartSession("draft", 1, "r", "p.md", "r.reply.json", ())
+
+        engine_resume.adopt_staged(self.run, ledger, action)
+
+        self.assertEqual(self.events()[-1]["outcome"], "done")
+
+    def test_a_result_file_with_no_staged_event_is_not_adopted(self):
+        self.enter("a", 1)
+        self.store("a", 1, outcome="made")
+        ledger = self.cut_before_result()
+        engine_ledger.staged_path(self.run, "a", 1).unlink()
+
+        adopted = engine_resume.adopt_staged(self.run, ledger, self.command("a", 1))
+
+        self.assertIs(adopted, ledger)
+        self.assertEqual(self.events(), ledger)
+
+    def test_an_orphan_of_a_rewound_visit_is_not_adopted(self):
+        self.enter("a", 1)
+        self.store("a", 1, outcome="made")
+        self.cut_before_result()
+        engine_ledger.append_event(self.run, {"event": "run_continued", "at": AT, "step": "a", "visit": 1})
+        self.enter("a", 2)
+        ledger = self.events()
+
+        adopted = engine_resume.adopt_staged(self.run, ledger, self.command("a", 2))
+
+        self.assertIs(adopted, ledger)
+        self.assertEqual(self.events(), ledger)
+
+    def test_a_waiting_group_members_staged_result_is_recorded(self):
+        self.enter("g", 1)
+        self.enter("m", 1)
+        self.store("m", 1, outcome="made")
+        ledger = self.cut_before_result()
+        staged = engine_ledger.staged_event(self.run, "m", 1)
+        action = engine_core.RunGroup("g", 1, (self.command("m", 1),))
+
+        engine_resume.adopt_staged(self.run, ledger, action)
+
+        self.assertEqual(self.events()[len(ledger):], [staged])
+
+    def test_a_pending_action_re_enters_its_own_visit_only_when_entered(self):
+        action = self.command("a", 1)
+        self.enter("a", 1)
+        self.assertEqual(engine_resume.pending_reentry(action, self.events()),
+                         engine_core.Reentry("a", 1, ()))
+        self.assertIsNone(engine_resume.pending_reentry(action, []))
+
+
+class UnchangedReadTest(unittest.TestCase):
+    """`engine_resume.unchanged` over a read step whose stored result a later step consumes field by field."""
+
+    PROCEDURE = {"format": 1, "inputs": ["issue"], "stops": {},
+                 "steps": [{"id": "r", "stage": "setup", "kind": "command", "command": "c", "holds": "read",
+                            "in": ["run.issue"], "on": {"clear": "done", "failed": "done", "refused": "done"}}]}
+    STORED = {"verdict": "clear", "issue_text": "the issue as first read", "branch": "issue-1-a"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = engine_ledger.create_run(
+            project="example/project", issue=1, procedure="toy",
+            procedures_dir=Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures",
+            platform_revision="0" * 40, host="host-a", inputs={"issue": 1},
+            now=datetime(2026, 11, 21, tzinfo=timezone.utc), token="a1b2", root=Path(self.tmp.name))
+        engine_ledger.append_event(self.run, {"event": "step_entered", "at": AT, "step": "r", "visit": 1,
+                                              "stage": "setup"})
+        engine_ledger.store_result(self.run, step="r", visit=1, result=self.STORED, at=AT, wall_seconds=0.0,
+                                   turns=0, tokens=dict(ZERO_TOKENS), spend_usd=0, outcome="clear")
+
+    def read_again(self, result: dict, outcome: str = "clear") -> bool:
+        ran = SimpleNamespace(timed_out=False, outcome=outcome, result=result)
+        return engine_resume.unchanged(self.PROCEDURE, {"issue": 1}, engine_ledger.replay(self.run / "events.jsonl"),
+                                       ("r",), run_dir=self.run, events=lambda part: [],
+                                       rerun=lambda pending: ran)
+
+    def test_a_read_that_answers_with_the_outcome_and_result_it_stored_is_unchanged(self):
+        self.assertTrue(self.read_again(dict(self.STORED)))
+
+    def test_a_read_that_keeps_its_outcome_but_changes_a_result_field_is_changed(self):
+        for field, value in (("issue_text", "the issue as edited"), ("branch", "issue-1-b")):
+            with self.subTest(field=field):
+                self.assertFalse(self.read_again({**self.STORED, field: value}))
+
+    def test_a_read_whose_quoted_claim_was_only_renewed_by_the_run_is_unchanged(self):
+        claim = "<!-- agent:claim v1 issue=1 holder=h/1 branch=issue-1-a renewed={} -->\nClaimed by h/1."
+        text = "# Title\n\nBody\n\n## Comment 1\n\n" + claim
+        run = engine_ledger.create_run(
+            project="example/project", issue=2, procedure="toy",
+            procedures_dir=Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures",
+            platform_revision="0" * 40, host="host-a", inputs={"issue": 2},
+            now=datetime(2026, 11, 22, tzinfo=timezone.utc), token="a1b2", root=Path(self.tmp.name))
+        engine_ledger.append_event(run, {"event": "step_entered", "at": AT, "step": "r", "visit": 1,
+                                         "stage": "setup"})
+        engine_ledger.store_result(run, step="r", visit=1, result={**self.STORED, "issue_text": text.format(1)},
+                                   at=AT, wall_seconds=0.0, turns=0, tokens=dict(ZERO_TOKENS), spend_usd=0,
+                                   outcome="clear")
+        ledger = engine_ledger.replay(run / "events.jsonl")
+
+        def again(issue_text: str) -> bool:
+            ran = SimpleNamespace(timed_out=False, outcome="clear",
+                                  result={**self.STORED, "issue_text": issue_text})
+            return engine_resume.unchanged(self.PROCEDURE, {"issue": 2}, ledger, ("r",), run_dir=run,
+                                           events=lambda part: [], rerun=lambda pending: ran)
+
+        self.assertTrue(again(text.format(7)))
+        self.assertFalse(again(text.format(7).replace("Body", "Edited body")))
+        self.assertFalse(again(text.format(7).replace("branch=issue-1-a", "branch=issue-1-b")))
+
+    def test_a_read_that_changes_its_outcome_is_changed(self):
+        self.assertFalse(self.read_again(dict(self.STORED), outcome="failed"))
+
+    def test_a_read_whose_stored_result_cannot_be_read_is_changed(self):
+        (self.run / "results" / "r.1.json").write_text("{", encoding="utf-8")
+
+        self.assertFalse(self.read_again(dict(self.STORED)))
 
 
 class DeniedRecordTest(unittest.TestCase):

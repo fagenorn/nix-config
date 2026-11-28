@@ -1,0 +1,30 @@
+# Runs the full cut sweep: the stubbed delivery cut after every ledger event and result file, then continued.
+# Agent Workflow Tests runs the sampled chain on every change; this job is no required context.
+name: Cut Sweep
+
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cut-sweep:
+    name: Cut Sweep ${{ matrix.slice }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v4
+      - name: Run one slice of the full cut sweep
+        env:
+          ENGINE_CUT_SWEEP_SLICE: ${{ matrix.slice }}/4
+        run: WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just --command just engine-cut-sweep
