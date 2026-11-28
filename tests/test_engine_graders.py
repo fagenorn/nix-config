@@ -7,7 +7,7 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
-from agent_tools.delivery import lane_rule
+from agent_tools.delivery import acceptance_criteria, lane_rule
 from agent_tools.delivery.engine_graders import GRADERS, NON_CODE_KINDS, dropped
 
 TIER = "fast"
@@ -253,6 +253,13 @@ class GraderTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual({e for n, _, e in self.GRADER_CASES if n == name},
                                  set(GRADERS[name].outcomes))
+
+    def test_a_heading_with_a_trailing_colon_opens_the_acceptance_criteria_section(self):
+        for heading in ("## Acceptance criteria:", "### acceptance criteria :", "## Acceptance criteria: ##"):
+            with self.subTest(heading=heading):
+                body = f"## Problem\n\nx\n\n{heading}\n\n- [ ] [human] One\n"
+                self.assertEqual([c.text for c in acceptance_criteria.acceptance_criteria(body)], ["One"])
+        self.assertEqual(acceptance_criteria.acceptance_criteria("## Acceptance criteria: none\n\n- [ ] One\n"), [])
 
     def test_the_lite_tally_counts_an_ungraded_code_criterion_as_a_finding(self):
         results = {"lite-review.verdict": "pass", "lite-review.findings": [],

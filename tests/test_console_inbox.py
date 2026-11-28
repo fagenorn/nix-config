@@ -745,13 +745,6 @@ class HeldReviewTest(unittest.TestCase):
         kept = ac_body("- [ ] [human] One", "  ```", "", "  - [ ] [code] inner", "  ```", "- [ ] [human] Two")
         self.assertEqual([c.text for c in inbox.acceptance_criteria(kept)], ["One", "Two"])
 
-    def test_a_heading_with_a_trailing_colon_opens_the_section(self):
-        for heading in ("## Acceptance criteria:", "### acceptance criteria :", "## Acceptance criteria: ##"):
-            with self.subTest(heading=heading):
-                body = f"## Problem\n\nx\n\n{heading}\n\n- [ ] [human] One\n"
-                self.assertEqual([c.text for c in inbox.acceptance_criteria(body)], ["One"])
-        self.assertEqual(inbox.acceptance_criteria("## Acceptance criteria: none\n\n- [ ] One\n"), [])
-
     def test_a_heading_inside_a_list_item_does_not_end_the_section(self):
         body = ac_body("- [ ] [human] One", "  ### Details", "  more", "- [ ] [evidence] Two")
         self.assertEqual([(c.kind, c.text) for c in inbox.acceptance_criteria(body)],
