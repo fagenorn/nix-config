@@ -131,9 +131,11 @@ done with its pull request merged within 14 days of the activation. The anchor i
 finds it (none: `not_yet`, 75, with `anchor` null). A root counts when its `run.json` has procedure `deliver`, no `parent`
 and a `started` at or after the anchor's whole second, its first `lane` transition is `direct`, it has a `landing`
 transition with outcome `done` (the merge) and a `run_done` event, and that `run_done` is at or before anchor plus 14
-days; any such root meets it (0), not only the first. With none, it is not met (1) once the clock is past anchor plus
-14 days, else `not_yet` (75). A root whose events the ledger would not replay is skipped, never a verdict, and a runs
-root that cannot be listed is exit 2 (`runs_unreadable`). The report is `{"met", "verdict", "anchor", "run", "issue",
+days; and it is the newest root of its issue by `sequence` (then run id), the one `engine status` reads, so an older
+success under a newer root never counts. Any such root meets it (0), not only the first. With none, it is not met (1)
+once the clock is past anchor plus 14 days, else `not_yet` (75). A root whose events the ledger's reader would refuse
+(every member validated as `engine_run_evidence.event` does) is skipped, never a verdict, and a runs root that cannot
+be listed is exit 2 (`runs_unreadable`). The report is `{"met", "verdict", "anchor", "run", "issue",
 "at"}`.
 
 `console-notice-lists --port N --notice PROJECT=N1,N2,... [--notice ...]` (`verify_checks.console_notice_lists`,
@@ -1032,13 +1034,21 @@ def _direct_done_at(run_dir: Path) -> datetime | None:
 
 
 def delivered_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tuple[int, dict]:
-    """A direct-lane root from `anchor` on ended done with its pull request merged within the window."""
+    """An issue's newest root, as `engine status` reads it, took the direct lane from `anchor` on and ended done
+    with its pull request merged within the window; an older root of an issue never counts."""
     report = {"met": False, "verdict": "not_yet", "anchor": _stamp(anchor), "run": None, "issue": None,
               "at": None}
     end = anchor + DELIVERED_WINDOW
     whole_second = anchor.replace(microsecond=0)  # the ledger keeps a run's start to the second
-    for started, run_id, run_dir, document in engine_run_evidence.runs(runs_root, whole_second):
-        if document.get("procedure") != "deliver" or "parent" in document or started < whole_second:
+    newest: dict = {}  # per issue the root `engine status` reads: the greatest sequence, then run id
+    for run in engine_run_evidence.runs(runs_root, whole_second):
+        document = run[3]
+        if "parent" not in document:
+            key = (document["sequence"], run[1])
+            if document["issue"] not in newest or key > newest[document["issue"]][0]:
+                newest[document["issue"]] = (key, run)
+    for _, (started, run_id, run_dir, document) in sorted(newest.values(), key=lambda pair: pair[1][:2]):
+        if document.get("procedure") != "deliver" or started < whole_second:
             continue
         done_at = _direct_done_at(run_dir)
         if done_at is not None and done_at <= end:

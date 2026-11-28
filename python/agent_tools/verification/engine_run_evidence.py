@@ -11,6 +11,7 @@ ledger would refuse.
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +47,12 @@ EVENT_MEMBERS = {
 EVENT_OPTIONAL = {"result_stored": ("head", "outcome", "startup_seconds"),"run_continued": ("step", "visit")}
 
 
+ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
+WAITS = ("usage-limit", "host-slot", "lock", "checks")
+TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
+HEAD_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
 class EvidenceError(Exception):
     """The evidence could not be read: `kind` is the label a check reports."""
 
@@ -56,6 +63,38 @@ class EvidenceError(Exception):
 
 def _int(value: object, least: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= least
+
+
+def _name(value: object) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _instant(value: object) -> bool:
+    try:
+        parse_rfc3339_utc(value)  # type: ignore[arg-type]
+    except ValueError:
+        return False
+    return True
+
+
+def _text(pattern: re.Pattern[str]):
+    return lambda value: isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _amount(value: object) -> bool:
+    return (_int(value, 0) or isinstance(value, float) and math.isfinite(value) and value >= 0)
+
+
+# The check of each member the ledger validates by name; any other member is a non-empty string.
+MEMBER_CHECKS = {
+    "at": _instant, "started": _instant, "until": lambda v: v is None or _instant(v),
+    "step": _text(NAME_RE), "visit": lambda v: _int(v, 1), "attempt": lambda v: _int(v, 1),
+    "pid": lambda v: _int(v, 1), "child": _text(RUN_ID_RE), "index": lambda v: _int(v, 0),
+    "items": lambda v: _int(v, 1), "turns": lambda v: _int(v, 0), "wall_seconds": _amount,
+    "spend_usd": _amount, "startup_seconds": _amount,
+    "tokens": lambda v: isinstance(v, dict) and set(v) == TOKEN_COUNTS and all(_int(n, 0) for n in v.values()),
+    "head": _text(HEAD_RE), "stage": lambda v: v in STAGES, "role": lambda v: v in ROLES,
+    "need": lambda v: v in NEEDS, "wait": lambda v: v in WAITS, "result": _name}
 
 
 def _strict(text: str) -> object:
@@ -127,7 +166,8 @@ def lines(run_dir: Path) -> list[bytes]:
 def event(line: bytes) -> dict:
     """The event one line holds, `ValueError` when the ledger would refuse it.
 
-    Its members are exactly those its type carries; each member a check reads is validated as the ledger does."""
+    Its members are exactly those its type carries and each is validated as the ledger does, so a line the status
+    reader refuses is never evidence."""
     loaded = _strict(line.decode("utf-8"))
     kind = loaded.get("event") if isinstance(loaded, dict) else None
     if kind not in EVENT_MEMBERS:
@@ -135,13 +175,13 @@ def event(line: bytes) -> dict:
     required = {"event", "at", *EVENT_MEMBERS[kind]}
     if not required <= set(loaded) <= required | set(EVENT_OPTIONAL.get(kind, ())):
         raise ValueError(f"{kind} does not have exactly its members")
-    parse_rfc3339_utc(loaded["at"])
-    checks = {
-        "step": lambda v: isinstance(v, str) and NAME_RE.fullmatch(v), "visit": lambda v: _int(v, 1),
-        "stage": lambda v: v in STAGES, "need": lambda v: v in NEEDS,
-        "stop": lambda v: isinstance(v, str) and v != "", "outcome": lambda v: isinstance(v, str) and v != "",
-        "to": lambda v: isinstance(v, str) and v != ""}
-    for member, valid in checks.items():
-        if member in loaded and not valid(loaded[member]):
+    if kind == "run_continued" and "visit" in loaded and "step" not in loaded:
+        raise ValueError("run_continued names a visit without a step")
+    for member, value in loaded.items():
+        if member != "event" and not MEMBER_CHECKS.get(member, _name)(value):
             raise ValueError(f"{member} of {kind} is not valid")
+    if "result" in loaded and loaded["result"] != f"results/{loaded['step']}.{loaded['visit']}.json":
+        raise ValueError("result does not name results/<step>.<visit>.json")
+    if kind == "call" and loaded["index"] >= loaded["items"]:
+        raise ValueError("call index is not below items")
     return loaded
