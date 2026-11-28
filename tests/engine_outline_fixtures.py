@@ -28,7 +28,7 @@ TWO_CRITERIA_BODY = ("Add a greet() function to the fixture module, next to `sec
 
 
 def with_reads(entry: dict, worktree) -> dict:
-    """`entry` (a reply, or an entry of the stub's `{"reply": ...}` form) with the planner reads of `READS` in `worktree`."""
+    """`entry` (a reply, or a stub `{"reply": ...}` entry) with the planner reads of `READS` in `worktree`."""
     shaped = copy.deepcopy(entry) if "reply" in entry else {"reply": copy.deepcopy(entry)}
     shaped["reads"] = [path.replace("<worktree>", str(worktree)) for path in READS]
     return shaped

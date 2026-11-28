@@ -77,7 +77,7 @@ def FAN(items_command: str, parallel: int) -> list[dict]:
 
 
 def sequential(steps: list[dict]) -> list[dict]:
-    """The same steps with the fan call running its items one at a time, stopping at the first that does not end done."""
+    """The same steps with the fan call running its items in order, stopping at the first not ending done."""
     fan = next(item for item in steps if item["id"] == "fan")
     del fan["parallel"]
     fan["sequential"] = True
