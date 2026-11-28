@@ -16,10 +16,14 @@ below, `{"read": False}` and never a partial summary; otherwise exactly
 removed), `outside` the touched paths that are not inside `root` (the normalized absolute path when it
 can be placed, else the word as written), `scripts` the interpreter code and here-documents, in text
 order. A here-document reaches its program unchanged only through `cat` without a file operand or option
-and `tee` writing only plain files, none of them standard output, with no redirection on either command;
-through any other feeder (`base64 -d`, `tr`, `cat x.sh`) the script's text is not known, and its entry is
-`{"program": str, "lines": None, "paths": []}`: no line count and no path is claimed. Every list is in
-first-seen order without duplicates. With no absolute `root` every path is outside.
+and `tee` writing only literal plain files (relative ones placed under the tracked working directory; an
+unquoted glob, an expansion or an unplaceable one is unknown), none of them standard output, with no
+redirection on either command and no `|&` link; through any other feeder (`base64 -d`, `tr`, `cat x.sh`)
+the script's text is not known, and its entry is `{"program": str, "lines": None, "paths": []}`: no line
+count and no path is claimed. Only text on standard input counts: `3<<EOF` and `{v}<<EOF` are not input.
+Text is also unknown when a pipe and a here-document or here-string both feed one standard input (bash
+keeps the text, zsh with MULTIOS reads both), so only the head of a pipeline may supply known text. Every
+list is in first-seen order without duplicates. With no absolute `root` every path is outside.
 
 The grammar it reads, one left-to-right pass. Blanks are space and tab (a backslash before a newline is
 one); a `#` that begins a word starts a comment. Separators are newline, `;`, `&&`, `||`, `|`, `|&` and
@@ -65,6 +69,8 @@ _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _WORD_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*=")
 _NAME_SPLIT = re.compile(r"[\s'\"`()\[\]{},;=<>|&]+")
 _COPY_TARGET = re.compile(r"[0-9]+-?|-")
+_FD_NUMBER = re.compile(r"[0-9]+")
+_FD_NAME = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 _CLUSTER = re.compile(r"-[A-Za-z]+")
 _CLUSTER_SIGNED = re.compile(r"[-+][A-Za-z]+")
 _COMMA_COLON = re.compile(r"[,:]")
@@ -122,6 +128,10 @@ class _Word:
         return bool(marks) and text.find("}", min(marks)) >= 0
 
     @property
+    def glob(self):
+        return any(char in self.unquoted for char in "*?[")
+
+    @property
     def text(self):
         return any(char in self.value for char in " \t\n")
 
@@ -133,16 +143,22 @@ class _Word:
 class _Item:
     """One word, redirection or here-document of a simple command, in text order."""
 
-    __slots__ = ("kind", "word", "op", "role", "written", "body", "strip")
+    __slots__ = ("kind", "word", "op", "fd", "role", "written", "body", "strip")
 
-    def __init__(self, kind, word, op=""):
+    def __init__(self, kind, word, op="", fd=None):
         self.kind = kind
         self.word = word
         self.op = op
+        self.fd = fd
         self.role = "arg"
         self.written = False
         self.body = None
         self.strip = False
+
+    @property
+    def on_stdin(self):
+        """True unless a descriptor number (`3<<EOF`) or a named descriptor (`{v}<<EOF`) was written first."""
+        return self.fd is None or self.fd == 0
 
 
 def is_long(command):
@@ -249,18 +265,18 @@ def _scan(text):
                 return operator, at + len(operator)
         raise _Refuse("operator")
 
-    def redirect(at):
+    def redirect(at, fd=None):
         operator, at = operator_at(at)
         at = blanks(at)
         if at >= size or text[at] in "\n;&|<>()":
             raise _Refuse("redirection without a target")
         target, at = word_at(at)
         if operator in ("<<", "<<-"):
-            item = _Item("heredoc", target, operator)
+            item = _Item("heredoc", target, operator, fd)
             item.strip = operator == "<<-"
             pending.append(item)
         else:
-            item = _Item("redir", target, operator)
+            item = _Item("redir", target, operator, fd)
         items.append(item)
         return at
 
@@ -310,14 +326,20 @@ def _scan(text):
         elif char in "&|" and not text.startswith("&>", at):
             end_command()
             follow = text[at + 1:at + 2]
-            pipe_next = char == "|" and follow != "|"
+            pipe_next = ("|&" if follow == "&" else "|") if char == "|" and follow != "|" else False
             at += 2 if follow in (("&", "|") if char == "|" else ("&",)) else 1
         elif char in "<>&":
             at = redirect(at)
         else:
             word, at = word_at(at)
-            if at < size and text[at] in "<>" and word.value.isdigit() and not word.quoted:
-                at = redirect(at)
+            descriptor = None
+            if at < size and text[at] in "<>" and not word.quoted:
+                if _FD_NUMBER.fullmatch(word.value):
+                    descriptor = int(word.value)
+                elif _FD_NAME.fullmatch(word.value):
+                    descriptor = word.value
+            if descriptor is not None:
+                at = redirect(at, descriptor)
             else:
                 items.append(_Item("word", word))
     if pending:
@@ -383,7 +405,8 @@ class _Reader:
         chain = []
         for items, fed in zip(commands, piped):
             chain = chain if fed else []
-            chain.append((items, self.command(items, list(chain))))
+            merged = fed == "|&"
+            chain.append((items, self.command(items, list(chain), merged), merged))
         return {"read": True, "runs": list(self.runs), "writes": list(self.writes),
                 "outside": list(self.outside), "scripts": self.scripts}
 
@@ -514,9 +537,12 @@ class _Reader:
 
     @staticmethod
     def stdin_texts(items):
-        """The here-document and here-string texts of a command: (text, line count)."""
+        """The here-document and here-string texts a command reads as standard input: (text, line count).
+        One written on another descriptor (`3<<EOF`, `{v}<<EOF`) is not standard input."""
         texts = []
         for item in items:
+            if not item.on_stdin:
+                continue
             if item.kind == "heredoc":
                 texts.append(("\n".join(item.body), len(item.body)))
             elif item.kind == "redir" and item.op == "<<<":
@@ -533,20 +559,20 @@ class _Reader:
             first += 1
         return first
 
-    @classmethod
-    def passes_on(cls, chain):
+    def passes_on(self, chain):
         """True when the first command of `chain` hands its here-document text, unchanged and once, to the
         end of the chain: each command is a `cat` with no operand but `-` or a `tee` whose operands are
-        plain files other than standard output, none redirects its input or output, and only the first
-        has its own text."""
-        for at, (items, _) in enumerate(chain):
-            if at and cls.stdin_texts(items):
+        literal plain files that cannot be standard output (a relative one is placed under the tracked
+        working directory, an unquoted glob or an unplaceable one is unknown), none redirects its input
+        or output, only the first has its own text, and no link of the chain is `|&`."""
+        for at, (items, _, merged) in enumerate(chain):
+            if merged or (at and self.stdin_texts(items)):
                 return False
             if any(item.kind == "redir" and (item.op in _READING_REDIRECTS or item.op in _WRITING_REDIRECTS
                                              or item.op == ">&") for item in items):
                 return False
             words = [item for item in items if item.kind == "word"]
-            first = cls.program_at(words)
+            first = self.program_at(words)
             if first >= len(words):
                 return False
             name = posixpath.basename(words[first].word.value)
@@ -555,17 +581,24 @@ class _Reader:
                 if any(item.word.value != "-" for item in arguments):
                     return False
             elif name == "tee":
-                if any(item.word.option or item.word.expanded or item.word.brace
-                       or posixpath.normpath(item.word.value) in _STDOUT_FILES for item in arguments):
+                if any(item.word.option or item.word.expanded or item.word.brace or item.word.glob
+                       or self.place(item.word.value, False) in (None, *_STDOUT_FILES) for item in arguments):
                     return False
             else:
                 return False
         return True
 
-    def command(self, items, feeders=()):
+    def unknown_script(self, text=None):
+        """Record a script row with no line count and no path, and scan `text` (a body) for outside paths."""
+        for path in dict.fromkeys(_named_paths(text or "")):
+            self.touch(path)
+        self.scripts.append({"program": self.interpreter, "lines": None, "paths": []})
+
+    def command(self, items, feeders=(), merged=False):
         """Fold one simple command; return whether its standard input reaches a program other than a data reader.
 
-        `feeders` are the earlier (items, reaches) commands of its pipeline."""
+        `feeders` are the earlier (items, reaches, merged) commands of its pipeline, `merged` whether its own
+        incoming pipe is `|&`."""
         words = [item for item in items if item.kind == "word"]
         first = self.program_at(words)
         for item in words[:first]:
@@ -579,16 +612,19 @@ class _Reader:
         self.script_input = self.interpreter is not None and not self.code_only(self.interpreter, arguments)
         if self.script_input and any(item.kind == "redir" and item.op in _READING_REDIRECTS for item in items):
             raise _Refuse("a program fed standard input from a file the console cannot read")
+        # A pipe and a here-document or here-string both feeding one standard input: bash lets the text
+        # replace the pipe, zsh (MULTIOS) reads the pipe and then the text, so the script is unknown.
+        self.mixed = bool(feeders) and self.script_input and bool(self.stdin_texts(items))
         if feeders and self.script_input and not self.stdin_texts(items):
             source = next((at for at in range(len(feeders) - 1, -1, -1)
                            if not feeders[at][1] and self.stdin_texts(feeders[at][0])), None)
             if source is None:
                 raise _Refuse("a program fed standard input the console cannot read")
             text, lines = self.stdin_texts(feeders[source][0])[-1]
-            if self.passes_on(feeders[source:]):
+            if source == 0 and not merged and self.passes_on(feeders):
                 self.script(self.interpreter, text, lines)
             else:
-                self.scripts.append({"program": self.interpreter, "lines": None, "paths": []})
+                self.unknown_script()
         if program is not None:
             if program.expanded or program.value in _RESERVED:
                 raise _Refuse("a program the console cannot read")
@@ -686,7 +722,9 @@ class _Reader:
                 self.argument(word)
         elif item.kind == "heredoc" or item.op == "<<<":
             text = "\n".join(item.body) if item.kind == "heredoc" else word.value
-            if self.script_input:
+            if self.script_input and item.on_stdin and self.mixed:
+                self.unknown_script(text)
+            elif self.script_input and item.on_stdin:
                 self.script(self.interpreter, text, text.count("\n") + 1 if item.kind == "redir" else len(item.body))
             else:
                 for path in dict.fromkeys(_named_paths(text)):
