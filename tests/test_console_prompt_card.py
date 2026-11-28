@@ -487,6 +487,63 @@ class CommandSummaryTest(unittest.TestCase):
         command = "bash 3<<'B'\nrm -rf /etc/b\nB" + self.PAD
         self.assertEqual(self.summary(command), self.want(["bash"], [], ["/etc/b"]))
 
+    def test_a_descriptor_script_beside_a_piped_text_is_unknown_not_the_pipe_text(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        result = self.summary("cat <<A | bash /dev/fd/3 3<<B\n: /tmp/pipe\nA\n: /tmp/script\nB" + self.PAD)
+        self.assertTrue(result["read"])
+        self.assertEqual(result["scripts"], [unknown])
+        self.assertLessEqual({"/tmp/pipe", "/tmp/script"}, set(result["outside"]))
+
+    def test_a_redirect_on_another_descriptor_does_not_hide_the_piped_script_text(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        result = self.summary("cat x.sh <<EOF | bash 3</dev/null\n:\nEOF" + self.PAD)
+        self.assertTrue(result["read"])
+        self.assertEqual(result["scripts"], [unknown])
+        known = self.summary("cat <<'EOF' | bash 3</dev/null\n: /tmp/x\nEOF" + self.PAD)
+        self.assertEqual(known["scripts"], [{"program": "bash", "lines": 1, "paths": ["/tmp/x"]}])
+        self.assertFalse(self.summary("cat <<'EOF' | bash 0</dev/null\n:\nEOF" + self.PAD)["read"])
+
+    def test_a_double_slash_spelling_of_standard_output_leaves_the_script_text_unknown(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        for alias in ("//dev/stdout", "//dev/fd/1", "//proc/self/fd/1", "//dev/tty"):
+            command = f"tee {alias} <<'EOF' | bash\n:\nEOF"
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+
+    def test_a_heredoc_the_shell_expands_does_not_keep_its_literal_line_count(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            "s=':\n:'\ncat <<EOF | bash\n$s\nEOF",
+            "cat <<EOF | bash\n: \\\n/tmp/x\nEOF",
+            "cat <<EOF | bash\n: ${HOME}\nEOF",
+            "cat <<< \"$HOME\" | bash",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+        for command in ("cat <<EOF | bash\n: /tmp/x\nEOF", "cat <<'EOF' | bash\n: $HOME \\\nEOF"):
+            with self.subTest(command=command):
+                scripts = self.summary(command + self.PAD)["scripts"]
+                self.assertEqual([(row["program"], row["lines"]) for row in scripts], [("bash", 1)])
+
+    def test_several_standard_input_texts_on_the_interpreter_make_one_unknown_row(self):
+        unknown = {"program": "bash", "lines": None, "paths": []}
+        rows = [
+            "bash <<A <<B\n: /tmp/first\nA\n: /tmp/second\nB",
+            "bash <<A <<< ': /tmp/second'\n: /tmp/first\nA",
+            "echo x | bash <<A <<B\n: /tmp/first\nA\n: /tmp/second\nB",
+        ]
+        for command in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [unknown])
+                self.assertEqual(result["outside"], ["/tmp/first", "/tmp/second"])
+
     def test_a_feeder_with_several_standard_input_texts_leaves_the_script_unknown_because_zsh_joins_them(self):
         unknown = {"program": "bash", "lines": None, "paths": []}
         rows = [

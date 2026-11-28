@@ -22,7 +22,10 @@ redirection on either command and no `|&` link; through any other feeder (`base6
 the script's text is not known, and its entry is `{"program": str, "lines": None, "paths": []}`: no line
 count and no path is claimed. Only text on standard input counts: `3<<EOF` and `{v}<<EOF` are not input.
 Text is also unknown when a pipe and a here-document or here-string both feed one standard input (bash
-keeps the text, zsh with MULTIOS reads both), so only the head of a pipeline may supply known text. Every
+keeps the text, zsh with MULTIOS reads both), so only the head of a pipeline may supply known text; the
+same holds for several texts on one interpreter (one unknown row), for a piped text the shell expands
+(an unquoted here-document with `$` or a backslash, an expanded here-string) and for a piped text beside
+a descriptor operand the interpreter reads instead. Every
 list is in first-seen order without duplicates. With no absolute `root` every path is outside.
 
 The grammar it reads, one left-to-right pass. Blanks are space and tab (a backslash before a newline is
@@ -163,6 +166,13 @@ class _Item:
     def on_stdin(self):
         """True unless a descriptor number (`3<<EOF`) or a named descriptor (`{v}<<EOF`) was written first."""
         return self.fd is None or self.fd == 0
+
+
+def _normal(path):
+    """`posixpath.normpath` with exactly two leading slashes folded to one: POSIX leaves `//x` to the
+    implementation, which on Linux and macOS is `/x`, so `//dev/stdout` is standard output."""
+    normal = posixpath.normpath(path)
+    return normal[1:] if normal.startswith("//") else normal
 
 
 def is_long(command):
@@ -424,10 +434,10 @@ class _Reader:
         if unplaceable or "$" in candidate or candidate.startswith("~"):
             return None
         if candidate.startswith("/"):
-            return posixpath.normpath(candidate)
+            return _normal(candidate)
         if self.base is None:
             return None
-        return posixpath.normpath(posixpath.join(self.base, candidate))
+        return _normal(posixpath.join(self.base, candidate))
 
     def touch(self, candidate, unplaceable=False):
         """Record a touched candidate; return its placed path (None when unplaceable or a device)."""
@@ -443,7 +453,7 @@ class _Reader:
         return placed
 
     def write(self, text):
-        if posixpath.normpath(text) not in _DEVICES and text:
+        if _normal(text) not in _DEVICES and text:
             self.writes[text] = True
 
     def operand(self, word, written):
@@ -554,6 +564,21 @@ class _Reader:
         return texts
 
     @staticmethod
+    def literal(items):
+        """True when no here-document or here-string text on standard input is changed by the shell before
+        the command reads it: an unquoted here-document with a `$` or a backslash, or an expanded
+        here-string, can have another text or line count than the one written."""
+        for item in items:
+            if not item.on_stdin:
+                continue
+            if item.kind == "heredoc" and not item.word.quoted \
+                    and any("$" in line or "\\" in line for line in item.body):
+                return False
+            if item.kind == "redir" and item.op == "<<<" and item.word.expanded:
+                return False
+        return True
+
+    @staticmethod
     def program_at(words):
         """The index of the program word among a command's words: the first that is neither the pipeline
         negation `!` nor a leading assignment."""
@@ -636,23 +661,29 @@ class _Reader:
         if program is not None and not self.reads_data(program.value, arguments):
             self.interpreter = program.value
         self.script_input = self.interpreter is not None and not self.code_only(self.interpreter, arguments)
-        if self.script_input and any(item.kind == "redir" and item.op in _READING_REDIRECTS for item in items):
+        if self.script_input and any(item.kind == "redir" and item.op in _READING_REDIRECTS and item.on_stdin
+                                     for item in items):
             raise _Refuse("a program fed standard input from a file the console cannot read")
-        # A pipe and a here-document or here-string both feeding one standard input: bash lets the text
-        # replace the pipe, zsh (MULTIOS) reads the pipe and then the text, so the script is unknown.
-        self.mixed = bool(feeders) and self.script_input and bool(self.stdin_texts(items))
-        if feeders and self.script_input and not self.stdin_texts(items):
+        # A pipe and a here-document or here-string both feeding one standard input, or several texts doing
+        # so: bash keeps the last, zsh (MULTIOS) reads them all, so the script is one unknown row.
+        texts = self.stdin_texts(items)
+        self.joined = self.script_input and (bool(feeders and texts) or len(texts) > 1)
+        if self.joined:
+            self.scripts.append({"program": self.interpreter, "lines": None, "paths": []})
+        if feeders and self.script_input and not texts:
             source = next((at for at in range(len(feeders) - 1, -1, -1)
                            if not feeders[at][1] and self.stdin_texts(feeders[at][0])), None)
             if source is None:
                 raise _Refuse("a program fed standard input the console cannot read")
-            texts = self.stdin_texts(feeders[source][0])
-            # Several texts on one standard input: bash keeps the last, zsh (MULTIOS) joins them all.
-            if len(texts) == 1 and source == 0 and not merged and self.passes_on(feeders):
-                self.script(self.interpreter, *texts[0])
+            fed = self.stdin_texts(feeders[source][0])
+            # Several texts on one standard input: bash keeps the last, zsh (MULTIOS) joins them all. A
+            # text the shell expands, or a script read from a descriptor operand, is not the pipe text.
+            if (len(fed) == 1 and source == 0 and not merged and self.passes_on(feeders)
+                    and self.literal(feeders[source][0]) and not self.descriptor_script(arguments, items)):
+                self.script(self.interpreter, *fed[0])
             else:
                 self.unknown_script()
-        elif self.script_input and self.descriptor_script(arguments, items):
+        elif self.script_input and not self.joined and self.descriptor_script(arguments, items):
             self.unknown_script()
         if program is not None:
             if program.expanded or program.value in _RESERVED:
@@ -751,8 +782,9 @@ class _Reader:
                 self.argument(word)
         elif item.kind == "heredoc" or item.op == "<<<":
             text = "\n".join(item.body) if item.kind == "heredoc" else word.value
-            if self.script_input and item.on_stdin and self.mixed:
-                self.unknown_script(text)
+            if self.script_input and item.on_stdin and self.joined:
+                for path in dict.fromkeys(_named_paths(text)):
+                    self.touch(path)
             elif self.script_input and item.on_stdin:
                 self.script(self.interpreter, text, text.count("\n") + 1 if item.kind == "redir" else len(item.body))
             else:
