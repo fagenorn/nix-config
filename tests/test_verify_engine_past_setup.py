@@ -318,6 +318,7 @@ class LedgerContractTest(unittest.TestCase):
     def test_its_tables_are_the_ledgers(self):
         self.assertEqual(engine_run_evidence.RUN_ID_RE.pattern, engine_ledger.RUN_ID_RE.pattern)
         self.assertEqual(engine_run_evidence.NAME_RE.pattern, procedure_terms.NAME_RE.pattern)
+        self.assertEqual(engine_run_evidence.DROPPED_FINDING_RE.pattern, engine_ledger.DROPPED_FINDING_RE.pattern)
         self.assertEqual(engine_run_evidence.RUN_MEMBERS, frozenset(engine_ledger.RUN_MEMBERS))
         self.assertEqual(engine_run_evidence.OPTIONAL_RUN_MEMBERS, frozenset(engine_ledger.OPTIONAL_RUN_MEMBERS))
         self.assertEqual(engine_run_evidence.STAGES, procedure_terms.STAGES)
@@ -334,6 +335,14 @@ class LedgerContractTest(unittest.TestCase):
                 "stop_reached": {"step": "s", "stop": "tool-denied", "need": "owner-decision"},
                 "run_done": {}, "run_continued": {"step": "s", "visit": 1}}
         lines = [{"event": kind, "at": at, **members} for kind, members in good.items()]
+        lines.append({"event": "transition_taken", "at": at, **good["transition_taken"],
+                      "dropped": [{"finding": "full-rereview:1", "criteria": ["AC2"]}]})
+        one = {"finding": "full-rereview:1", "criteria": ["AC2"]}
+        lines += [{"event": "transition_taken", "at": at, **good["transition_taken"], "dropped": bad}
+                  for bad in (False, None, [], "x", [one, "y"], [{**one, "finding": "full-rereview:0"}],
+                              [{**one, "finding": "Full:1"}], [{**one, "criteria": []}], [{**one, "criteria": [""]}],
+                              [{**one, "criteria": "AC2"}], [{**one, "extra": 1}], [{"finding": "full-rereview:1"}])]
+        lines.append({"event": "run_done", "at": at, "dropped": [one]})
         entered = good["step_entered"]
         lines += [{"event": "step_entered", "at": at, **{**entered, **bad}} for bad in (
             {"step": "Bad"}, {"step": 1}, {"visit": 0}, {"visit": True}, {"visit": "1"}, {"stage": "elsewhere"},

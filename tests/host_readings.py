@@ -194,6 +194,7 @@ PARTS: dict[str, Part] = {
         }""", DARWIN_HOSTS, needs="darwin-machine"),
     "console": Part("""c: u: {
       command = u.agentConsole.command;
+      lockBump = u.agentConsole.lockBump;
       launcher = "${c.home-manager.extraSpecialArgs.inputs.self.packages.${c.nixpkgs.hostPlatform.system}.agent-platform.launchers.console}";
       home = u.home.homeDirectory;
       path = u.agentConsole.path;
@@ -207,6 +208,7 @@ PARTS: dict[str, Part] = {
     }""", ("anis-desktop",), needs="x86_64-linux-builder"),
     "console-darwin": Part("""c: u: {
       command = u.agentConsole.command;
+      lockBump = u.agentConsole.lockBump;
       launcher = "${c.home-manager.extraSpecialArgs.inputs.self.packages.${c.nixpkgs.hostPlatform.system}.agent-platform.launchers.console}";
       path = u.agentConsole.path;
       home = u.home.homeDirectory;

@@ -20,6 +20,7 @@ from agent_tools.canonical import parse_rfc3339_utc, reject_duplicate_keys, reje
 
 RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+DROPPED_FINDING_RE = re.compile(r"^[a-z][a-z0-9-]*:[1-9][0-9]*$")
 RUN_MEMBERS = frozenset(("host", "inputs", "issue", "platform_revision", "procedure", "project",
                          "run", "sequence", "started"))
 OPTIONAL_RUN_MEMBERS = frozenset(("tracker", "parent", "starter"))
@@ -44,7 +45,8 @@ EVENT_MEMBERS = {
     "run_continued": (),
     "run_done": (),
 }
-EVENT_OPTIONAL = {"result_stored": ("head", "outcome", "startup_seconds"),"run_continued": ("step", "visit")}
+EVENT_OPTIONAL = {"result_stored": ("head", "outcome", "startup_seconds"), "transition_taken": ("dropped",),
+                  "run_continued": ("step", "visit")}
 
 
 ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
@@ -63,6 +65,14 @@ class EvidenceError(Exception):
 
 def _int(value: object, least: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= least
+
+
+def _is_dropped(one: object) -> bool:
+    """One entry of a `transition_taken`'s `dropped`, as the ledger reads it."""
+    return (isinstance(one, dict) and set(one) == {"finding", "criteria"}
+            and isinstance(one["finding"], str) and DROPPED_FINDING_RE.fullmatch(one["finding"]) is not None
+            and isinstance(one["criteria"], list) and bool(one["criteria"])
+            and all(isinstance(c, str) and c for c in one["criteria"]))
 
 
 def _name(value: object) -> bool:
@@ -94,7 +104,8 @@ MEMBER_CHECKS = {
     "spend_usd": _amount, "startup_seconds": _amount,
     "tokens": lambda v: isinstance(v, dict) and set(v) == TOKEN_COUNTS and all(_int(n, 0) for n in v.values()),
     "head": _text(HEAD_RE), "stage": lambda v: v in STAGES, "role": lambda v: v in ROLES,
-    "need": lambda v: v in NEEDS, "wait": lambda v: v in WAITS, "result": _name}
+    "need": lambda v: v in NEEDS, "wait": lambda v: v in WAITS, "result": _name,
+    "dropped": lambda v: isinstance(v, list) and bool(v) and all(_is_dropped(one) for one in v)}
 
 
 def _strict(text: str) -> object:

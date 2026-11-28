@@ -221,6 +221,7 @@ agent-workflow-tests *args:
     tests/test_engine_fixture.py \
     tests/test_engine_stubbed_run.py \
     tests/test_engine_stubbed_guard.py \
+    tests/test_engine_stubbed_findings.py \
     tests/test_engine_stubbed_world.py \
     tests/test_proof_run.py \
     tests/test_bound_issues.py \
@@ -290,6 +291,8 @@ agent-workflow-tests *args:
     tests/test_program_bridge.py \
     tests/test_look_gate_end_to_end.py \
     tests/test_forge_claim.py \
+    tests/test_forge_claims_takeover.py \
+    tests/test_claim_takeover_readings.py \
     tests/test_forge_issue.py \
     tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
@@ -434,6 +437,12 @@ agent-workflow-tests *args:
     tests/test_console_cleanup_check.py \
     tests/test_adopt_hook_check.py \
     tests/test_console_lock_wait_check.py \
+    tests/test_console_lock_bump_tree.py \
+    tests/test_console_lock_bump_build.py \
+    tests/test_console_lock_bump_forge.py \
+    tests/test_console_lock_bump.py \
+    tests/test_console_lock_bump_service.py \
+    tests/test_console_lock_bump_observed.py \
     tests/test_console_serve_probe_check.py \
     tests/test_console_run_line_check.py \
     tests/test_verify_engine_past_implement.py \
