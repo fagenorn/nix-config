@@ -7,7 +7,9 @@ origin (the worktree commands) or a fake `gh` (the forge commands).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -18,11 +20,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import issue_setup
+from agent_tools.delivery import issue_setup, outline_record
 from agent_tools.project_contract import resolve_project
 
 from .forge_world import ForgeWorld
 from .guard_policy_world import REPO_ROOT, GuardPolicyWorld, install_platform_manifest_in_environ
+from .outline_runs import RunTree
 
 TIER = "integration"
 
@@ -746,6 +749,206 @@ class ForgeCommandTest(unittest.TestCase):
         self.assertEqual((code, report["verdict"], report["error"]), (2, "error", "usage"))
         code, report = run_setup(self.env, "lane", "--repo", SLUG, "--issue", "7")
         self.assertEqual((code, report["verdict"], report["error"]), (2, "error", "usage"))
+
+
+OUTLINE_STEPS = [
+    {"id": "start", "kind": "call"},
+    {"id": "plan-preflight", "kind": "command", "command": "issue-setup", "subcommand": "plan-preflight"},
+    {"id": "outline", "kind": "agent", "role": "planner", "reply": "outline.reply.json"},
+    {"id": "outline-note", "kind": "command", "command": "issue-setup", "subcommand": "outline-note"},
+    {"id": "build", "kind": "call"},
+]
+SLICE_STEPS = [{"id": "build", "kind": "command", "command": "issue-setup", "subcommand": "outline-slice"}]
+OUTLINE_SLICES = [{"n": 1, "change": "first", "files": ["a.py"], "test": "t1", "assertion": "a1"},
+                  {"n": 2, "change": "second", "files": ["b.py"], "test": "t2", "assertion": "a2"}]
+REPLY = {"approach": "Do it.", "rejected": "Not that.", "slices": OUTLINE_SLICES,
+         "criteria": [{"id": "AC1", "kind": "code", "slice": 1, "text": "one"}],
+         "risks": ["r1"], "questions": ["q1"]}
+SNAPSHOT_FACTS = {"details": "SETUP FACT", "merged_refs": [{"closes": False, "number": 5}],
+                  "integration_branch": "main", "issue_text": "# t", "routed": None, "route_detail": "why"}
+OUTLINE_BRANCH = "issue-7-earlier-title"
+OUTLINE_SUBCOMMANDS = ("outline-read", "outline-note", "outline-preflight", "outline-slice", "outline-built")
+
+
+class OutlineCommandsTest(unittest.TestCase):
+    def setUp(self):
+        self.world = GuardPolicyWorld(self)
+        self.root = self.world.project(SLUG, SLUG, register=False)
+        self.forge = ForgeWorld(self)
+        gh_dir = gh_only(self.forge, self.world.tmp / "gh-only")
+        self.env = {**self.world.env, "PATH": f"{gh_dir}{os.pathsep}{self.world.env['PATH']}",
+                    "FORGE_WORLD": str(self.forge.state), "CLAUDE_CONFIG_DIR": str(self.world.tmp / "claude")}
+        for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+            self.env.pop(name, None)
+        self.tree = RunTree(self, self.world.tmp / "runs")
+        self.run_dir = self.tree.run("outline", OUTLINE_STEPS, issue=7, inputs={"issue": 7})
+        self.holder = f"host-a/{self.run_dir.name}"
+        self.worktree = self.world.tmp / "issue-worktree"
+        self.world.git(self.root, "worktree", "add", "--no-track", "-b", OUTLINE_BRANCH, str(self.worktree),
+                       "origin/main")
+        (self.worktree / "fixture").mkdir()
+        (self.worktree / "fixture" / "one.txt").write_text("one\n", encoding="utf-8")
+        self.world.git(self.worktree, "add", "fixture/one.txt")
+        self.world.git(self.worktree, "commit", "--quiet", "-m", "one")
+        self.record = {"verdict": "posted", "comment_id": 9, "digest": "d", "text": "TEXT", "outline": REPLY,
+                       "reads": ["/w/a.py"], "branch": OUTLINE_BRANCH, "worktree_path": str(self.worktree),
+                       **SNAPSHOT_FACTS}
+
+    def command(self, *argv):
+        """`issue_setup.main(argv)` in this process: (exit status, the JSON object it printed)."""
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(out):
+            code = issue_setup.main(list(argv))
+        return code, json.loads(out.getvalue())
+
+    def holder_issue(self, holder=None, issue="7"):
+        return ["--holder", holder or self.holder, "--issue", issue]
+
+    def store_note(self):
+        self.tree.result(self.run_dir, "outline-note", 1, self.record)
+
+    def store_setup(self, reply=REPLY):
+        self.tree.result(self.run_dir, "outline", 1, reply)
+        self.tree.result(self.run_dir, "start", 1, {k: SNAPSHOT_FACTS[k] for k in ("details", "merged_refs")})
+        self.tree.result(self.run_dir, "plan-preflight", 1, {
+            "branch": OUTLINE_BRANCH, "worktree_path": str(self.worktree),
+            **{k: SNAPSHOT_FACTS[k] for k in ("integration_branch", "issue_text", "routed", "route_detail")}})
+
+    def read_digest(self):
+        return self.command("outline-read", *self.holder_issue())[1]["digest"]
+
+    def note(self, digest=None):
+        return self.command("outline-note", "--repo", SLUG, *self.holder_issue(),
+                            "--digest", digest or self.read_digest())
+
+    def build_slice(self, item, build):
+        """A done `outline-slice` child for `item` holding `build`, under an `outline-build` child of the root."""
+        parents = [c for c in self.built_parents if c]
+        if not parents:
+            parent = self.tree.run("outline-build", OUTLINE_STEPS, issue=7, inputs={"issue": 7},
+                                   parent=self.run_dir.name)
+            self.tree.call(self.run_dir, "build", 1, parent, 0, 1)
+            self.built_parents.append(parent)
+        parent = self.built_parents[0]
+        child = self.tree.run("outline-slice", SLICE_STEPS, issue=7, parent=parent.name,
+                              inputs={"issue": 7, "item": item})
+        self.tree.result(child, "build", 1, build)
+        self.tree.done(child)
+        self.tree.call(parent, "slices", 1, child, item - 1, 2)
+
+    built_parents: list
+
+    def test_outline_slice_takes_the_approved_record_not_the_worktree_or_a_fresh_derivation(self):
+        self.store_note()
+        plans = self.worktree / ".superpowers" / "plans" / "issue-7"
+        plans.mkdir(parents=True)
+        altered = {**REPLY, "slices": [OUTLINE_SLICES[0], {**OUTLINE_SLICES[1], "change": "ALTERED"}]}
+        (plans / "outline.json").write_text(json.dumps(altered), encoding="utf-8")
+        (plans / "plan.md").write_text("ALTERED", encoding="utf-8")
+
+        code, report = self.command("outline-slice", *self.holder_issue(), "--item", "2")
+
+        self.assertEqual((code, report["verdict"]), (0, "read"), report)
+        self.assertEqual(report["slice"], OUTLINE_SLICES[1])
+        self.assertNotIn("ALTERED", json.dumps(report))
+        self.assertEqual((report["branch"], report["worktree_path"], report["integration_branch"]),
+                         (OUTLINE_BRANCH, str(self.worktree), "main"))
+        for member in ("details", "merged_refs", "routed", "route_detail", "reads"):
+            self.assertEqual(report[member], self.record[member], member)
+        self.assertEqual(report["outline"], "TEXT")
+        self.assertIn("fixture/one.txt", report["diff"])
+
+    def test_outline_read_renders_the_latest_outline_with_no_length_refusal(self):
+        reply = {**REPLY, "approach": "x" * (issue_setup.PLAN_LIMIT + 1)}
+        self.tree.result(self.run_dir, "outline", 1, reply)
+
+        code, report = self.command("outline-read", *self.holder_issue())
+
+        text = outline_record.render(7, reply)
+        self.assertEqual((code, report["verdict"], report["text"]), (0, "read", text))
+        self.assertEqual(report["digest"], issue_setup.plan_digest(text))
+
+    def test_outline_note_posts_the_reviewed_text_and_prints_the_approved_record(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+        self.store_setup()
+        projects = self.world.tmp / "claude" / "projects" / "p"
+        projects.mkdir(parents=True)
+        (projects / "sess-1.jsonl").write_text(json.dumps({"message": {"content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/w/read.py"}}]}}) + "\n",
+            encoding="utf-8")
+        (self.run_dir / "sessions").mkdir()
+        (self.run_dir / "sessions" / "outline.1.json").write_text(json.dumps({"session": "sess-1"}),
+                                                                  encoding="utf-8")
+        read = self.command("outline-read", *self.holder_issue())[1]
+
+        code, report = self.note(read["digest"])
+
+        self.assertEqual((code, report["verdict"]), (0, "posted"), report)
+        marker = f"<!-- engine-plan:{read['digest']} run:{self.holder} -->"
+        self.assertEqual([c["body"] for c in self.forge.stored()], [f"{marker}\n\n{read['text']}"])
+        self.assertEqual(report["comment_id"], self.forge.stored()[0]["id"])
+        self.assertEqual((report["digest"], report["text"], report["outline"], report["reads"]),
+                         (read["digest"], read["text"], REPLY, ["/w/read.py"]))
+        for member, value in outline_record.snapshot(self.run_dir).items():
+            self.assertEqual(report[member], value, member)
+        self.assertFalse((self.worktree / ".superpowers").exists())
+
+    def test_outline_note_refuses_a_changed_digest_and_an_oversized_outline_at_publication(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+        self.store_setup()
+
+        code, report = self.note("0" * 16)
+        self.assertEqual((code, report["error"]), (1, "plan_changed"), report)
+
+        big = {**REPLY, "approach": "x" * (issue_setup.PLAN_LIMIT + 1)}
+        self.tree.result(self.run_dir, "outline", 2, big)
+        code, report = self.note(issue_setup.plan_digest(outline_record.render(7, big)))
+        self.assertEqual((code, report["error"]), (1, "plan_too_large"), report)
+        self.assertEqual(self.forge.stored(), [])
+
+    def test_outline_preflight_prints_the_slice_numbers_and_the_adopted_location(self):
+        self.store_note()
+
+        code, report = self.command("outline-preflight", *self.holder_issue())
+
+        self.assertEqual((code, report), (0, {"verdict": "clear", "worktree_path": str(self.worktree),
+                                              "branch": OUTLINE_BRANCH, "integration_branch": "main",
+                                              "slices": [1, 2]}))
+
+    def test_outline_slice_of_a_slice_already_built_is_built_and_an_unknown_one_is_refused(self):
+        self.store_note()
+        self.built_parents = []
+        self.build_slice(1, {"status": "done", "commit": "b"})
+
+        self.assertEqual(self.command("outline-slice", *self.holder_issue(), "--item", "1"),
+                         (0, {"verdict": "built"}))
+        code, report = self.command("outline-slice", *self.holder_issue(), "--item", "3")
+        self.assertEqual((code, report["error"]), (1, "slice_unknown"), report)
+
+    def test_outline_built_sums_the_slices_up(self):
+        self.store_note()
+        self.built_parents = []
+        self.build_slice(1, {"status": "done", "start_head": "a", "commit": "b", "acceptance": "acc1",
+                             "sensitive": False, "notes": "n1", "tests": ["t1", "t2"]})
+
+        code, report = self.command("outline-built", *self.holder_issue())
+        self.assertEqual((code, report["error"]), (1, "slice_unbuilt"), report)
+
+        self.build_slice(2, {"status": "done", "start_head": "b", "commit": "c", "acceptance": "acc2",
+                             "sensitive": True, "notes": "n2", "tests": ["t2", "t3"]})
+        code, report = self.command("outline-built", *self.holder_issue())
+        self.assertEqual((code, report), (0, {
+            "verdict": "built", "status": "done", "start_head": "a", "commit": "c", "acceptance": "acc2",
+            "sensitive": True, "ineligible": False, "notes": "n1\n\nn2", "tests": ["t1", "t2", "t3"]}))
+
+    def test_outline_commands_refuse_an_unknown_holder_or_another_issue(self):
+        self.store_note()
+        extra = {"outline-note": ["--repo", SLUG, "--digest", "d"], "outline-slice": ["--item", "1"]}
+        for name in OUTLINE_SUBCOMMANDS:
+            for holder, issue in (("h/nope", "7"), (self.holder, "8")):
+                with self.subTest(name, holder=holder, issue=issue):
+                    code, report = self.command(name, *self.holder_issue(holder, issue), *extra.get(name, []))
+                    self.assertEqual((code, report["error"]), (1, "run_unknown"), report)
 
 
 if __name__ == "__main__":
