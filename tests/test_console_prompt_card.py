@@ -536,13 +536,17 @@ class CommandSummaryTest(unittest.TestCase):
 
     def test_jq_or_yq_reading_its_program_from_standard_input_shows_a_script_line(self):
         for program in ("jq -n -f -", "jq -n -f /dev/stdin", "jq -nf /dev/stdin", "jq --from-file -",
+                        "jq -f -n /dev/stdin", "jq -f --arg a b /dev/stdin", "jq --arg a b -f /dev/stdin",
+                        "yq -f -n /dev/stdin",
                         "jq --from-file /dev/stdin", "jq --from-file=/dev/stdin", "yq -f -",
                         "yq --from-file /dev/stdin"):
             with self.subTest(program=program):
                 result = self.summary(f"{program} <<'EOF'\n$ENV\nEOF\n# " + "x" * 220)
                 self.assertEqual([(entry["program"], entry["lines"]) for entry in result["scripts"]],
                                  [(program.split()[0], 1)])
-        for program in ("jq .", "jq -n -f prog.jq", "jq --from-file prog.jq", "yq .a", "yq -f prog.yq"):
+        for program in ("jq .", "jq -n -f prog.jq", "jq --from-file prog.jq", "yq .a", "yq -f prog.yq",
+                        "jq --arg label --from-file=/dev/stdin .", "jq --arg label '--from-file=/dev/stdin' .",
+                        "jq --argjson v 1 .", "jq -f prog.jq /dev/stdin", "jq --indent 2 ."):
             with self.subTest(program=program):
                 result = self.summary(f"{program} <<'EOF'\n$ENV\nEOF" + self.PAD)
                 self.assertTrue(result["read"])
