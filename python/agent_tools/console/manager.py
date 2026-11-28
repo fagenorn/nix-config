@@ -95,7 +95,7 @@ reached its supervisor, so no session started. `launch_or_fresh(launcher, launch
 and any other exception, a timeout and any other `LaunchFailed` included (the supervisor may have
 accepted the session), and an exception of the fresh call propagate.
 A launch given `notices` (the service passes `sprints.notice_block` of the project's open notices
-of the other sprints, #1118) and `unheld` (a block naming the work the stopped manager held) carries
+of the other sprints) and `unheld` (a block naming the work the stopped manager held) carries
 the non-empty ones, in that order, between the lead's instruction and `The goal: `, a blank
 line on each side and `The goal: ` starting its own line: the lead without its final `The goal: `,
 a blank line, the blocks separated by blank lines, a blank line, then `The goal: ` and the goal.
