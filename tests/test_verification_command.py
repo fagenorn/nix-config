@@ -287,12 +287,37 @@ class LintEntryPointTest(JustCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.scratch, ignore_errors=True)
 
+    def formatter_stub(self) -> tuple[dict[str, str], Path]:
+        """An environment whose `nix` names a tools directory holding a `dotnet` that logs
+        its arguments and exits 0, so a live-tree lint builds no SDK and restores no
+        packages. HOME is temporary so no cached real SDK wins over the stub."""
+        root = self.tmp()
+        log = root / "dotnet.log"
+        tools = root / "tools"
+        (tools / "bin").mkdir(parents=True)
+        dotnet = tools / "bin" / "dotnet"
+        dotnet.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(log))}\nexit 0\n", "utf-8")
+        dotnet.chmod(0o755)
+        nix = root / "bin" / "nix"
+        nix.parent.mkdir()
+        nix.write_text(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(str(tools))}\n", "utf-8")
+        nix.chmod(0o755)
+        env = child_env(
+            PATH=f"{nix.parent}{os.pathsep}{os.environ['PATH']}",
+            HOME=str(self.tmp()), TMPDIR=str(self.tmp()))
+        return env, log
+
     def test_lint_passes_on_a_copy_of_the_tree(self):
-        result = self.run_just(["lint"], self.scratch, child_env())
+        env, log = self.formatter_stub()
+        result = self.run_just(["lint"], self.scratch, env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[-1],
             "lint: passed: agnostic-lint, context-map-lint, skill-lint, dotnet-format")
+        self.assertEqual(
+            log.read_text("utf-8").splitlines(),
+            [f"format {self.scratch / 'dotnet' / 'AgentTools.slnx'} --verify-no-changes"])
 
     def test_an_unformatted_csharp_file_fails_lint_naming_dotnet_format(self):
         fixtures = REPO_ROOT / "tests" / "fixtures" / "dotnet-format"
@@ -359,11 +384,15 @@ class LintEntryPointTest(JustCase):
         map_path.write_text(original.replace("| Check | Verification |", "| Check | Claims |"),
                             "utf-8")
         self.addCleanup(map_path.write_text, original, "utf-8")
-        result = self.run_just(["lint"], self.scratch, child_env())
+        env, log = self.formatter_stub()
+        result = self.run_just(["lint"], self.scratch, env)
         stderr = module_stderr(result)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("lint: context-map-lint failed (exit 1)", stderr)
         self.assertEqual(stderr[-1], "lint: failed: context-map-lint")
+        self.assertEqual(
+            log.read_text("utf-8").splitlines(),
+            [f"format {self.scratch / 'dotnet' / 'AgentTools.slnx'} --verify-no-changes"])
         self.assertFalse([l for l in stderr if l.startswith("lint: agnostic-lint failed")
                           or l.startswith("lint: skill-lint failed")])
 
