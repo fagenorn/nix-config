@@ -1,7 +1,7 @@
 """A probe of `cut_engine.py`: one thread spawns a long process, then another writes the cut point.
 
 Run as `cut_spawn_probe.py <run_dir>` with `ENGINE_CUT_AT` naming `step_entered` of step `x`, visit 1, first
-occurrence, in the run `<procedure>#1` of `<run_dir>`, and `ENGINE_CUT_LOG` set. The spawned process starts in its
+occurrence, in the first run of a procedure under `<run_dir>`, and `ENGINE_CUT_LOG` set. The spawned process starts in its
 own session, as the engine's do, and no ledger event ever records it: the cut kills this process's group while
 that process, spawned just before, is still alive. It prints that process's pid before the cut.
 """
