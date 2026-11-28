@@ -6,8 +6,9 @@ import json
 import re
 import unittest
 
-from agent_tools.delivery import engine_core, engine_session
+from agent_tools.delivery import engine_core, engine_reply, engine_session, issue_setup
 from agent_tools.delivery.engine_core import RunGroup, Stop
+from agent_tools.delivery.engine_graders import GRADERS, dropped
 from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
 
 TIER = "fast"
@@ -15,7 +16,7 @@ TIER = "fast"
 SHA = "a" * 40
 NAMED = [{"severity": "important", "file": "a.py:1", "failing_input": "f('')", "summary": "s", "kind": "other"}]
 GRADING = [{"id": "AC1", "met": True, "evidence": "test_x"}]
-PREFLIGHT = {"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"}
+PREFLIGHT = {"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t", "plan": ""}
 IMPLEMENTED = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "n", "tests": [],
                "acceptance": [{"id": "AC1", "text": "t", "kind": "code", "result": "r"}],
                "sensitive": False, "ineligible": False}
@@ -78,6 +79,63 @@ class DirectProcedureTest(unittest.TestCase):
                 for line in lines:
                     self.assertIn("/srv/p/wt", line)
 
+    def test_the_implementer_builds_an_approved_plan_and_applies_the_eligibility_check_to_no_planned_issue(self):
+        text = (PROCEDURES / "direct-implement.md").read_text(encoding="utf-8")
+        planned = text.split("\nBEGIN APPROVED PLAN\n", 1)[0]
+        self.assertIn("approved plan", planned)
+        self.assertIn("every task", planned)
+        self.assertIn("not eligibility", planned)
+
+    def test_the_implementer_is_given_the_plan_the_engine_verified_not_a_comment_it_picks_by_marker(self):
+        direct = load(PROCEDURES, "direct")["steps"]
+        implement = next(s for s in direct if s["id"] == "implement")
+        self.assertIn("run.holder", next(s for s in direct if s["id"] == "preflight")["in"])
+        self.assertIn("preflight.plan", implement["in"])
+        self.assertNotIn("run.holder", implement["in"])
+        template = (PROCEDURES / implement["prompt"]).read_text(encoding="utf-8")
+        for plan, block in (("THE PLAN", "BEGIN APPROVED PLAN\nTHE PLAN\nEND APPROVED PLAN"),
+                            ("", "BEGIN APPROVED PLAN\n\nEND APPROVED PLAN")):
+            text = engine_session.render_prompt(
+                template, tuple((path, plan if path == "preflight.plan" else f"<{path}>") for path in implement["in"]))
+            self.assertIn(block, text)
+        self.assertNotIn(issue_setup.PLAN_MARKER, template)
+
+    def test_the_planner_prompts_ask_for_a_read_only_shell_and_read_the_worktree_by_path(self):
+        steps = {s["id"]: s for s in load(PROCEDURES, "deliver")["steps"]}
+        for name in ("plan", "plan-revise"):
+            with self.subTest(name):
+                text = engine_session.render_prompt(
+                    (PROCEDURES / steps[name]["prompt"]).read_text(encoding="utf-8"),
+                    tuple((path, "/srv/p/wt" if path == "plan-preflight.worktree_path" else f"<{path}>")
+                          for path in steps[name]["in"]))
+                self.assertIn("shell only to read", text)
+                self.assertNotIn("Bash or Read", text)
+                self.assertIn("project root", text)  # the session's directory is not the worktree
+                self.assertIn("by their absolute path under /srv/p/wt", text)
+                self.assertIn(f"at most {issue_setup.PLAN_LIMIT} characters", text)
+                self.assertIn("task_numbers", text)
+                self.assertIn("evidence an empty string", text)  # a blocked reply fills every required member
+        plan = (PROCEDURES / steps["plan"]["prompt"]).read_text(encoding="utf-8")
+        gate = next(line for line in plan.splitlines() if "grep or deny gate" in line)
+        self.assertIn("Grep tool", gate)
+
+    def test_the_plan_reply_schema_takes_a_blocked_reply_with_empty_members_and_requires_the_task_numbers(self):
+        schema = json.loads((PROCEDURES / "plan.reply.json").read_text(encoding="utf-8"))
+        blocked = {"status": "blocked", "evidence": "", "tasks": [], "task_numbers": [], "declines": [],
+                   "notes": "Which option?"}
+        self.assertIsNone(engine_reply.reply_problem(schema, blocked))
+        self.assertIsNotNone(engine_reply.reply_problem(schema, {k: v for k, v in blocked.items()
+                                                                 if k != "task_numbers"}))
+        self.assertIsNotNone(engine_reply.reply_problem(schema, dict(blocked, task_numbers=["1"])))
+
+    def test_the_plan_review_reply_names_only_important_and_critical_findings(self):
+        schema = json.loads((PROCEDURES / "plan-review.reply.json").read_text(encoding="utf-8"))
+        finding = {"severity": "important", "file": "plan.md", "failing_input": "x", "summary": "s", "kind": "other"}
+        for severity, admitted in (("important", True), ("critical", True), ("minor", False)):
+            with self.subTest(severity):
+                reply = {"verdict": "findings", "findings": [dict(finding, severity=severity)]}
+                self.assertEqual(engine_reply.reply_problem(schema, reply) is None, admitted)
+
     def test_the_direct_review_roles(self):
         direct = load(PROCEDURES, "direct")
         roles = {s["id"]: s["role"] for s in direct["steps"] if s["kind"] == "agent"}
@@ -114,6 +172,60 @@ class DirectProcedureTest(unittest.TestCase):
                 text = (PROCEDURES / f"direct-{kind}-{route}.md").read_text(encoding="utf-8")
                 texts.add(text.replace(fix, "FIX").replace(independent, "INDEPENDENT").replace(review, "REVIEW"))
             self.assertEqual(len(texts), 1, kind)
+
+    def test_every_re_review_prompt_carries_the_sentence_that_other_criteria_are_graded_never_findings(self):
+        sentence = ("A code criterion that is not met, or has no evidence, is an Important finding; "
+                    "criteria of other kinds are graded (give what you observed), never findings.")
+        self.assertIn(sentence, (PROCEDURES / "direct-review.md").read_text(encoding="utf-8"))
+        for name in ("direct-rereview-full.md", "direct-rereview-lite.md", "direct-rereview-escalated.md"):
+            with self.subTest(name=name):
+                self.assertIn(sentence, (PROCEDURES / name).read_text(encoding="utf-8"))
+
+    def test_every_fix_and_re_review_prompt_leaves_the_findings_the_engine_dropped_alone(self):
+        fix = ("A finding that names only criteria of other kinds than code (evidence, human or note) in its "
+               "restates or summary is dropped by the engine: leave it alone, neither fixing nor declining it.")
+        rereview = ("A finding of the review that names only criteria of other kinds than code (evidence, human "
+                    "or note) in its restates or summary was dropped by the engine: do not report it again.")
+        for route in ("full", "lite", "escalated"):
+            for name, sentence in ((f"direct-fix-{route}.md", fix), (f"direct-rereview-{route}.md", rereview)):
+                with self.subTest(name=name):
+                    self.assertIn(sentence, (PROCEDURES / name).read_text(encoding="utf-8"))
+
+    def test_a_re_review_finding_naming_only_an_evidence_criterion_settles_clean_and_rides_on_its_transition(self):
+        evidence = {"id": "AC2", "text": "t", "kind": "evidence", "result": "r"}
+        implemented = {**IMPLEMENTED, "acceptance": [*IMPLEMENTED["acceptance"], evidence]}
+        fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": [], "declines": []}
+        finding = {**NAMED[0], "summary": "AC2 has no evidence", "kind": "other", "restates": "AC2"}
+        events = (reported("preflight", "clear", PREFLIGHT) + reported("implement", "done", implemented)
+                  + lite_round(lite_review("findings", NAMED)) + reported("lite-fix", "done", fix)
+                  + reported("lite-rereview", "findings", {"verdict": "findings", "findings": [finding]}))
+
+        replay = replayed(events)
+
+        self.assertIsInstance(replay.action, engine_core.Done)
+        self.assertIn(engine_core.Transition("lite-settled", "clean", "done"), replay.transitions)
+        settled = [t for t in replay.transitions if t.step == "lite-settled"][0]
+        self.assertEqual(settled.dropped, ({"finding": "lite-rereview:1", "criteria": ["AC2"]},))
+
+    def test_every_step_whose_grader_drops_findings_reads_the_acceptance(self):
+        steps = [s for s in load(PROCEDURES, "direct")["steps"]
+                 if s["kind"] == "decide" and GRADERS[s["grader"]].drops is dropped]
+        self.assertEqual({s["id"] for s in steps}, {"lite-tally", "escalated-tally", "full-tally",
+                                                    "lite-settled", "escalated-settled", "full-settled"})
+        for one in steps:
+            with self.subTest(step=one["id"]):
+                self.assertIn("implement.acceptance", one["in"])
+
+    def test_every_settled_step_reads_the_earlier_findings_its_re_review_may_restate(self):
+        direct = load(PROCEDURES, "direct")
+        for route in ("lite", "escalated", "full"):
+            settled, rereview = step(direct, f"{route}-settled"), step(direct, f"{route}-rereview")
+            restatable = [p for p in rereview["in"] if p.endswith(".findings")]
+            with self.subTest(route=route):
+                self.assertEqual(len(restatable), 2)
+                for path in restatable:
+                    self.assertIn(path, settled["in"])
+                self.assertEqual(settled["in"][0], f"{route}-rereview.verdict")
 
     def test_a_blocked_group_reaches_its_tally(self):
         direct = load(PROCEDURES, "direct")

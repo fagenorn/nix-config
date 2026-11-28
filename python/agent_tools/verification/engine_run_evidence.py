@@ -19,6 +19,7 @@ from agent_tools.canonical import parse_rfc3339_utc, reject_duplicate_keys, reje
 
 RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+DROPPED_FINDING_RE = re.compile(r"^[a-z][a-z0-9-]*:[1-9][0-9]*$")
 RUN_MEMBERS = frozenset(("host", "inputs", "issue", "platform_revision", "procedure", "project",
                          "run", "sequence", "started"))
 OPTIONAL_RUN_MEMBERS = frozenset(("tracker", "parent", "starter"))
@@ -43,7 +44,8 @@ EVENT_MEMBERS = {
     "run_continued": (),
     "run_done": (),
 }
-EVENT_OPTIONAL = {"result_stored": ("head", "outcome", "startup_seconds"),"run_continued": ("step", "visit")}
+EVENT_OPTIONAL = {"result_stored": ("head", "outcome", "startup_seconds"), "transition_taken": ("dropped",),
+                  "run_continued": ("step", "visit")}
 
 
 class EvidenceError(Exception):
@@ -56,6 +58,14 @@ class EvidenceError(Exception):
 
 def _int(value: object, least: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= least
+
+
+def _is_dropped(one: object) -> bool:
+    """One entry of a `transition_taken`'s `dropped`, as the ledger reads it."""
+    return (isinstance(one, dict) and set(one) == {"finding", "criteria"}
+            and isinstance(one["finding"], str) and DROPPED_FINDING_RE.fullmatch(one["finding"]) is not None
+            and isinstance(one["criteria"], list) and bool(one["criteria"])
+            and all(isinstance(c, str) and c for c in one["criteria"]))
 
 
 def _strict(text: str) -> object:
@@ -144,4 +154,8 @@ def event(line: bytes) -> dict:
     for member, valid in checks.items():
         if member in loaded and not valid(loaded[member]):
             raise ValueError(f"{member} of {kind} is not valid")
+    dropped = loaded.get("dropped")
+    if "dropped" in loaded and (not isinstance(dropped, list) or not dropped
+                                or not all(_is_dropped(one) for one in dropped)):
+        raise ValueError(f"dropped of {kind} is not a non-empty list of findings and their criteria")
     return loaded

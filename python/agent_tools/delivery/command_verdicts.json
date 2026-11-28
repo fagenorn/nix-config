@@ -66,6 +66,7 @@
         "free",
         "held_by",
         "stale",
+        "takeover-eligible",
         "error"
       ]
     }
@@ -87,6 +88,14 @@
     "subcommands": {
       "note": [
         "posted",
+        "error"
+      ],
+      "plan-note": [
+        "posted",
+        "error"
+      ],
+      "plan-read": [
+        "read",
         "error"
       ],
       "preflight": [

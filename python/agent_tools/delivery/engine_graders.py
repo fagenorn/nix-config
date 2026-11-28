@@ -13,6 +13,17 @@ may be `None` (a group member that sent no reply reads as `None`, D6).
 - `direct-fixed`: a fix reply -> done or not-done (keys on the suffixes).
 - `direct-settled`: a re-review reply -> unusable, findings or clean (keys on
   the suffixes).
+- `plan-settled`: a plan review's reply, as `direct-settled` grades it, except that a `findings` verdict with no
+  finding at all is unusable.
+- The drop rule: a finding of kind `other` (a missing kind reads as `other`) naming at least one criterion of
+  `implement.acceptance` (its id in `restates` or `summary`, with no ASCII letter, digit or underscore beside it)
+  and only criteria whose kind is in `NON_CODE_KINDS` is dropped, whatever its severity. A finding of any other
+  kind (security included) is a defect in code and is kept. A finding whose `restates` names earlier findings
+  (`<step>:<n>`) is dropped only when every one of them is in the results and is itself dropped by that rule
+  (a settled step reads the earlier reviews' findings for this); otherwise it is kept. An id declared with two
+  kinds has no kind, so its findings are kept. The four review graders above (the tallies and `direct-settled`)
+  grade as if a dropped finding were absent, and their `drops` lists, for the steps whose `.verdict` they read,
+  each one as `<step>:<place>`.
 - `verify-fixed`: a verify fix reply -> unrelated (a test and its evidence), not-done or done.
 - `verify-narrowing`: the fix review (read by the suffixes `.findings`, `.whitespace_insignificant` and
   `.whitespace_evidence`, so a second ask of the review is graded the same), the round and the fix's range -> unusable (a finding that is not minor
@@ -30,10 +41,132 @@ from typing import Callable, Mapping
 from agent_tools.delivery import lane_rule
 
 
+NON_CODE_KINDS: tuple[str, ...] = ("evidence", "human", "note")
+
+
+def _no_drops(results: Mapping[str, object]) -> tuple[dict, ...]:
+    return ()
+
+
 @dataclass(frozen=True)
 class Grader:
     outcomes: tuple[str, ...]
     grade: Callable[[Mapping[str, object]], str]
+    drops: Callable[[Mapping[str, object]], tuple[dict, ...]] = _no_drops
+
+
+def _names(text: str, cid: str) -> bool:
+    """Whether `cid` occurs in `text` with no ASCII letter, digit or underscore right before or after it."""
+    start = text.find(cid)
+    while start >= 0:
+        end = start + len(cid)
+        around = [text[start - 1] if start else "", text[end] if end < len(text) else ""]
+        if not any(ch.isascii() and (ch.isalnum() or ch == "_") for ch in around):
+            return True
+        start = text.find(cid, start + 1)
+    return False
+
+
+def _refs(text: str) -> list[tuple[str, int]]:
+    """Each finding name `<step>:<n>` in `text`: a step name with a lowercase letter, and a place of 1 or more.
+
+    A place too long to be one reads as 0.
+    """
+    refs = []
+    for place, ch in enumerate(text):
+        if ch != ":" or text[place + 1:place + 2] not in tuple("123456789"):
+            continue
+        start, end = place, place + 1
+        while start and (text[start - 1] in "-0123456789" or "a" <= text[start - 1] <= "z"):
+            start -= 1
+        while text[end:end + 1] != "" and text[end] in "0123456789":
+            end += 1
+        if any("a" <= c <= "z" for c in text[start:place]):
+            refs.append((text[start:place], int(text[place + 1:end]) if end - place <= 10 else 0))
+    return refs
+
+
+def _restates_a_finding(text: str) -> bool:
+    return bool(_refs(text))
+
+
+def _kinds(acceptance: object) -> dict[str, object]:
+    """Each criterion id and its kind; an id declared with two kinds has none, so its findings are kept."""
+    if not isinstance(acceptance, list):
+        return {}
+    kinds: dict[str, object] = {}
+    for c in acceptance:
+        if isinstance(c, Mapping) and isinstance(c.get("id"), str) and c["id"].strip():
+            kinds[c["id"]] = c.get("kind") if kinds.setdefault(c["id"], c.get("kind")) == c.get("kind") else None
+    return kinds
+
+
+def _named(finding: Mapping[str, object], kinds: Mapping[str, object]) -> list[str]:
+    texts = [finding[m] for m in ("restates", "summary") if isinstance(finding.get(m), str)]
+    return [cid for cid in kinds if any(_names(text, cid) for text in texts)]
+
+
+def _own(finding: Mapping[str, object], kinds: Mapping[str, object]) -> list[str]:
+    """The criteria a finding of kind `other`, restating none, names in `restates` or `summary`.
+
+    Empty unless every one named is a non-code criterion.
+    """
+    restates = finding.get("restates")
+    if finding.get("kind", "other") != "other" or (isinstance(restates, str) and _restates_a_finding(restates)):
+        return []
+    named = _named(finding, kinds)
+    return named if all(kinds[cid] in NON_CODE_KINDS for cid in named) else []
+
+
+def _about(finding: Mapping[str, object], results: Mapping[str, object], kinds: Mapping[str, object]) -> list[str]:
+    """The criteria a finding is dropped for, none when it is kept: its own (`_own`), or, when it restates findings
+    (kind `other` only, naming no code criterion itself), those of each finding it restates that `results` holds
+    and `_own` drops."""
+    restates = finding.get("restates")
+    refs = _refs(restates) if isinstance(restates, str) else []
+    if not refs:
+        return _own(finding, kinds)
+    if any(kinds[cid] not in NON_CODE_KINDS for cid in _named(finding, kinds)):
+        return []
+    found: list[str] = []
+    for step, place in refs:
+        earlier = results.get(f"{step}.findings")
+        original = earlier[place - 1] if isinstance(earlier, list) and 1 <= place <= len(earlier) else None
+        about = _own(original, kinds) if isinstance(original, Mapping) else []
+        if finding.get("kind", "other") != "other" or not about:
+            return []
+        found += [cid for cid in about if cid not in found]
+    return found
+
+
+def dropped(results: Mapping[str, object]) -> tuple[dict, ...]:
+    """Each finding of a step with a `.verdict` in `results` that is dropped, as `<step>:<place>` and its criteria;
+    the findings of a step without one (a settled step reads the earlier reviews that way) only resolve `restates`."""
+    kinds = _kinds(results.get("implement.acceptance"))
+    found = []
+    for path, value in results.items():
+        step = path[:-len(".findings")]
+        if not path.endswith(".findings") or not isinstance(value, list) or f"{step}.verdict" not in results:
+            continue
+        for place, finding in enumerate(value, 1):
+            about = _about(finding, results, kinds) if isinstance(finding, Mapping) else []
+            if about:
+                found.append({"finding": f"{step}:{place}", "criteria": about})
+    return tuple(found)
+
+
+def _kept(results: Mapping[str, object]) -> dict[str, object]:
+    """A copy of `results` whose `.findings` lists omit the findings `dropped` lists."""
+    kinds = _kinds(results.get("implement.acceptance"))
+    return {path: [f for f in value if not (isinstance(f, Mapping) and _about(f, results, kinds))]
+            if path.endswith(".findings") and isinstance(value, list) else value
+            for path, value in results.items()}
+
+
+def _own_findings(results: Mapping[str, object]) -> object:
+    """The findings of the step whose `.verdict` the results hold (the first), `None` when none."""
+    path = next((p for p in results if p.endswith(".verdict")), None)
+    return None if path is None else results.get(f"{path[:-len('.verdict')]}.findings")
 
 
 def _toy_tally(results: Mapping[str, object]) -> str:
@@ -88,6 +221,7 @@ def _ungraded(criteria: object, graded: object) -> list[object]:
 
 def _tally(results: Mapping[str, object], review: str, independent: str, *,
            absent: str, escalates: bool) -> str:
+    results = _kept(results)
     verdict, findings = results.get(f"{review}.verdict"), results.get(f"{review}.findings")
     if _absent(verdict, findings):
         return absent
@@ -134,12 +268,20 @@ def _direct_fixed(results: Mapping[str, object]) -> str:
 
 
 def _direct_settled(results: Mapping[str, object]) -> str:
-    verdict, findings = _suffixed(results, ".verdict"), _suffixed(results, ".findings")
+    results = _kept(results)
+    verdict, findings = _suffixed(results, ".verdict"), _own_findings(results)
     if _absent(verdict, findings):
         return "findings"
     if _unusable(findings):
         return "unusable"
     return "findings" if _blocking(findings) else "clean"
+
+
+def _plan_settled(results: Mapping[str, object]) -> str:
+    """`direct-settled`, except that a `findings` verdict naming no finding at all is `unusable`, never `clean`."""
+    if _suffixed(results, ".verdict") == "findings" and _own_findings(results) == []:
+        return "unusable"
+    return _direct_settled(results)
 
 
 def _verify_fixed(results: Mapping[str, object]) -> str:
@@ -188,13 +330,14 @@ GRADERS: Mapping[str, Grader] = {
     "direct-implemented": Grader(("ineligible", "task", "lite", "full"), _direct_implemented),
     "direct-lite-tally": Grader(
         ("no-review", "unusable", "escalate", "codex-unavailable", "findings", "clean"),
-        _direct_lite_tally),
+        _direct_lite_tally, drops=dropped),
     "direct-escalated-tally": Grader(
-        ("unusable", "codex-unavailable", "findings", "clean"), _direct_escalated_tally),
+        ("unusable", "codex-unavailable", "findings", "clean"), _direct_escalated_tally, drops=dropped),
     "direct-full-tally": Grader(
-        ("no-review", "unusable", "codex-unavailable", "findings", "clean"), _direct_full_tally),
+        ("no-review", "unusable", "codex-unavailable", "findings", "clean"), _direct_full_tally, drops=dropped),
     "direct-fixed": Grader(("done", "not-done"), _direct_fixed),
-    "direct-settled": Grader(("unusable", "findings", "clean"), _direct_settled),
+    "direct-settled": Grader(("unusable", "findings", "clean"), _direct_settled, drops=dropped),
+    "plan-settled": Grader(("unusable", "findings", "clean"), _plan_settled),
     "verify-fixed": Grader(("unrelated", "not-done", "done"), _verify_fixed),
     "verify-narrowing": Grader(("unusable", "findings", "rerun-failed-only", "rerun-all"), _verify_narrowing),
     "lane-rule": Grader(("direct", "standard"), _lane_rule),

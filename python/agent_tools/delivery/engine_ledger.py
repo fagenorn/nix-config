@@ -30,7 +30,9 @@ directory is either complete or absent.
 
 Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists, per type, the
 other members it always carries and `EVENT_OPTIONAL` the ones it may carry besides. `result_stored` carries the
-visit's graded `outcome` and, for a step that reports one, the worktree `head`. `run_continued` names the `step`
+visit's graded `outcome` and, for a step that reports one, the worktree `head`. `transition_taken` carries
+`dropped` when its step's grader dropped findings: the `<step>:<place>` of each and the criteria it named.
+`run_continued` names the `step`
 a continued run re-enters and, when it rewinds, the `visit` it rewinds to; a recorded one without them is still
 read, but `append_event` writes none without a `step`. A `call` event records that a step started the child run `child` for item `index`
 of `items`. An agent step visit that hits a usage limit or an API error, or gives no valid
@@ -107,6 +109,7 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
 # Members an event may carry besides `EVENT_MEMBERS`.
 EVENT_OPTIONAL: Mapping[str, frozenset[str]] = {
     "result_stored": frozenset(("head", "outcome", "startup_seconds")),
+    "transition_taken": frozenset(("dropped",)),
     "run_continued": frozenset(("step", "visit")),
 }
 # Members `append_event` requires beyond what a reader requires, so a ledger
@@ -115,6 +118,7 @@ APPEND_REQUIRED: Mapping[str, frozenset[str]] = {
     "run_continued": frozenset(("step",)),
 }
 HEAD_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+DROPPED_FINDING_RE = re.compile(r"^[a-z][a-z0-9-]*:[1-9][0-9]*$")
 
 
 class LedgerError(Exception):
@@ -359,6 +363,14 @@ def _instant(value: object, label: str) -> None:
         raise LedgerError(f"{label} is not an RFC3339 instant") from error
 
 
+def _is_dropped(one: object) -> bool:
+    """One entry of a `transition_taken`'s `dropped`: a `<step>:<place>` finding and the criteria it named."""
+    return (isinstance(one, dict) and set(one) == {"finding", "criteria"}
+            and isinstance(one["finding"], str) and DROPPED_FINDING_RE.fullmatch(one["finding"]) is not None
+            and isinstance(one["criteria"], list) and bool(one["criteria"])
+            and all(isinstance(c, str) and c for c in one["criteria"]))
+
+
 def _check_member(event: Mapping[str, object], key: str) -> None:
     value = event[key]
     kind = event["event"]
@@ -394,6 +406,9 @@ def _check_member(event: Mapping[str, object], key: str) -> None:
         if not isinstance(value, dict) or set(value) != TOKEN_COUNTS \
                 or not all(_is_int(count) and count >= 0 for count in value.values()):
             raise LedgerError("tokens must hold exactly the four non-negative counts")
+    elif key == "dropped":
+        if not isinstance(value, list) or not value or not all(_is_dropped(one) for one in value):
+            raise LedgerError("dropped must be a non-empty list of findings and their criteria")
     elif key == "head":
         if not isinstance(value, str) or not HEAD_RE.fullmatch(value):
             raise LedgerError("head is not a full lowercase hex commit id")

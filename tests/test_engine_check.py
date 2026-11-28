@@ -1229,7 +1229,12 @@ UNNAMED = {"findings": [{"severity": "critical", "file": "", "failing_input": ""
 SHIPPED_MEMBERS = {
     "contract": ({"capabilities": {"review.code": {"state": "available"}, "review.plan": {"state": "available"}}},
                  {"capabilities": {"review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}),
-    "preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
+    **{pre: ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t", "plan": "p"},)
+       for pre in ("preflight", "plan-preflight")},
+    "plan": ({"evidence": "p", "task_numbers": [1]},),
+    **{read: ({"text": "p", "digest": "d"},) for read in ("plan-read", "plan-reread")},
+    "plan-revise": ({"evidence": "p", "declines": [], "task_numbers": [1]},),
+    **{review: ({}, {"findings": []}, UNNAMED) for review in ("plan-review", "plan-rereview")},
     "issue": ({"text": "t", "body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "marked": False,
                "lane_paths": {"secrets": ["secrets/"]}},
               {"text": "t", "body": "", "marked": True, "lane_paths": None}),
@@ -1363,12 +1368,14 @@ class ShippedProcedureTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotIn("gh ", (PROCEDURES / name).read_text(encoding="utf-8"))
 
-    def test_only_the_worktree_step_mutates_and_it_names_its_check(self):
+    def test_only_the_worktree_step_and_the_planner_sessions_mutate_and_the_worktree_step_names_its_check(self):
         setup = load(PROCEDURES, "setup")
         self.assertEqual([s["id"] for s in setup["steps"] if s.get("mutates")], ["worktree"])
         self.assertEqual(step(setup, "worktree")["check"],
                          {"command": "issue-setup", "subcommand": "worktree-check"})
-        self.assertEqual([s["id"] for s in load(PROCEDURES, "deliver")["steps"] if s.get("mutates")], [])
+        # only the two planner sessions: they renew the claim before a long session and write no tracked file
+        self.assertEqual([s["id"] for s in load(PROCEDURES, "deliver")["steps"] if s.get("mutates")],
+                         ["plan", "plan-revise"])
 
     def test_each_setup_outcome_reaches_the_programs_stop(self):
         setup = load(PROCEDURES, "setup")
@@ -1393,7 +1400,7 @@ class ShippedProcedureTest(unittest.TestCase):
                          {"read": "lane", "error": "no-lane", "refused": "no-lane"})
         self.assertEqual(step(deliver, "issue")["in"], ["run.repo_root", "run.repo", "run.issue"])
         self.assertEqual(step(deliver, "lane")["on"],
-                         {"direct": "direct-lane", "standard": "standard-not-on-engine"})
+                         {"direct": "direct-lane", "standard": "plan-preflight"})
         for name in setup["stops"]:
             self.assertEqual(step(deliver, "start")["on"][name], name)
         for called, procedure in (("direct-lane", "direct"), ("verification", "verify")):
@@ -1406,8 +1413,30 @@ class ShippedProcedureTest(unittest.TestCase):
         for name in ("ineligible", "task", "direct-review", "direct-fix", "codex-unavailable", "verify"):
             self.assertIn(name, deliver["stops"])
         self.assertNotIn("needs-design", deliver["stops"])
-        for name in ("standard-not-on-engine", "no-lane", "ineligible"):
+        for name in ("no-lane", "ineligible"):
             self.assertEqual(deliver["stops"][name]["reenter"], "issue", name)
+        self.assertNotIn("standard-not-on-engine", deliver["stops"])
+
+    def test_a_plan_review_is_graded_on_its_findings_and_the_plan_is_posted_by_reference(self):
+        deliver = load(PROCEDURES, "deliver")
+        for review, graded, clear, blocked, read in (
+                ("plan-review", "plan-graded", "plan-note", "plan-revise", "plan-read"),
+                ("plan-rereview", "plan-regraded", "plan-revised-note", "plan-refused", "plan-reread")):
+            with self.subTest(review=review):
+                self.assertEqual(step(deliver, review)["on"]["pass"], graded)
+                self.assertEqual(step(deliver, review)["on"]["findings"], graded)
+                self.assertEqual(step(deliver, graded)["grader"], "plan-settled")
+                self.assertEqual(step(deliver, graded)["on"],
+                                 {"clean": clear, "findings": blocked, "unusable": blocked})
+                # one snapshot: the review reads the text the read step took, the note posts that digest
+                self.assertEqual(step(deliver, read)["subcommand"], "plan-read")
+                self.assertEqual(step(deliver, read)["on"]["read"], review)
+                self.assertIn(f"{read}.text", step(deliver, review)["in"])
+                tasks = "plan.task_numbers" if review == "plan-review" else "plan-revise.task_numbers"  # no stale file
+                self.assertEqual(step(deliver, read)["in"], ["run.issue", "plan-preflight.worktree_path", tasks])
+                self.assertEqual(step(deliver, clear)["in"], ["run.repo", "run.issue", "plan-preflight.worktree_path",
+                                                              "run.holder", f"{read}.digest", tasks])
+        self.assertEqual([step(deliver, n)["subcommand"] for n in ("plan-note", "plan-revised-note")], ["plan-note"] * 2)
 
     def test_the_worktree_mismatch_is_read_before_the_claim(self):
         coverage = shipped_coverage("setup")
@@ -1438,7 +1467,7 @@ class DeclarationTest(unittest.TestCase):
             "acquire": ("acquired", "already_held", "held_by", "lost_to", "error"),
             "release": ("released", "not_held", "error"),
             "renew": ("renewed", "not_held", "error"),
-            "status": ("free", "held_by", "stale", "error")}))
+            "status": ("free", "held_by", "stale", "takeover-eligible", "error")}))
         self.assertEqual(commands["diff-scope"].outcomes(None), ("ok", "failed"))
         self.assertIsNone(commands["diff-scope"].outcomes("x"))
         self.assertEqual(commands["forge-claim"].outcomes("acquire"),

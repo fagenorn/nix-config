@@ -8,7 +8,7 @@
     {"id": "claim", "stage": "building", "kind": "command", "holds": "live", "command": "forge-claim", "subcommand": "status",
      "in": ["run.repo", "run.issue", "run.holder"], "mutates": true,
      "check": {"command": "forge-claim", "subcommand": "status"},
-     "on": {"free": "done", "held_by": "done", "stale": "child-stop", "error": "child-stop",
+     "on": {"free": "done", "held_by": "done", "stale": "child-stop", "takeover-eligible": "child-stop", "error": "child-stop",
              "refused": "child-stop"}}
   ]
 }
